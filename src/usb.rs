@@ -1,7 +1,7 @@
 //! USB descriptor discovery and a separate guarded WinUSB claim/release probe.
 //! The probe does not send HCI or reset the controller.
 use crate::error::{AppError, Result};
-use rusb::{self, Device, GlobalContext, DeviceDescriptor};
+use rusb::{self, Device, GlobalContext, DeviceDescriptor, DeviceHandle};
 
 pub const BE200_VID: u16 = 0x8087;
 pub const BE200_PID: u16 = 0x0036;
@@ -89,9 +89,9 @@ pub fn inspect(vid:u16,pid:u16) -> Result<()> {
     Ok(())
 }
 
-/// R1.3b: one intentional, short-lived WinUSB claim of interface 0.
-/// This does not send HCI, reset the bus, change alternate settings or write USB payloads.
-pub fn probe_winusb() -> Result<()> {
+/// R1.3b/R1.4: claim ONLY interface 0 on exactly one matching BE200.
+/// No USB reset, kernel-driver detach, power cycling or interface 1 manipulation.
+pub fn open_be200_claimed() -> Result<DeviceHandle<GlobalContext>> {
     let available = devices()?;
     let mut target: Option<Device<GlobalContext>> = None;
     for dev in available.iter() {
@@ -110,16 +110,23 @@ pub fn probe_winusb() -> Result<()> {
     let desc = device.device_descriptor()?;
     if (desc.class_code(), desc.sub_class_code(), desc.protocol_code()) != (0xe0, 0x01, 0x01) {
         return Err(AppError::Driver(format!(
-            "Unexpected device class {:02x}/{:02x}/{:02x}, refusing to claim interface",
+            "Unexpected USB device class {:02x}/{:02x}/{:02x}",
             desc.class_code(), desc.sub_class_code(), desc.protocol_code(),
         )));
     }
+
     println!("Target confirmed: 8087:0036 {}", location(&device));
     println!("Opening BE200 via libusb/WinUSB...");
-    let mut handle = device.open()?;
+    let handle = device.open()?;
     println!("Open: OK");
     handle.claim_interface(0)?;
     println!("Claim interface 0: OK");
+    Ok(handle)
+}
+
+/// R1.3b: one intentional, short-lived WinUSB claim of interface 0.
+pub fn probe_winusb() -> Result<()> {
+    let handle = open_be200_claimed()?;
     handle.release_interface(0)?;
     println!("Release interface 0: OK");
     println!("Probe complete. No HCI commands or USB reset were issued.");

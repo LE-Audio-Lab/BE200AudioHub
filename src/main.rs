@@ -1,4 +1,6 @@
 mod driver;
+mod hci;
+mod intel;
 mod error;
 mod logging;
 mod usb;
@@ -7,12 +9,13 @@ use error::{AppError, Result};
 use std::env;
 
 fn usage() -> &'static str {
-    "BE200AudioHub v0.1 (R1.3b WinUSB verification)\n\
+    "BE200AudioHub v0.1 (R1.4 Intel HCI Read Version)\n\
      Usage:\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
        be200hub usb inspect [VID:PID]\n\
        be200hub usb probe\n\
+       be200hub hci version\n\
        be200hub driver status\n\
        be200hub driver verify\n\
        be200hub driver backup [--out DIRECTORY]\n\
@@ -50,6 +53,10 @@ fn run(args: &[String]) -> Result<()> {
             let (vid, pid) = usb::parse_vid_pid(c)?;
             usb::inspect(vid, pid)
         }
+        [a, b] if a == "hci" && b == "version" => {
+            driver::verify()?;
+            hci::read_intel_version()
+        },
         [a, b] if a == "driver" && b == "status" => driver::status(),
         [a, b] if a == "driver" && b == "verify" => driver::verify(),
         [a, b] if a == "usb" && b == "probe" => {

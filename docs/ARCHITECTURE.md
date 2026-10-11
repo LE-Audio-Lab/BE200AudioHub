@@ -22,3 +22,9 @@ Later:
 Do not replay PCAP payloads blindly, install unsigned drivers, toggle 3.3 V power from these commands, or infer LE Audio from the Windows Settings UI.
 
 No GPL/copyleft source copied from Linux btintel/btusb, BTstack or Zephyr. Their implementations are design references; licensing review is required before incorporating code.
+
+## R1.4: First own HCI command
+
+`be200hub hci version` explicitly verifies the WinUSB service, then sends **only** Intel HCI Read Version `05 FC 01 FF` using EP0 USB class control OUT `bmRequestType=0x20, bRequest=0`. It reads Interrupt IN EP `0x81`, reassembles HCI event fragments (the Intel response can exceed the 64-byte USB packet size), matches Command Complete opcode `0xFC05`, checks status, parses TLVs `0x10` CNVi TOP / `0x11` CNVr TOP / `0x1C` Image Type, then releases interface 0. No reset, firmware download, general command injection, or radio configuration is performed.
+
+Evidence: BE200 002 PortCycle command `0xFC05` with parameter `FF` and 003 ColdBoot Bootloader/Operational response; Linux btintel.c uses the same 0xFF selector. A successful USB claim alone is *not* a successful HCI query. Windows on-machine validation required.

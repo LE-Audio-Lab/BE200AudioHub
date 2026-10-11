@@ -27,11 +27,13 @@ cargo run -- driver status
 # After manually binding *only* BE200 (8087:0036) to WinUSB:
 cargo run -- driver verify
 cargo run -- usb probe
+# First explicit Intel HCI query, after WinUSB binding:
+cargo run -- hci version
 # Administrator PowerShell; exports the current Intel OEM driver without changing binding:
 cargo run -- driver backup
 ```
 
-R1.1/R1.2 and the new R1.3a commands do **not change PnP binding**: no HCI commands, interface claiming, USB reset, power cycle, or firmware download. R1.3a `driver backup` only writes a private snapshot and uses `pnputil /export-driver`. R1.3b `usb probe` attempts to open, claim, and release interface 0 (no HCI traffic) after verifying a WinUSB binding.
+R1.1/R1.2 and the new R1.3a commands do **not change PnP binding**: no HCI commands, interface claiming, USB reset, power cycle, or firmware download. R1.3a `driver backup` only writes a private snapshot and uses `pnputil /export-driver`. R1.3b `usb probe` attempts to open, claim, and release interface 0 (no HCI traffic) after verifying a WinUSB binding. R1.4 `hci version` is an explicitly invoked, allow-listed Intel `0xFC05` query; it does send one HCI command but does not reset, pair or download firmware.
 
 See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs/WINUSB_BINDING.md) before any WinUSB work.
 
