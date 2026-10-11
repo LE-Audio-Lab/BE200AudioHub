@@ -10,3 +10,5 @@
 *.log
 /fixtures/private/
 .DS_Store
+/backups/
+/driver-backups/

@@ -8,7 +8,8 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 
 - **R1.1 — Bootstrap:** Rust CLI, VF-style async rotating logger, read-only diagnostics.
 - **R1.2 — Discovery:** libusb enumeration and USB/configuration/interface/endpoint descriptors without opening or claiming the device.
-- **R1.3 (later):** explicit, reversible WinUSB binding of the **BE200 only**, with driver backup.
+- **R1.3a — implemented / pending Windows validation:** inspect BE200 native Intel driver binding and export a verified backup.
+- **R1.3b (later):** explicit, reversible WinUSB binding of the **BE200 only**, with driver rollback.
 - **R1.4+ (later):** Intel HCI, signed firmware initialization, independent BLE scan, then LE Audio.
 
 ## Run on Windows
@@ -22,9 +23,14 @@ cargo run -- doctor
 cargo run -- usb list
 cargo run -- usb list --target-only
 cargo run -- usb inspect 8087:0036
+cargo run -- driver status
+# Administrator PowerShell; exports the current Intel OEM driver without changing binding:
+cargo run -- driver backup
 ```
 
-R1.1/R1.2 are **read-only**: no device driver changes, HCI commands, interface claiming, USB reset, power cycle, or firmware download.
+R1.1/R1.2 and the new R1.3a commands do **not change PnP binding**: no HCI commands, interface claiming, USB reset, power cycle, or firmware download. R1.3a `driver backup` only writes a private snapshot and uses `pnputil /export-driver`.
+
+See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) before any WinUSB work.
 
 **Windows caveat:** `rusb`/libusb may enumerate an Intel-driver-bound device but may be unable to open it or read every descriptor until it has a suitable WinUSB-compatible binding. A missing descriptor is not proof of unsupported hardware. Consult `docs/USB_DISCOVERY.md`.
 
