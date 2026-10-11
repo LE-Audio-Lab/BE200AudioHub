@@ -63,7 +63,10 @@ pub fn read_intel_version() -> Result<()> {
             )));
         }
 
-        let mut packet = [0u8; 64];
+        // Use max HCI event receive size (as btusb does), not the endpoint's
+        // 64-byte max *packet* size. A BE200 version event can be ~96 bytes
+        // and USB should be allowed to finish it in one submitted transfer.
+        let mut packet = [0u8; 260];
         let mut stream = EventAssembler::default();
         let started = Instant::now();
         let mut ignored_events = 0usize;
