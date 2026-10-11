@@ -13,7 +13,7 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 - **R1.4 — validated on BE200:** first independent Intel `0xFC05` HCI query through WinUSB.
 - **R1.5a — validated offline:** Intel SFI/DDC structure.
 - **R1.5b — independently cold-booted on BE200 (2026-10-11):** Rust + WinUSB loaded the exact Windows 24.60.0.4 OEM firmware; 3,960/3,960 USB Secure Sends match the original Intel 003 capture byte-for-byte; the controller confirmed Operational image 0x03 and accepted DSBR/DDC. See [Experiment 004](docs/EXPERIMENT_004_R1_5B.md).
-- **R1.6 (later):** independent BLE scan, then LE Audio.
+- **R1.6a/b (code ready; local validation pending):** standard LE/ISO capability query and bounded passive extended BLE scanning. Both use operational firmware without resetting it.
 
 ## Run on Windows
 
@@ -32,6 +32,11 @@ cargo run -- driver verify
 cargo run -- usb probe
 # First explicit Intel HCI query, after WinUSB binding:
 cargo run -- hci version
+# R1.6, with BE200 already Operational; no new cold boot:
+cargo run -- hci capabilities
+cargo run -- ble scan --seconds 10
+# Only for explicitly consenting local diagnostics:
+# cargo run -- ble scan --seconds 10 --show-addresses
 # Offline SFI/DDC inspection: NO USB access or firmware writes
 cargo run -- firmware inspect "C:\\path\\to\\ibt-0291-0291.sfi" "C:\\path\\to\\ibt-0291-0291.ddc"
 # Offline review (no USB traffic):
@@ -56,6 +61,10 @@ See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs
 ## Firmware safety
 
 R1.5a provides an **offline** SFI/DDC inspector. R1.5b uses the user-extracted **Windows 24.60.0.4** 980,840-byte Intel SFI-format image (SHA256 `939a9b32...`) and the 4-byte DDC observed on Windows. The Linux SFI is *not* allowed for the live loader. There is an offline `firmware plan`, read-only `firmware preflight`, and separate **explicit, one-attempt firmware boot** command requiring a cold Bootloader state, exact BE200 variant, ECDSA SBE, pinned image SHA256, a PCAP-exact USB replay digest and `--confirm-cold-boot` flag. It does not switch external power or perform a reset-to-bootloader. It is not yet validated on hardware. The firmware's Intel cryptographic signature is **not independently verified by the host**, only checked by the controller's Secure Boot process. Read [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md) and [docs/FIRMWARE_BOOT.md](docs/FIRMWARE_BOOT.md) first.
+
+## R1.6 safety and privacy
+
+`hci capabilities` sends only allowlisted read-only HCI queries (including `0x2060` LE Buffer Size v2). `ble scan` configures LE Meta/Extended Advertising event masks, passive 1M scanning for 1–30 seconds, requests controller-native timeout, explicitly disables scan before releasing USB interface 0, and prints anonymized ephemeral advertiser IDs by default. It sends no Scan Requests, connections, pairing, HCI Reset, firmware or audio payloads. See [R1.6 runbook](docs/R1_6_HCI_SCAN.md). A crashed process is covered by the controller scan-duration timeout, not guaranteed host-side cleanup.
 
 ## Logging
 

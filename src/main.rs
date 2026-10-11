@@ -1,5 +1,8 @@
 mod driver;
 mod boot;
+mod hci_wire;
+mod hci_capabilities;
+mod ble_scan;
 mod firmware;
 mod hci;
 mod intel;
@@ -18,6 +21,8 @@ fn usage() -> &'static str {
        be200hub usb inspect [VID:PID]\n\
        be200hub usb probe\n\
        be200hub hci version\n\
+       be200hub hci capabilities\n\
+       be200hub ble scan --seconds <1..30> [--show-addresses]\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -62,6 +67,14 @@ fn run(args: &[String]) -> Result<()> {
         [a, b] if a == "hci" && b == "version" => {
             driver::verify()?;
             hci::read_intel_version()
+        },
+        [a, b] if a == "hci" && b == "capabilities" => hci_capabilities::query(),
+        [a,b,c,seconds] if a == "ble" && b == "scan" && c == "--seconds" => {
+            ble_scan::scan(ble_scan::parse_seconds(seconds)?, false)
+        },
+        [a,b,c,seconds,flag] if a == "ble" && b == "scan"
+            && c == "--seconds" && flag == "--show-addresses" => {
+            ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
         },
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
