@@ -1,4 +1,5 @@
 mod driver;
+mod firmware;
 mod hci;
 mod intel;
 mod error;
@@ -16,6 +17,7 @@ fn usage() -> &'static str {
        be200hub usb inspect [VID:PID]\n\
        be200hub usb probe\n\
        be200hub hci version\n\
+       be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub driver status\n\
        be200hub driver verify\n\
        be200hub driver backup [--out DIRECTORY]\n\
@@ -56,6 +58,17 @@ fn run(args: &[String]) -> Result<()> {
         [a, b] if a == "hci" && b == "version" => {
             driver::verify()?;
             hci::read_intel_version()
+        },
+        [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
+            firmware::inspect(sfi, None)
+        },
+        [a, b, c, sfi, d, ddc] if a == "firmware" && b == "inspect"
+            && c == "--sfi" && d == "--ddc" => {
+            firmware::inspect(sfi, Some(ddc))
+        },
+        [a, b, sfi] if a == "firmware" && b == "inspect" => firmware::inspect(sfi, None),
+        [a, b, sfi, ddc] if a == "firmware" && b == "inspect" => {
+            firmware::inspect(sfi, Some(ddc))
         },
         [a, b] if a == "driver" && b == "status" => driver::status(),
         [a, b] if a == "driver" && b == "verify" => driver::verify(),

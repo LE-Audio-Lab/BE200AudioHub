@@ -29,6 +29,8 @@ cargo run -- driver verify
 cargo run -- usb probe
 # First explicit Intel HCI query, after WinUSB binding:
 cargo run -- hci version
+# Offline SFI/DDC inspection: NO USB access or firmware writes
+cargo run -- firmware inspect "C:\\path\\to\\ibt-0291-0291.sfi" "C:\\path\\to\\ibt-0291-0291.ddc"
 # Administrator PowerShell; exports the current Intel OEM driver without changing binding:
 cargo run -- driver backup
 ```
@@ -38,6 +40,10 @@ R1.1/R1.2 and the new R1.3a commands do **not change PnP binding**: no HCI comma
 See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs/WINUSB_BINDING.md) before any WinUSB work.
 
 **Windows caveat:** `rusb`/libusb may enumerate an Intel-driver-bound device but may be unable to open it or read every descriptor until it has a suitable WinUSB-compatible binding. A missing descriptor is not proof of unsupported hardware. Consult `docs/USB_DISCOVERY.md`.
+
+## Firmware safety
+
+R1.5a adds an **offline-only** SFI/DDC structure inspector. Do not confuse parsing a signed image with cryptographic signature validation or controller flashing. Firmware downloads/boot commands remain intentionally unavailable until R1.5b has validated bootloader state, Intel security-engine selection and recovery behavior. See [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md).
 
 ## Logging
 

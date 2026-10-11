@@ -28,3 +28,7 @@ No GPL/copyleft source copied from Linux btintel/btusb, BTstack or Zephyr. Their
 `be200hub hci version` explicitly verifies the WinUSB service, then sends **only** Intel HCI Read Version `05 FC 01 FF` using EP0 USB class control OUT `bmRequestType=0x20, bRequest=0`. It reads Interrupt IN EP `0x81`, reassembles HCI event fragments (the Intel response can exceed the 64-byte USB packet size), matches Command Complete opcode `0xFC05`, checks status, parses TLVs `0x10` CNVi TOP / `0x11` CNVr TOP / `0x1C` Image Type, then releases interface 0. No reset, firmware download, general command injection, or radio configuration is performed.
 
 Evidence: BE200 002 PortCycle command `0xFC05` with parameter `FF` and 003 ColdBoot Bootloader/Operational response; Linux btintel.c uses the same 0xFF selector. A successful USB claim alone is *not* a successful HCI query. Windows on-machine validation required.
+
+## R1.5a: Offline signed firmware structure
+
+`be200hub firmware inspect <SFI_PATH> [DDC_PATH]` only uses `std::fs::read`; it does not touch WinUSB or an HCI interface. Parsing checks CSS versions, RSA/ECDSA/hybrid layout, HCI command record boundaries, 4-byte aligned data group boundaries, <=252-byte Secure Send data fragment planning, embedded Intel 0xFC0E boot parameter and DDC record lengths. R1.5b must confirm controller SBE type and explicitly gate firmware transactions behind hardware bootloader state. Parsing does **not** cryptographically authenticate Intel's signature, select the correct SBE path or prove the firmware matches the running controller.
