@@ -57,6 +57,12 @@ Source authority: `shared_resource/btintel.c` from the project quarry, particula
 
 ## R1.5b follow-on
 
-Run `firmware plan --sfi <path> --ddc <path>` to generate and check the **fully offline** first-boot transfer plan. It checks the exact uploaded reference firmware SHA256 values; no firmware writes occur.
+Run `firmware plan --sfi <path> --ddc <path>` with the recovered **Windows 24.60.0.4 SFI** and the 4-byte DDC to check the fully offline first-boot plan and the 003-PCAP-exact USB wire hash. The earlier Linux file continues to work with `firmware inspect`, but is deliberately rejected by `firmware plan`. No USB writes occur.
 
-A separate `firmware boot --sfi <path> --ddc <path> --confirm-cold-boot` command is now available but **not hardware-validated**. It will abort automatically if the controller is already Operational or the security/hardware TLVs do not match the reference BE200. Read `FIRMWARE_BOOT.md` before trying any power cycle or firmware write.
+A read-only `firmware preflight --sfi <path> --ddc <path>` checks the Windows image, verifies WinUSB and queries the current controller image without firmware download. A separate `firmware boot --sfi <path> --ddc <path> --confirm-cold-boot` command is available but **NOT hardware-validated**. It fails closed unless the controller is in the expected BE200 Bootloader state. Read `FIRMWARE_BOOT.md` and pass offline/local tests first.
+
+## Windows 24.60.0.4 live boot profile
+
+The recommended first independent BE200 boot profile is now the **recovered Windows OEM signed image** `be200_intel_windows_24.60.0.4_usb_verified.sfi` (980840 bytes, SHA256 `939a9b32ad11d8962abfd10cb24d5bd90d7848218af4ea438cf6490243a618d4`), not the Linux Build 145 image. The Linux image remains useful for comparative offline `firmware inspect`, but is deliberately rejected by `firmware plan/preflight/boot`.
+
+The Windows image yields **3967 embedded commands / 3957 DATA fragments / 3960 total Secure Sends**, 996036 HCI-wire bytes, wire SHA256 `55200bef2efadd869500baf58909623fbf23c8d26e6218458cbf7a1fd8923531`; all 3960 packets were independently compared byte-for-byte to the supplied USBPcap capture with zero mismatches. The existing four-byte `ibt-0291-0291.ddc` contains the same ID `0x0128` record transmitted by the Windows driver.

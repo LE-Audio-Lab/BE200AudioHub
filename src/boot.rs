@@ -226,6 +226,37 @@ fn validate_bootloader(v: &intel::Version) -> Result<()> {
     Ok(())
 }
 
+/// Read-only firmware/controller compatibility check. Does not touch power
+/// and does not send Secure Send, preboot DDC, boot or reset opcodes.
+pub fn preflight(sfi_path: &str, ddc_path: &str) -> Result<()> {
+    let fw = firmware::load_pinned_be200_pair(sfi_path, ddc_path)?;
+    driver::verify()?;
+    println!("R1.5b Windows OEM firmware preflight (READ ONLY)");
+    println!("  Profile: {}", firmware::BE200_WINDOWS_FW_PROFILE);
+    println!("  Secure Send replay: {} packets, {} bytes, SHA256 {}",
+        fw.fragments.len(), fw.replay_bytes, fw.replay_sha256);
+    let mut controller = IntelTransport::new(usb::open_be200_claimed()?);
+    let outcome = (|| -> Result<()> {
+        let version = controller.read_version()?;
+        println!("  Live image: {:?} ({})", version.image_type,
+            version.image_type.map(intel::image_description).unwrap_or("unknown"));
+        println!("  CNVi TOP: {:?}, CNVr TOP: {:?}, HW variant: {:?}",
+            version.cnvi_top, version.cnvr_top, version.hardware_variant());
+        println!("  Secure Boot: {:?}, SBE type: {:?}",
+            version.secure_boot, version.sbe_type);
+        if version.image_type == Some(3) {
+            println!("  Result: ALREADY OPERATIONAL. No firmware download is needed now.");
+            println!("  Cold-boot experiment requires separately controlled BE200 power and a new read-only preflight.");
+            return Ok(());
+        }
+        validate_bootloader(&version)?;
+        println!("  Result: BOOTLOADER READY — matching BE200, signed-image profile and ECDSA SBE.");
+        println!("  Firmware has NOT been sent. Use the separately confirmed one-shot boot command only after operator approval.");
+        Ok(())
+    })();
+    controller.release(outcome)
+}
+
 /// First *hardware* test is always an explicit operator action. No automatic
 /// USB reset, brownout, downgrade or retry. Once an error happens, abort.
 pub fn boot_once(sfi_path: &str, ddc_path: &str) -> Result<()> {
@@ -233,8 +264,11 @@ pub fn boot_once(sfi_path: &str, ddc_path: &str) -> Result<()> {
     // Confirm PnP service WinUSB, exact BE200, before opening hardware.
     driver::verify()?;
 
-    println!("R1.5b — BE200 Cold Boot, exactly ONE attempt");
+    println!("R1.5b — BE200 Windows OEM cold boot, exactly ONE attempt");
+    println!("Profile: {}", firmware::BE200_WINDOWS_FW_PROFILE);
     println!("Pinned SFI: {}", firmware::BE200_SFI_SHA256);
+    println!("003-ColdBoot replay SHA256: {} ({} bytes)",
+        fw.replay_sha256, fw.replay_bytes);
     println!("Firmware fragments: {} (ECDSA header: 3, DATA: {})",
         fw.fragments.len(), fw.fragments.len() - 3);
     println!("No hardware power control, no retry and no reset-to-bootloader.");
@@ -245,7 +279,12 @@ pub fn boot_once(sfi_path: &str, ddc_path: &str) -> Result<()> {
             before.image_type, before.cnvi_top, before.cnvr_top,
             before.hardware_variant(), before.secure_boot, before.sbe_type);
         validate_bootloader(&before)?;
-        println!("Bootloader / hardware / ECDSA checks passed. Starting Secure Send...");
+        // 003-ColdBoot frame 1957: Windows writes DDC id 0x0186
+        // before beginning firmware Secure Send. It returned HCI success.
+        println!("Bootloader / hardware / ECDSA checks passed.");
+        usb.command(0xfc8b, &firmware::BE200_WINDOWS_PREBOOT_DDC)?;
+        usb.wait_complete(0xfc8b)?;
+        println!("Windows preboot DDC 0x0186 accepted. Starting Secure Send...");
 
         let started = Instant::now();
         for (index, part) in fw.fragments.iter().enumerate() {
@@ -272,6 +311,11 @@ pub fn boot_once(sfi_path: &str, ddc_path: &str) -> Result<()> {
         usb.wait_vendor(0x02)?;
         println!("Operational boot event received.");
 
+        // Windows 003 frame 9917: Intel DSBR default 0xFC0A 00 00.
+        usb.command(0xfc0a, &firmware::BE200_WINDOWS_DSBR_DEFAULT)?;
+        usb.wait_complete(0xfc0a)?;
+        println!("Intel DSBR defaults applied (0xFC0A).");
+
         let after = usb.read_version()?;
         if after.image_type != Some(0x03) {
             return Err(fail(format!(
@@ -287,7 +331,7 @@ pub fn boot_once(sfi_path: &str, ddc_path: &str) -> Result<()> {
         usb.command(0xfc8b, &fw.ddc)?;
         usb.wait_complete(0xfc8b)?;
         println!("Intel 0xFC8B DDC record applied.");
-        println!("R1.5b RESULT: independent Bootloader -> Operational firmware boot succeeded.");
+        println!("R1.5b RESULT: independent Windows OEM Bootloader -> Operational boot succeeded.");
         log::info!(target:"be200hub::boot","independent BE200 Intel signed-firmware boot succeeded");
         Ok(())
     })();
@@ -335,4 +379,12 @@ mod tests {
         assert!(parse_boot_event(&[0xff,7,2,0,1,1,2,0xff,1]).is_ok());
         assert!(parse_boot_event(&[0xff,7,2,1,1,1,2,0xff,1]).is_err());
     }
+    #[test]
+    fn windows_003_minimal_oem_initialization_bytes() {
+        assert_eq!(firmware::BE200_WINDOWS_PREBOOT_DDC, [0x03,0x86,0x01,0x01]);
+        assert_eq!(firmware::BE200_WINDOWS_DSBR_DEFAULT, [0x00,0x00]);
+        assert_eq!(firmware::BE200_WINDOWS_WIRE_FRAGMENTS, 3960);
+        assert_eq!(firmware::BE200_WINDOWS_WIRE_BYTES, 996036);
+    }
+
 }

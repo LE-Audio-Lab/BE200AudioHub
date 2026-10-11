@@ -8,11 +8,11 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 
 - **R1.1 — Bootstrap:** Rust CLI, VF-style async rotating logger, read-only diagnostics.
 - **R1.2 — Discovery:** libusb enumeration and USB/configuration/interface/endpoint descriptors without opening or claiming the device.
-- **R1.3a — implemented / pending Windows validation:** inspect BE200 native Intel driver binding and export a verified backup.
-- **R1.3b (later):** explicit, reversible WinUSB binding of the **BE200 only**, with driver rollback.
+- **R1.3a — Windows validated:** inspect original Intel BTHUSB binding and export the OEM `oem31.inf` backup.
+- **R1.3b — Windows validated:** operator replaced **BE200 only** with WinUSB, `driver verify` and `usb probe` passed. Manual OEM driver recovery is documented, not hardware-exercised.
 - **R1.4 — validated on BE200:** first independent Intel `0xFC05` HCI query through WinUSB.
 - **R1.5a — validated offline:** Intel SFI/DDC structure.
-- **R1.5b — implementation pending local testing:** Linux/USBPcap-based ECDSA Secure Send firmware loader and guarded first cold boot.
+- **R1.5b — implementation pending local testing:** BE200 Windows 24.60.0.4 *extracted OEM SFI*, 003-PCAP-exact 3,960-packet Secure Send, guarded first cold boot. The Linux SFI is not an allowed live boot input.
 - **R1.6 (later):** independent BLE scan, then LE Audio.
 
 ## Run on Windows
@@ -36,11 +36,18 @@ cargo run -- hci version
 cargo run -- firmware inspect "C:\\path\\to\\ibt-0291-0291.sfi" "C:\\path\\to\\ibt-0291-0291.ddc"
 # Offline review (no USB traffic):
 cargo run -- firmware plan --sfi "C:\\path\\to\\ibt-0291-0291.sfi" --ddc "C:\\path\\to\\ibt-0291-0291.ddc"
+# Windows OEM image extracted from the verified Intel 24.60.0.4 driver (private lab asset):
+$fw = "C:\STanJK\Development\LEAudioLab\BE200\firmware"
+$windowsSfi = "$fw\be200_intel_windows_24.60.0.4_usb_verified.sfi"
+$ddc = "$fw\ibt-0291-0291.ddc"
+cargo run -- firmware plan --sfi "$windowsSfi" --ddc "$ddc"
+cargo run -- firmware preflight --sfi "$windowsSfi" --ddc "$ddc"
+# Do NOT run firmware boot until first Windows hardware test is approved.
 # Administrator PowerShell; exports the current Intel OEM driver without changing binding:
 cargo run -- driver backup
 ```
 
-R1.1/R1.2 and the new R1.3a commands do **not change PnP binding**: no HCI commands, interface claiming, USB reset, power cycle, or firmware download. R1.3a `driver backup` only writes a private snapshot and uses `pnputil /export-driver`. R1.3b `usb probe` attempts to open, claim, and release interface 0 (no HCI traffic) after verifying a WinUSB binding. R1.4 `hci version` is an explicitly invoked, allow-listed Intel `0xFC05` query; it does send one HCI command but does not reset, pair or download firmware.
+R1.1/R1.2/R1.3a commands do **not change PnP binding**: no HCI commands, interface claiming, USB reset, power cycle, or firmware download. R1.3a `driver backup` only writes a private snapshot and uses `pnputil /export-driver`. R1.3b `usb probe` attempts to open, claim, and release interface 0 (no HCI traffic) after verifying a WinUSB binding. R1.4 `hci version` is an explicitly invoked, allow-listed Intel `0xFC05` query; it does send one HCI command but does not reset, pair or download firmware.
 
 See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs/WINUSB_BINDING.md) before any WinUSB work.
 
@@ -48,7 +55,7 @@ See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs
 
 ## Firmware safety
 
-R1.5a provides an **offline** SFI/DDC inspector. R1.5b adds a separate **explicit, one-attempt firmware boot** command which requires a cold Bootloader state, exact BE200 variant, ECDSA SBE, pinned image SHA256 and the `--confirm-cold-boot` flag. It does not switch external power or perform a reset-to-bootloader. It is not yet validated on hardware. The firmware's Intel cryptographic signature is **not independently verified by the host**, only checked by the controller's Secure Boot process. Read [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md) and [docs/FIRMWARE_BOOT.md](docs/FIRMWARE_BOOT.md) first.
+R1.5a provides an **offline** SFI/DDC inspector. R1.5b uses the user-extracted **Windows 24.60.0.4** 980,840-byte Intel SFI-format image (SHA256 `939a9b32...`) and the 4-byte DDC observed on Windows. The Linux SFI is *not* allowed for the live loader. There is an offline `firmware plan`, read-only `firmware preflight`, and separate **explicit, one-attempt firmware boot** command requiring a cold Bootloader state, exact BE200 variant, ECDSA SBE, pinned image SHA256, a PCAP-exact USB replay digest and `--confirm-cold-boot` flag. It does not switch external power or perform a reset-to-bootloader. It is not yet validated on hardware. The firmware's Intel cryptographic signature is **not independently verified by the host**, only checked by the controller's Secure Boot process. Read [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md) and [docs/FIRMWARE_BOOT.md](docs/FIRMWARE_BOOT.md) first.
 
 ## Logging
 

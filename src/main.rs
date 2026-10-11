@@ -11,7 +11,7 @@ use error::{AppError, Result};
 use std::env;
 
 fn usage() -> &'static str {
-    "BE200AudioHub v0.1 (R1.4 Intel HCI Read Version)\n\
+    "BE200AudioHub v0.1 (R1.5b Windows OEM cold-boot preflight)\n\
      Usage:\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
@@ -20,6 +20,7 @@ fn usage() -> &'static str {
        be200hub hci version\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
+       be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware boot --sfi <PATH> --ddc <PATH> --confirm-cold-boot\n\
        be200hub driver status\n\
        be200hub driver verify\n\
@@ -36,7 +37,7 @@ fn doctor() -> Result<()> {
     println!("Architecture: {}", env::consts::ARCH);
     println!("Target: {:04x}:{:04x}", usb::BE200_VID, usb::BE200_PID);
     println!("USB backend: libusb/rusb (vendored)");
-    println!("Driver ownership: unchanged (R1.3b not implemented)");
+    println!("Driver installation: manual only; read driver status/verify before a BE200 boot experiment");
     println!("Log directory: {}", logging::default_directory().display());
     println!("BE200 status:");
     usb::list(true)
@@ -76,6 +77,10 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, c, sfi, d, ddc] if a == "firmware" && b == "plan"
             && c == "--sfi" && d == "--ddc" => {
             firmware::dry_run(sfi, ddc)
+        },
+        [a,b,c,sfi,d,ddc] if a == "firmware" && b == "preflight"
+            && c == "--sfi" && d == "--ddc" => {
+            boot::preflight(sfi,ddc)
         },
         [a,b,c,sfi,d,ddc,flag] if a == "firmware" && b == "boot"
             && c == "--sfi" && d == "--ddc" && flag == "--confirm-cold-boot" => {

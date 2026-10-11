@@ -333,13 +333,25 @@ mod tests {
 }
 
 
-// R1.5b: deliberately pin a single BE200 reference firmware set for the first
-// live experiment. These hashes are file identities, NOT cryptographic Intel
-// signature verification. The controller is responsible for Secure Boot.
+// R1.5b: pin the exact Windows 24.60.0.4 SFI recovered from the user's
+// ibtusb.sys, independently matching all 3960 observed Secure Send packets
+// in 003-ColdBoot. No firmware binary is stored in the source repository.
+// Hashes identify trusted input bytes but are NOT independent Intel signature
+// verification. The controller's hardware SBE enforces authorization.
 pub const BE200_SFI_SHA256: &str =
-    "ab04144f4b05dbd7baa2e3b0def81b87e27652accc35193582468f570f606018";
+    "939a9b32ad11d8962abfd10cb24d5bd90d7848218af4ea438cf6490243a618d4";
 pub const BE200_DDC_SHA256: &str =
     "e0fb10fe29f60607d6507ced3f697492d9611f62c4765feaee59c4bd4101d3e7";
+pub const BE200_WINDOWS_FW_PROFILE: &str = "intel-windows-24.60.0.4-build176";
+pub const BE200_WINDOWS_WIRE_SHA256: &str =
+    "55200bef2efadd869500baf58909623fbf23c8d26e6218458cbf7a1fd8923531";
+pub const BE200_WINDOWS_WIRE_BYTES: usize = 996_036;
+pub const BE200_WINDOWS_WIRE_FRAGMENTS: usize = 3_960;
+pub const BE200_WINDOWS_DATA_GROUPS: usize = 3_957;
+pub const BE200_WINDOWS_EMBEDDED_COMMANDS: usize = 3_967;
+// As actually captured on the BE200 in 003-ColdBoot.
+pub const BE200_WINDOWS_PREBOOT_DDC: [u8; 4] = [0x03, 0x86, 0x01, 0x01];
+pub const BE200_WINDOWS_DSBR_DEFAULT: [u8; 2] = [0x00, 0x00];
 
 pub const BE200_CNVI_TOP: u32 = 0x0200_1910;
 pub const BE200_CNVR_TOP: u32 = 0x0200_1910;
@@ -360,6 +372,8 @@ pub struct VerifiedBe200Firmware {
     pub boot_address: u32,
     pub embedded_commands: usize,
     pub payload_groups: usize,
+    pub replay_sha256: String,
+    pub replay_bytes: usize,
 }
 
 /// Create ECDSA Secure Send fragments from an RSA+ECDSA .sfi, matching
@@ -367,7 +381,7 @@ pub struct VerifiedBe200Firmware {
 /// Never use on hardware without checking the live Version SBE type.
 fn ecdsa_fragments(plan: &SfiPlan) -> Result<Vec<SecureFragment>> {
     if plan.header != HeaderKind::RsaEcdsa || plan.payload_offset != 964 {
-        return Err(failure("BE200 pinned firmware must contain RSA+ECDSA CSS headers"));
+        return Err(failure("BE200 Windows firmware must contain RSA+ECDSA CSS headers"));
     }
     let mut packets = vec![
         SecureFragment {kind: 0x00, span: 644..772},
@@ -418,8 +432,8 @@ fn verify_pair(sfi: Vec<u8>, ddc: Vec<u8>) -> Result<VerifiedBe200Firmware> {
     let sfi_hash = digest_hex(&sfi);
     if sfi_hash != BE200_SFI_SHA256 {
         return Err(failure(format!(
-            "SFI SHA256 does not match the pinned ibt-0291-0291.sfi (actual {sfi_hash}); \
-             first-boot loader refuses unreviewed firmware"
+            "SFI SHA256 does not match pinned Windows 24.60.0.4 BE200 image (actual {sfi_hash}); \
+             first-boot loader refuses other firmware"
         )));
     }
     let ddc_hash = digest_hex(&ddc);
@@ -441,10 +455,42 @@ fn verify_pair(sfi: Vec<u8>, ddc: Vec<u8>) -> Result<VerifiedBe200Firmware> {
         return Err(failure("Pinned BE200 DDC structure does not match expected single record"));
     }
     let fragments = ecdsa_fragments(&plan)?;
+    if plan.embedded_commands != BE200_WINDOWS_EMBEDDED_COMMANDS
+        || plan.aligned_groups != BE200_WINDOWS_DATA_GROUPS
+        || fragments.len() != BE200_WINDOWS_WIRE_FRAGMENTS
+        || boot.build != 176 || boot.week != 26 || boot.year_since_2000 != 26
+    {
+        return Err(failure(format!(
+            "Windows firmware manifest mismatch: commands={}, DATA groups={}, packets={}, build={}/{}/20{}",
+            plan.embedded_commands, plan.aligned_groups, fragments.len(),
+            boot.build, boot.week, boot.year_since_2000
+        )));
+    }
+
+    // Offline byte-level USBPcap oracle. This is a SHA256 of the CONCATENATED
+    // entire 0xFC09 HCI packet stream from 003, not merely of image payload.
+    // It catches packet order/type/length or alignment drift before any USB I/O.
+    let mut replay_digest = Sha256::new();
+    let mut replay_bytes = 0usize;
+    for fragment in &fragments {
+        let packet = secure_send_packet(fragment.kind, &sfi[fragment.span.clone()])?;
+        replay_digest.update(&packet);
+        replay_bytes += packet.len();
+    }
+    let replay_sha256 = format!("{:x}", replay_digest.finalize());
+    if replay_sha256 != BE200_WINDOWS_WIRE_SHA256
+        || replay_bytes != BE200_WINDOWS_WIRE_BYTES
+    {
+        return Err(failure(format!(
+            "003-ColdBoot 0xFC09 replay mismatch: bytes={replay_bytes}, SHA256={replay_sha256}. Refusing firmware writes."
+        )));
+    }
     Ok(VerifiedBe200Firmware {
         sfi, ddc, fragments, boot_address: boot.address,
         embedded_commands: plan.embedded_commands,
         payload_groups: plan.aligned_groups,
+        replay_sha256,
+        replay_bytes,
     })
 }
 
@@ -457,14 +503,19 @@ pub fn load_pinned_be200_pair(sfi_path: &str, ddc_path: &str) -> Result<Verified
 /// R1.5b.1/2 fully offline wire-plan preview: no device handle is opened.
 pub fn dry_run(sfi_path: &str, ddc_path: &str) -> Result<()> {
     let fw = load_pinned_be200_pair(sfi_path, ddc_path)?;
-    println!("BE200AudioHub — R1.5b OFFLINE ECDSA Secure Send plan");
+    println!("BE200AudioHub — R1.5b Windows OEM ECDSA Secure Send plan");
+    println!("  profile: {BE200_WINDOWS_FW_PROFILE}");
     println!("  SFI SHA256: {BE200_SFI_SHA256}");
     println!("  DDC SHA256: {BE200_DDC_SHA256}");
     println!("  header fragments: 3 (ECDSA INIT 128, PKEY 96, SIGN 96)");
     println!("  embedded commands: {}", fw.embedded_commands);
     println!("  aligned DATA groups: {}", fw.payload_groups);
     println!("  planned Bulk OUT Secure Sends: {}", fw.fragments.len());
+    println!("  003-PCAP replay: SHA256={} / {} bytes (EXACT MATCH)",
+        fw.replay_sha256, fw.replay_bytes);
+    println!("  preboot DDC: 0xFC8B, {:02X?}", BE200_WINDOWS_PREBOOT_DDC);
     println!("  boot command: 0xFC01, address=0x{:08X}", fw.boot_address);
+    println!("  postboot DSBR defaults: 0xFC0A, {:02X?}", BE200_WINDOWS_DSBR_DEFAULT);
     println!("  post-boot DDC: 0xFC8B, {} bytes", fw.ddc.len());
     if let Some(first) = fw.fragments.first() {
         println!("  first Secure Send HCI bytes: {:02X?}",
