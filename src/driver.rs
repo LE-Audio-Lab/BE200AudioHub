@@ -52,6 +52,10 @@ pub fn status() -> Result<()> {
     execute("status", None)
 }
 
+pub fn verify() -> Result<()> {
+    execute("verify", None)
+}
+
 pub fn backup(root: Option<&str>) -> Result<()> {
     if root.is_some_and(|path| path.trim().is_empty()) {
         return Err(AppError::Usage("--out requires a nonempty directory".into()));

@@ -9,8 +9,8 @@ try {
     $OutputEncoding = [Console]::OutputEncoding
 
     $action = $env:BE200_DRIVER_ACTION
-    if ($action -notin @('status', 'backup')) {
-        throw "Unknown action '$action'; expected status or backup"
+    if ($action -notin @('status', 'verify', 'backup')) {
+        throw "Unknown action '$action'; expected status, verify or backup"
     }
 
     $matches = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
@@ -67,6 +67,24 @@ try {
 
     if ($action -eq 'status') {
         $snapshot | ConvertTo-Json -Depth 6
+        exit 0
+    }
+
+    if ($action -eq 'verify') {
+        if ($snapshot.pnpStatus -ne 'OK') {
+            throw "BE200 is not PnP OK ($($snapshot.pnpStatus), $($snapshot.pnpProblem)). Check the exact device in Device Manager."
+        }
+        if ([string]$snapshot.driverService -ine 'WinUSB') {
+            throw "Expected WinUSB service for BE200, got '$($snapshot.driverService)' with INF '$($snapshot.driverInf)'. No interface claim attempted."
+        }
+        [ordered]@{
+            result = 'winusb_binding_verified'
+            instanceId = $deviceId
+            service = $snapshot.driverService
+            driverInf = $snapshot.driverInf
+            pnpStatus = $snapshot.pnpStatus
+            driverBindingChanged = $false
+        } | ConvertTo-Json -Depth 4
         exit 0
     }
 
@@ -162,13 +180,15 @@ This folder records the native Intel Bluetooth driver before any WinUSB binding.
 Restoration is a separate MANUAL action:
 1. Stop the BE200AudioHub process and avoid using BE200 during driver repair.
 2. Open Device Manager and locate the exact USB\VID_8087&PID_0036 instance.
-3. Reinstall/select the original Intel Bluetooth driver from exported-driver.
-   For driver-store repair, administrator PowerShell can run:
-   pnputil /add-driver "<path-to-exported-driver>\*.inf" /subdirs /install
+3. Restore/select the original Intel Bluetooth driver ONLY for the exact
+   8087:0036 device via Device Manager > Update driver > Browse > Let me pick
+   > Have Disk and point to the exported-driver INF.
 4. Confirm service BTHUSB and the Intel driver/filter, and check PnP status.
 5. Confirm MT7925 remains on its original driver.
 
-WARNING: Re-importing an INF is not guaranteed to override a separately
+WARNING: pnputil /add-driver /install is not device-specific and does not
+guarantee a lower-ranked INF will be selected. Avoid broad driver updates.
+Re-importing an INF is not guaranteed to override a separately
 installed WinUSB INF's ranking. Device Manager manual selection/uninstall of
 the later WinUSB package may be required. Never target the USB root hub,
 MT7925, Microsoft Bluetooth Enumerator, or all Bluetooth-class devices.

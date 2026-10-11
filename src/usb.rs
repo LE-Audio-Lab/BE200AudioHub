@@ -1,4 +1,5 @@
-//! Read-only USB discovery. Does not open handles, claim interfaces, or send HCI.
+//! USB descriptor discovery and a separate guarded WinUSB claim/release probe.
+//! The probe does not send HCI or reset the controller.
 use crate::error::{AppError, Result};
 use rusb::{self, Device, GlobalContext, DeviceDescriptor};
 
@@ -85,6 +86,44 @@ pub fn inspect(vid:u16,pid:u16) -> Result<()> {
     }
     if !found {return Err(AppError::DeviceNotFound(vid,pid));}
     log::info!("USB descriptor inspection completed for {vid:04x}:{pid:04x}");
+    Ok(())
+}
+
+/// R1.3b: one intentional, short-lived WinUSB claim of interface 0.
+/// This does not send HCI, reset the bus, change alternate settings or write USB payloads.
+pub fn probe_winusb() -> Result<()> {
+    let available = devices()?;
+    let mut target: Option<Device<GlobalContext>> = None;
+    for dev in available.iter() {
+        let Ok(desc) = dev.device_descriptor() else { continue; };
+        if desc.vendor_id() == BE200_VID && desc.product_id() == BE200_PID {
+            if target.is_some() {
+                return Err(AppError::Driver(
+                    "Multiple 8087:0036 devices found; refusing ambiguous interface claim".into(),
+                ));
+            }
+            target = Some(dev);
+        }
+    }
+
+    let device = target.ok_or(AppError::DeviceNotFound(BE200_VID, BE200_PID))?;
+    let desc = device.device_descriptor()?;
+    if (desc.class_code(), desc.sub_class_code(), desc.protocol_code()) != (0xe0, 0x01, 0x01) {
+        return Err(AppError::Driver(format!(
+            "Unexpected device class {:02x}/{:02x}/{:02x}, refusing to claim interface",
+            desc.class_code(), desc.sub_class_code(), desc.protocol_code(),
+        )));
+    }
+    println!("Target confirmed: 8087:0036 {}", location(&device));
+    println!("Opening BE200 via libusb/WinUSB...");
+    let mut handle = device.open()?;
+    println!("Open: OK");
+    handle.claim_interface(0)?;
+    println!("Claim interface 0: OK");
+    handle.release_interface(0)?;
+    println!("Release interface 0: OK");
+    println!("Probe complete. No HCI commands or USB reset were issued.");
+    log::info!(target: "be200hub::usb", "WinUSB interface 0 open/claim/release succeeded");
     Ok(())
 }
 

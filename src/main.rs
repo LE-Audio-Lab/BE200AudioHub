@@ -7,16 +7,18 @@ use error::{AppError, Result};
 use std::env;
 
 fn usage() -> &'static str {
-    "BE200AudioHub v0.1 (R1.3a preflight)\n\
+    "BE200AudioHub v0.1 (R1.3b WinUSB verification)\n\
      Usage:\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
        be200hub usb inspect [VID:PID]\n\
+       be200hub usb probe\n\
        be200hub driver status\n\
+       be200hub driver verify\n\
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
-     Driver commands never change binding or send HCI.\n\
+     WinUSB replacement is manual. Probe opens/claims/releases interface 0 without HCI.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
 
@@ -49,6 +51,11 @@ fn run(args: &[String]) -> Result<()> {
             usb::inspect(vid, pid)
         }
         [a, b] if a == "driver" && b == "status" => driver::status(),
+        [a, b] if a == "driver" && b == "verify" => driver::verify(),
+        [a, b] if a == "usb" && b == "probe" => {
+            driver::verify()?;
+            usb::probe_winusb()
+        },
         [a, b] if a == "driver" && b == "backup" => driver::backup(None),
         [a, b, c, d] if a == "driver" && b == "backup" && c == "--out" => {
             driver::backup(Some(d))

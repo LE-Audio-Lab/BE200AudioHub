@@ -51,3 +51,7 @@ The backup refuses to proceed unless the selected device is unique, PnP OK, serv
 5. Switch **only** after another explicit confirmation. Do not manipulate the front USB2 header or power wiring during driver changes.
 
 **Data warning:** The backup contains machine-specific PnP InstanceIds and configuration. Keep private; do not publish raw logs or captures.
+
+## R1.3b
+
+After successful backup, read [WINUSB_BINDING.md](WINUSB_BINDING.md). Driver replacement itself is intentionally **manual** and limited to the exact BE200; use the new `driver verify` and `usb probe` commands to validate the WinUSB access path.

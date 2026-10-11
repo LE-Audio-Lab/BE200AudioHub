@@ -2,8 +2,9 @@
 
 - [x] R1.1 Rust bootstrap builds on maintainer's Windows machine; 2/2 unit tests passed.
 - [x] R1.2 read-only USB descriptor inspection validated on BE200 (8087:0036, Port 14).
-- [ ] R1.3a driver status and OEM backup (implemented; awaiting local Windows validation).
-- [ ] R1.3b targeted, reversible WinUSB binding with MT7925 regression guard.
+- [x] R1.3a driver status and Intel OEM backup validated on Windows; native `oem31.inf` exported.
+- [ ] R1.3b manual BE200-only WinUSB binding, then `driver verify` and `usb probe` (implemented; awaiting local validation).
+- [ ] R1.3b rollback dry-run and MT7925 regression verification (must precede any automated driver switching).
 - [ ] R1.4 own HCI Read Version (0xFC05) and command complete event.
 - [ ] R1.5 own Intel firmware cold boot using verified signed SFI/DDC.
 - [ ] R1.6 independent BLE scan.
