@@ -1,0 +1,7 @@
+Source repository: https://github.com/STanJK/LE-Audio-Relay
+Source revision: 3f75ae1a487bf92aaaba8dfe37fac36ab6576f59
+
+Files in src/ are copied verbatim from that revision so the R2 integration
+branch has a frozen, buildable Windows-audio seam. Product behavior remains
+owned by the original LE-Audio-Relay repository until this integration is
+validated.

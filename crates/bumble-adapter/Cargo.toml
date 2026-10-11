@@ -1,0 +1,13 @@
+[package]
+name = "bumble-adapter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bumble = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-hci = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-host = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-transport = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-profiles = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-codecs = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }

@@ -8,6 +8,7 @@ publish = false
 members = [
     ".",
     "crates/be200-runtime",
+    "crates/bumble-adapter",
     "crates/audio-bridge",
     "crates/bap-client",
     "crates/device-policy",
