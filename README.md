@@ -13,7 +13,7 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 - **R1.4 — validated on BE200:** first independent Intel `0xFC05` HCI query through WinUSB.
 - **R1.5a — validated offline:** Intel SFI/DDC structure.
 - **R1.5b — independently cold-booted on BE200 (2026-10-11):** Rust + WinUSB loaded the exact Windows 24.60.0.4 OEM firmware; 3,960/3,960 USB Secure Sends match the original Intel 003 capture byte-for-byte; the controller confirmed Operational image 0x03 and accepted DSBR/DDC. See [Experiment 004](docs/EXPERIMENT_004_R1_5B.md).
-- **R1.6a/b (code ready; local validation pending):** standard LE/ISO capability query and bounded passive extended BLE scanning. Both use operational firmware without resetting it.
+- **R1.6a/b — validated on BE200 (2026-10-11):** independent HCI capability queries and passive LE Extended Scan successfully detected Galaxy Buds3 Pro; cleanup confirmed across three trials. See [Experiment 005](docs/EXPERIMENT_005_R1_6.md).
 
 ## Run on Windows
 
@@ -64,7 +64,7 @@ R1.5a provides an **offline** SFI/DDC inspector. R1.5b uses the user-extracted *
 
 ## R1.6 safety and privacy
 
-`hci capabilities` sends only allowlisted read-only HCI queries (including `0x2060` LE Buffer Size v2). `ble scan` configures LE Meta/Extended Advertising event masks, passive 1M scanning for 1–30 seconds, requests controller-native timeout, explicitly disables scan before releasing USB interface 0, and prints anonymized ephemeral advertiser IDs by default. It sends no Scan Requests, connections, pairing, HCI Reset, firmware or audio payloads. See [R1.6 runbook](docs/R1_6_HCI_SCAN.md). A crashed process is covered by the controller scan-duration timeout, not guaranteed host-side cleanup.
+`hci capabilities` sends only allowlisted read-only HCI queries (including `0x2060` LE Buffer Size v2). `ble scan` configures LE Meta/Extended Advertising event masks, passive 1M scanning for 1–30 seconds, requests controller-native timeout, explicitly disables scan before releasing USB interface 0, and prints anonymized ephemeral advertiser IDs by default. It sends no Scan Requests, connections, pairing, HCI Reset, firmware or audio payloads. See [R1.6 runbook](docs/R1_6_HCI_SCAN.md) and [R2 connection plan](docs/R2_CONNECTION_PLAN.md). A crashed process is covered by the controller scan-duration timeout, not guaranteed host-side cleanup.
 
 ## Logging
 

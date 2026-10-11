@@ -10,8 +10,10 @@
 - [x] R1.5b.1 ECDSA Secure Send protocol reconstructed; Windows 24.60.0.4 extracted SFI re-encoded to 3,960 PCAP packets with zero differences (offline Python verification).
 - [x] R1.5b.2 Rust Windows-OEM SHA256-pinned loader and guarded preflight; 22/22 Cargo unit tests passed, 3,960/3,960 PCAP oracle matched; Operational preflight validated on local BE200.
 - [x] R1.5b.3 **first independent cold boot PASS (2026-10-11, experiment 004):** BE200 Bootloader -> Windows 24.60.0.4 Build 176 Operational; 3,960/3,960 USB Secure Sends completed successfully; Download/Boot vendor events, 0xFC05 Operational, DSBR and DDC verified in 004 PCAP; see EXPERIMENT_004_R1_5B.md.
-- [ ] R1.6a `hci capabilities` / CIS Central and ISO buffers (implemented; **pending local BE200 hardware test**).
-- [ ] R1.6b bounded passive LE Extended Scan / report parsing / privacy-safe output (implemented; **pending local BE200 hardware test**).
-- [ ] R2 onward BLE host, pairing, GATT, LE Audio BAP/CAP/ISO and LC3 playback.
+- [x] R1.6a `hci capabilities` validated on BE200/WinUSB: HCI/LMP 0x0D, Intel manufacturer 2, LE CIS Central/Peripheral true, ISO buffer 248 B × 8, ACL 251 B × 6; see EXPERIMENT_005_R1_6.md.
+- [x] R1.6b passive LE Extended Scan validated on BE200/WinUSB: three 10-second runs (Buds3 Pro off=0 reports; wearing=3; pairing mode=7), Galaxy Buds3 Pro advertising found, scan disabled and USB interface released each time; see EXPERIMENT_005_R1_6.md.
+- [ ] R2a controlled LE ACL connection (single-process scan/select/connect, bounded attempts, full cleanup and ACL Bulk transport); see R2_CONNECTION_PLAN.md.
+- [ ] R2b BLE Host adapter (L2CAP/ATT/GATT/SMP/bonding, evaluate TrouBLE integration).
+- [ ] R3/R4 LE Audio control (PACS/ASCS, BAP/CAP, CIS) → ISO/LC3 single-direction playback → daily integration.
 
 Local Windows hardware validation is required for each stage. A committed change is not proof that a driver backup/restore path works. See DRIVER_PREP.md.

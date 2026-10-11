@@ -2,7 +2,7 @@
 
 ## Status and prerequisites
 
-**Implementation pushed; real hardware execution pending.** R1.5b is already fully validated on this BE200 through WinUSB. The controller should remain in Operational image 0x03; **do not power-cycle** or send firmware again merely for HCI inquiries or scanning.
+**Hardware validation PASS, 2026-10-11**. See [Experiment 005](EXPERIMENT_005_R1_6.md). R1.5b is already fully validated on this BE200 through WinUSB. The controller should remain in Operational image 0x03; **do not power-cycle** or send firmware again merely for HCI inquiries or scanning.
 
 - Target: Intel BE200 Bluetooth USB `8087:0036` on Windows WinUSB `oem17.inf`. MT7925 remains the daily Windows Bluetooth radio and must not be changed.
 - R1.6a makes HCI reads only.
@@ -68,3 +68,7 @@ Fail on non-zero HCI status or malformed lengths. No speculative vendor commands
 - Linux HCI struct and command constants: https://codebrowser.dev/linux/linux/include/net/bluetooth/hci.h.html
 - Rust TrouBLE host: https://docs.rs/trouble-host/latest/trouble_host/
 - BTstack reference (noncommercial license): https://github.com/bluekitchen/btstack
+
+## Validated results (Experiment 005)
+
+BE200 in Operational image via R1.5b, WinUSB `oem17.inf`. `hci capabilities` succeeded with CIS Central & Peripheral true, ISO Broadcaster & Synchronized Receiver false (broadcast-only roles), HCI ISO buffer `248 × 8` and LE ACL `251 × 6`. Independent 10-second passive scans with Buds3 Pro inactive/being worn/in pairing mode produced 0/3/7 reports respectively. Samsung `Galaxy Buds3 Pro (2F23)` advertised by name in the latter two states. Scan disable and release of USB Interface 0 were successful in all three trials. A native LE Extended Scan Timeout event was observed on the second run. None of these observations proves LE ACL connection, Bluetooth LE Audio GATT services or CIS streaming.
