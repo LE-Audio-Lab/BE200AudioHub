@@ -7,13 +7,12 @@ pub enum AppError {
     DeviceNotFound(u16, u16),
     Driver(String),
     Protocol(String),
-    Firmware(String),
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(s) | Self::Driver(s) | Self::Protocol(s) | Self::Firmware(s) => write!(f, "{s}"),
+            Self::Usage(s) | Self::Driver(s) | Self::Protocol(s) => write!(f, "{s}"),
             Self::Usb(e) => write!(f, "USB error: {e}"),
             Self::DeviceNotFound(vid, pid) => {
                 write!(f, "Device {vid:04x}:{pid:04x} not found")

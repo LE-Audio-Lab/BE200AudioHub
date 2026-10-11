@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 log = { version = "0.4", features = ["std"] }
 rusb = { version = "0.9", features = ["vendored"] }
+sha2 = "0.10"

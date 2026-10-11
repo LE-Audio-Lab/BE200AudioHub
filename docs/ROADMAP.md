@@ -6,8 +6,10 @@
 - [x] R1.3b BE200-only WinUSB binding and `driver verify` / `usb probe` validated on Windows (oem17.inf / libwdi).
 - [ ] R1.3b rollback dry-run and MT7925 regression verification (must precede any automated driver switching).
 - [x] R1.4 first Intel HCI Read Version (`0xFC05` with `0xFF` TLV selector); tested on BE200/WinUSB: Operational 0x03, CNVi/CNVr 0x02001910, 30 TLVs.
-- [ ] R1.5a offline SFI/DDC structural inspection (implemented; pending local validation).
-- [ ] R1.5b gated Intel signed firmware loading from true cold boot (not implemented).
+- [x] R1.5a SFI/DDC structural inspection validated locally against ibt-0291-0291.sfi / .ddc (3959 commands, 3950 DATA fragments).
+- [ ] R1.5b.1 ECDSA Secure Send + boot protocol reconstruction (implemented from Linux + 003; pending unit test validation).
+- [ ] R1.5b.2 Rust pinned-image loader, deterministic offline plan and protocol tests (implemented; pending local tests).
+- [ ] R1.5b.3 first independent Bootloader -> Operational on BE200 (guarded entrypoint implemented; **hardware test NOT performed**).
 - [ ] R1.6 independent BLE scan.
 - [ ] R2 onward BLE host, pairing, GATT, LE Audio BAP/CAP/ISO and LC3 playback.
 

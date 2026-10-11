@@ -92,6 +92,10 @@ pub fn read_intel_version() -> Result<()> {
                     }
                     if let Some(v) = version.cnvi_top { println!("  CNVi TOP: 0x{v:08X}"); }
                     if let Some(v) = version.cnvr_top { println!("  CNVr TOP: 0x{v:08X}"); }
+                    if let Some(v) = version.cnvi_bt { println!("  CNVi Bluetooth: 0x{v:08X}"); }
+                    if let Some(v) = version.hardware_variant() { println!("  Hardware variant: 0x{v:02X}"); }
+                    if let Some(v) = version.secure_boot { println!("  Secure Boot: 0x{v:02X}"); }
+                    if let Some(v) = version.sbe_type { println!("  SBE Type: 0x{v:02X}"); }
                     println!("  TLV records: {}", version.tlv_count);
                     println!("  Ignored unrelated HCI events: {ignored_events}");
                     log::info!(target:"be200hub::hci", "0xFC05 OK; image={:?}, CNVi={:?}, CNVr={:?}",

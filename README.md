@@ -10,7 +10,10 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 - **R1.2 — Discovery:** libusb enumeration and USB/configuration/interface/endpoint descriptors without opening or claiming the device.
 - **R1.3a — implemented / pending Windows validation:** inspect BE200 native Intel driver binding and export a verified backup.
 - **R1.3b (later):** explicit, reversible WinUSB binding of the **BE200 only**, with driver rollback.
-- **R1.4+ (later):** Intel HCI, signed firmware initialization, independent BLE scan, then LE Audio.
+- **R1.4 — validated on BE200:** first independent Intel `0xFC05` HCI query through WinUSB.
+- **R1.5a — validated offline:** Intel SFI/DDC structure.
+- **R1.5b — implementation pending local testing:** Linux/USBPcap-based ECDSA Secure Send firmware loader and guarded first cold boot.
+- **R1.6 (later):** independent BLE scan, then LE Audio.
 
 ## Run on Windows
 
@@ -31,6 +34,8 @@ cargo run -- usb probe
 cargo run -- hci version
 # Offline SFI/DDC inspection: NO USB access or firmware writes
 cargo run -- firmware inspect "C:\\path\\to\\ibt-0291-0291.sfi" "C:\\path\\to\\ibt-0291-0291.ddc"
+# Offline review (no USB traffic):
+cargo run -- firmware plan --sfi "C:\\path\\to\\ibt-0291-0291.sfi" --ddc "C:\\path\\to\\ibt-0291-0291.ddc"
 # Administrator PowerShell; exports the current Intel OEM driver without changing binding:
 cargo run -- driver backup
 ```
@@ -43,7 +48,7 @@ See [docs/DRIVER_PREP.md](docs/DRIVER_PREP.md) and [docs/WINUSB_BINDING.md](docs
 
 ## Firmware safety
 
-R1.5a adds an **offline-only** SFI/DDC structure inspector. Do not confuse parsing a signed image with cryptographic signature validation or controller flashing. Firmware downloads/boot commands remain intentionally unavailable until R1.5b has validated bootloader state, Intel security-engine selection and recovery behavior. See [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md).
+R1.5a provides an **offline** SFI/DDC inspector. R1.5b adds a separate **explicit, one-attempt firmware boot** command which requires a cold Bootloader state, exact BE200 variant, ECDSA SBE, pinned image SHA256 and the `--confirm-cold-boot` flag. It does not switch external power or perform a reset-to-bootloader. It is not yet validated on hardware. The firmware's Intel cryptographic signature is **not independently verified by the host**, only checked by the controller's Secure Boot process. Read [docs/FIRMWARE_INSPECTION.md](docs/FIRMWARE_INSPECTION.md) and [docs/FIRMWARE_BOOT.md](docs/FIRMWARE_BOOT.md) first.
 
 ## Logging
 

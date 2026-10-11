@@ -1,4 +1,5 @@
 mod driver;
+mod boot;
 mod firmware;
 mod hci;
 mod intel;
@@ -18,6 +19,8 @@ fn usage() -> &'static str {
        be200hub usb probe\n\
        be200hub hci version\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
+       be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
+       be200hub firmware boot --sfi <PATH> --ddc <PATH> --confirm-cold-boot\n\
        be200hub driver status\n\
        be200hub driver verify\n\
        be200hub driver backup [--out DIRECTORY]\n\
@@ -69,6 +72,14 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, sfi] if a == "firmware" && b == "inspect" => firmware::inspect(sfi, None),
         [a, b, sfi, ddc] if a == "firmware" && b == "inspect" => {
             firmware::inspect(sfi, Some(ddc))
+        },
+        [a, b, c, sfi, d, ddc] if a == "firmware" && b == "plan"
+            && c == "--sfi" && d == "--ddc" => {
+            firmware::dry_run(sfi, ddc)
+        },
+        [a,b,c,sfi,d,ddc,flag] if a == "firmware" && b == "boot"
+            && c == "--sfi" && d == "--ddc" && flag == "--confirm-cold-boot" => {
+            boot::boot_once(sfi,ddc)
         },
         [a, b] if a == "driver" && b == "status" => driver::status(),
         [a, b] if a == "driver" && b == "verify" => driver::verify(),

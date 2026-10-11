@@ -32,3 +32,9 @@ Evidence: BE200 002 PortCycle command `0xFC05` with parameter `FF` and 003 ColdB
 ## R1.5a: Offline signed firmware structure
 
 `be200hub firmware inspect <SFI_PATH> [DDC_PATH]` only uses `std::fs::read`; it does not touch WinUSB or an HCI interface. Parsing checks CSS versions, RSA/ECDSA/hybrid layout, HCI command record boundaries, 4-byte aligned data group boundaries, <=252-byte Secure Send data fragment planning, embedded Intel 0xFC0E boot parameter and DDC record lengths. R1.5b must confirm controller SBE type and explicitly gate firmware transactions behind hardware bootloader state. Parsing does **not** cryptographically authenticate Intel's signature, select the correct SBE path or prove the firmware matches the running controller.
+
+## R1.5b: Guarded independent firmware boot
+
+`firmware plan`: checks pinned SHA256 pair and produces an **offline** ECDSA wire plan, based on Intel's published SFI scheme and capture 003. All planned 0xFC09 packets are built from the *provided* signed SFI, never blindly copied from Windows traces. `firmware boot`: requires WinUSB, live Bootloader 0x01, matching CNVi/CNVr TOP and CNVi BT variant 0x1C, Secure Boot=1, SBE=1. Sends ECDSA CSS/PKEY/SIGN and 252-byte-or-less DATA chunks through Bulk OUT 0x02, checks 0xFF/0x06 result, issues one 0xFC01 boot-to-operational, awaits 0xFF/0x02, re-queries 0xFC05 Operational 0x03, and sends one 0xFC8B DDC record.
+
+A failure aborts. The program does NOT autonomously toggle USB/M.2 power, disconnect data lines, retry firmware, reset to bootloader, disable drivers, or touch MT7925. See FIRMWARE_BOOT.md for real-hardware constraints.

@@ -3,6 +3,10 @@ use crate::error::{AppError, Result};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Version {
+    pub cnvi_bt: Option<u32>,
+    pub cnvr_bt: Option<u32>,
+    pub secure_boot: Option<u8>,
+    pub sbe_type: Option<u8>,
     pub image_type: Option<u8>,
     pub cnvi_top: Option<u32>,
     pub cnvr_top: Option<u32>,
@@ -18,7 +22,7 @@ fn read_u32_le(bytes: &[u8], name: &str) -> Result<u32> {
 /// Parse Intel vendor Return Parameters *after* the Command Complete status byte.
 /// TLV format is [tag: u8, len: u8, value: len bytes].
 pub fn parse_read_version_tlv(bytes: &[u8]) -> Result<Version> {
-    let mut v = Version { image_type: None, cnvi_top: None, cnvr_top: None, tlv_count: 0 };
+    let mut v = Version { image_type: None, cnvi_top: None, cnvr_top: None, cnvi_bt: None, cnvr_bt: None, secure_boot: None, sbe_type: None, tlv_count: 0 };
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         if bytes.len() - cursor < 2 {
@@ -40,6 +44,11 @@ pub fn parse_read_version_tlv(bytes: &[u8]) -> Result<Version> {
         match kind {
             0x10 => v.cnvi_top = Some(read_u32_le(value, "CNVi TOP")?),
             0x11 => v.cnvr_top = Some(read_u32_le(value, "CNVr TOP")?),
+            0x12 => v.cnvi_bt = Some(read_u32_le(value, "CNVi Bluetooth")?),
+            0x13 => v.cnvr_bt = Some(read_u32_le(value, "CNVr Bluetooth")?),
+            0x28 if size == 1 => v.secure_boot = Some(value[0]),
+            0x2f if size == 1 => v.sbe_type = Some(value[0]),
+            0x28 | 0x2f => return Err(AppError::Protocol(format!("Invalid Intel security TLV 0x{kind:02X} length {size}"))),
             0x1c if size == 1 => v.image_type = Some(value[0]),
             0x1c => return Err(AppError::Protocol("Invalid image-type TLV length".into())),
             _ => {}
@@ -48,6 +57,13 @@ pub fn parse_read_version_tlv(bytes: &[u8]) -> Result<Version> {
         cursor = end;
     }
     Ok(v)
+}
+
+impl Version {
+    /// From Linux btintel.h INTEL_HW_VARIANT(cnvi_bt).
+    pub fn hardware_variant(&self) -> Option<u8> {
+        self.cnvi_bt.map(|v| ((v >> 16) & 0x3f) as u8)
+    }
 }
 
 pub fn image_description(value: u8) -> &'static str {
@@ -83,4 +99,23 @@ mod tests {
         assert!(parse_read_version_tlv(&[0x1c]).is_err());
         assert!(parse_read_version_tlv(&[0x1c, 0x02, 0x01, 0x00]).is_err());
     }
+    #[test]
+    fn parses_be200_bootloader_security_tlvs_from_003() {
+        // Sanitized fields from 003-ColdBoot frame 1956.
+        let tlv = [
+            0x10,4,0x10,0x19,0x00,0x02,
+            0x11,4,0x10,0x19,0x00,0x02,
+            0x12,4,0x00,0x37,0x1c,0x00,
+            0x1c,1,0x01,
+            0x28,1,0x01,
+            0x2f,1,0x01
+        ];
+        let parsed = parse_read_version_tlv(&tlv).unwrap();
+        assert_eq!(parsed.image_type, Some(1));
+        assert_eq!(parsed.hardware_variant(), Some(0x1c));
+        assert_eq!(parsed.sbe_type, Some(1));
+        assert_eq!(parsed.secure_boot, Some(1));
+        assert_eq!(parsed.cnvi_top, Some(0x0200_1910));
+    }
+
 }
