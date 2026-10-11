@@ -1,0 +1,8 @@
+[package]
+name = "audio-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+device-policy = { path = "../device-policy" }

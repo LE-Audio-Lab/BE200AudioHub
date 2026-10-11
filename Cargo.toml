@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[workspace]
+members = [
+    ".",
+    "crates/be200-runtime",
+    "crates/audio-bridge",
+    "crates/bap-client",
+    "crates/device-policy",
+    "crates/iso-scheduler",
+    "crates/recovery-supervisor",
+]
+resolver = "2"
+
 [[bin]]
 name = "be200hub"
 path = "src/main.rs"
