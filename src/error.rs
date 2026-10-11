@@ -7,12 +7,13 @@ pub enum AppError {
     DeviceNotFound(u16, u16),
     Driver(String),
     Protocol(String),
+    Firmware(String),
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(s) | Self::Driver(s) | Self::Protocol(s) => write!(f, "{s}"),
+            Self::Usage(s) | Self::Driver(s) | Self::Protocol(s) | Self::Firmware(s) => write!(f, "{s}"),
             Self::Usb(e) => write!(f, "USB error: {e}"),
             Self::DeviceNotFound(vid, pid) => {
                 write!(f, "Device {vid:04x}:{pid:04x} not found")
@@ -30,3 +31,14 @@ impl From<rusb::Error> for AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    #[test]
+    fn firmware_error_formats_reason() {
+        let error = AppError::Firmware("firmware profile mismatch".into());
+        assert_eq!(error.to_string(), "firmware profile mismatch");
+    }
+}
