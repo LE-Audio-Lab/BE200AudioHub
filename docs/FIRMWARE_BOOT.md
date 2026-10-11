@@ -5,8 +5,8 @@
 - R1.4 independent HCI Read Version: **validated on user's BE200**.
 - R1.5a offline SFI/DDC structure: **validated**.
 - R1.5b Windows wire reconstruction: **3960 out of 3960 HCI 0xFC09 packets match** `003-ColdBoot.pcapng`, including ECDSA headers and DATA, using an independent offline Python comparison.
-- R1.5b Rust loader, offline wire-hash oracle, read-only preflight and guarded boot: **implemented, local cargo tests still required**.
-- **Independent Rust cold boot on hardware has NOT been tested.**
+- R1.5b Rust loader, offline wire-hash oracle, read-only preflight and guarded boot: **validated on maintainer's Windows rig (22/22 Cargo tests)**.
+- **First independent Rust cold boot on the physical BE200 PASSED on 2026-10-11 (004-R1.5b-ColdSend.pcapng).** See [Experiment 004](EXPERIMENT_004_R1_5B.md) for exact packet hashes and independent evidence.
 
 ## Image provenance and compatibility
 

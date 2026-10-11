@@ -12,7 +12,7 @@ Goal: independently operate the BE200 through **WinUSB/libusb** without relying 
 - **R1.3b — Windows validated:** operator replaced **BE200 only** with WinUSB, `driver verify` and `usb probe` passed. Manual OEM driver recovery is documented, not hardware-exercised.
 - **R1.4 — validated on BE200:** first independent Intel `0xFC05` HCI query through WinUSB.
 - **R1.5a — validated offline:** Intel SFI/DDC structure.
-- **R1.5b — implementation pending local testing:** BE200 Windows 24.60.0.4 *extracted OEM SFI*, 003-PCAP-exact 3,960-packet Secure Send, guarded first cold boot. The Linux SFI is not an allowed live boot input.
+- **R1.5b — independently cold-booted on BE200 (2026-10-11):** Rust + WinUSB loaded the exact Windows 24.60.0.4 OEM firmware; 3,960/3,960 USB Secure Sends match the original Intel 003 capture byte-for-byte; the controller confirmed Operational image 0x03 and accepted DSBR/DDC. See [Experiment 004](docs/EXPERIMENT_004_R1_5B.md).
 - **R1.6 (later):** independent BLE scan, then LE Audio.
 
 ## Run on Windows
