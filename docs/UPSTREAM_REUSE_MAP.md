@@ -42,9 +42,17 @@ Keep as validated hardware substrate:
 
 These are R1 evidence-bearing code. R2 wraps them; it does not rewrite them.
 
-### LE-Audio-Relay @ 3f75ae1a487bf92aaaba8dfe37fac36ab6576f59
+## LE-Audio-Relay as a reference oracle
 
-Reusable implementation:
+Canonical snapshot:
+
+`STanJK/LE-Audio-Relay @ 3f75ae1a487bf92aaaba8dfe37fac36ab6576f59`
+
+Frozen under:
+
+`reference/le-audio-relay/`
+
+Reference behavior to port into Rust:
 
 - `Routing/ProcessLoopbackSource.cs`
 - `Routing/AudioFormatPolicy.cs`
@@ -53,8 +61,15 @@ Reusable implementation:
 - `Timing/ProvisionalPositiveDriftGuard.cs`
 - `Supervision/WorkerProtocol.cs`
 - `Supervision/SupervisorState.cs`
+- `Telemetry/RouteTelemetry.cs`
 
-The first integration keeps these in the .NET process and defines a narrow PCM IPC boundary. Do not port them to Rust before first sound.
+The snapshot is not compiled. There is no .NET sidecar in the target product architecture.
+
+Rust target:
+
+- `crates/audio-capture-win32`: Win32/WASAPI process loopback.
+- `crates/audio-bridge`: PCM normalization/channel mapping.
+- `crates/iso-scheduler`: ring/cushion/drift/pacing semantics.
 
 ## Oracles, not product dependencies
 

@@ -91,18 +91,45 @@ never:
     silently increase latency to absorb clock drift
 ```
 
+## audio-capture-win32
+
+Target API path, implemented in Rust:
+
+```text
+ActivateAudioInterfaceAsync
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS
+    exclude current process tree
+        |
+        v
+IAudioClient / event-driven shared mode
+        |
+        v
+IAudioCaptureClient
+        |
+        v
+48 kHz Float32 stereo PCM
+```
+
+Behavioral oracle: `reference/le-audio-relay/Routing/ProcessLoopbackSource.cs`.
+
+Port these semantics, not the .NET runtime:
+
+- exclude the current process tree;
+- shared event-driven capture;
+- 48 kHz Float32 stereo;
+- MMCSS `Pro Audio` intent;
+- propagate silence flags and device/QPC positions.
+
+First-sound mode bypasses this crate and uses a fixed WAV/sine source.
+
 ## audio-bridge
 
 ```text
-.NET Process Loopback (48k float stereo)
-    -> existing SPSC/cushion logic
-    -> narrow IPC framing
-    -> Rust audio-bridge
+audio-capture-win32
+    -> 48 kHz Float32 stereo
     -> channel mapping from StreamPlan
     -> LC3 encoder input
-
-First-sound mode:
-    fixed WAV/sine source instead of WASAPI
 ```
 
 ## recovery-supervisor
