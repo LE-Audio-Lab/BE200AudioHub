@@ -1,0 +1,12 @@
+/target/
+/.vscode/
+*.pdb
+*.pcap
+*.pcapng
+*.sfi
+*.ddc
+*.etl
+*.zip
+*.log
+/fixtures/private/
+.DS_Store
