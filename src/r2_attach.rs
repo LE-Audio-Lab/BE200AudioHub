@@ -438,13 +438,6 @@ fn print_rsi_match(
     Ok(())
 }
 
-fn is_resolvable_private_observation(
-    observation: &bumble_adapter::ScanObservation,
-) -> bool {
-    random_address_kind(&observation.address, observation.address_type)
-        == Some("resolvable-private(RPA)")
-}
-
 fn random_address_kind(address: &str, address_type: u8) -> Option<&'static str> {
     if address_type != 1 {
         return None;
@@ -807,9 +800,6 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         let mut orphan_bonds = Vec::<(bumble_adapter::ScanObservation, String)>::new();
         let mut fresh = Vec::<bumble_adapter::ScanObservation>::new();
         let mut first_pair_anchors = Vec::<bumble_adapter::ScanObservation>::new();
-        let mut second_pair_anchors = Vec::<bumble_adapter::ScanObservation>::new();
-        let mut expected_second_identities = Vec::<String>::new();
-        let mut expected_pair_identity: Option<String> = None;
 
         for observation in scan
             .observations
@@ -870,35 +860,18 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                     }
 
                     if let Some(sirk) = set_sirk.as_ref() {
-                        if swift_pair_matches_target(observation, wanted_name) {
-                            second_pair_anchors.push(observation.clone());
-                            println!(
-                                "  second-member formal-pairing anchor candidate {} type={} RSSI={}dBm",
-                                observation.address, observation.address_type, observation.rssi
-                            );
-                            continue;
-                        }
-
                         if observation.name.as_deref() == Some(wanted_name) {
                             print_rsi_match("unresolved-same-name", observation, sirk)?;
                             if candidate_matches_set(observation, Some(sirk))? {
-                                if !is_resolvable_private_observation(observation) {
-                                    let expected = normalize_identity_address(&observation.address);
-                                    if !current.members.iter().any(|member| {
-                                        member.identity_address.eq_ignore_ascii_case(&expected)
-                                    }) {
-                                        println!(
-                                            "  second-member identity candidate {} via matching RSI",
-                                            expected
-                                        );
-                                        expected_second_identities.push(expected);
-                                    }
-                                    continue;
-                                }
+                                println!(
+                                    "  accept second-member candidate {} type={} via CSIS RSI MATCH",
+                                    observation.address,
+                                    observation.address_type
+                                );
                                 fresh.push(observation.clone());
                             } else {
                                 println!(
-                                    "  reject same-name candidate {}: CSIS RSI did not validate; swift_pair=false",
+                                    "  reject same-name candidate {}: CSIS RSI did not validate",
                                     observation.address
                                 );
                             }
@@ -923,27 +896,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                 );
                 fresh = first_pair_anchors;
             }
-        } else if current.members.len() + 1 == TARGET_SET_MEMBERS && set_sirk.is_some() {
-            expected_second_identities.sort();
-            expected_second_identities.dedup();
-            second_pair_anchors.sort_by_key(|observation| std::cmp::Reverse(observation.rssi));
-
-            if expected_second_identities.len() == 1 && !second_pair_anchors.is_empty() {
-                expected_pair_identity = Some(expected_second_identities[0].clone());
-                println!(
-                    "Second-bond formal-pairing bridge: expected identity={} from CSIS-RSI-matching LE Audio advertisement; {} Swift Pair anchor(s) available.",
-                    expected_second_identities[0],
-                    second_pair_anchors.len()
-                );
-                fresh = second_pair_anchors;
-            } else if !second_pair_anchors.is_empty() || !expected_second_identities.is_empty() {
-                println!(
-                    "  second-member bridge incomplete: {} expected identity candidate(s), {} Swift Pair anchor(s)",
-                    expected_second_identities.len(),
-                    second_pair_anchors.len()
-                );
-            }
-        }
+        }        }
 
         if let Some((observation, identity_address)) = known_recovery
             .into_iter()
@@ -1137,7 +1090,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
 
         if fresh.is_empty() {
             let detail = if set_sirk.is_some() {
-                "No unbonded same-set current RPA with a valid CSIS RSI was visible. Identity-looking public LE Audio advertisements are intentionally not used as SMP transports. If the Buds3 Pro pairing light has gone out with both earbuds still in the case, take the earbuds out so the remaining set member advertises its current RPA, then rerun this same command."
+                "No unbonded Set Member with a CSIS RSI matching the stored SIRK was visible. Re-enter Buds3 Pro pairing mode and rerun this same command; existing bonds will not be re-paired."
             } else if current.members.is_empty() {
                 "No pairing-only Swift Pair LE+BR/EDR Secure Connections anchor was visible. Put both earbuds in the case and enter formal pairing mode."
             } else {
@@ -1154,7 +1107,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             if current.members.is_empty() && set_sirk.is_none() {
                 "First-bond Swift Pair transport candidate(s)"
             } else {
-                "Unbonded validated same-set candidate(s)"
+                "Unbonded CSIS-validated Set Member candidate(s)"
             }
         );
         for (index, candidate) in fresh.iter().enumerate() {
