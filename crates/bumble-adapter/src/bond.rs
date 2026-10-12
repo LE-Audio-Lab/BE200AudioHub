@@ -6,13 +6,14 @@ use std::time::Duration;
 use bumble::keys::{JsonKeyStore, KeyStore};
 use bumble::{Address, AddressType};
 use bumble_hci::{Command, ReturnParameters};
-use bumble_smp::AddressResolver;
+use bumble_smp::{AddressResolver, LocalKeyMaterial};
 use bumble_transport::{Error, Result as TransportResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{AttachedController, ScanObservation};
 
 const SET_DB_SCHEMA_VERSION: u32 = 1;
+const LOCAL_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControllerIdentity {
@@ -41,6 +42,18 @@ pub struct BondStore {
     root: PathBuf,
     key_store: JsonKeyStore,
     set_db: BondSetDb,
+    local_keys: Option<LocalKeyMaterial>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LocalIdentityRecord {
+    schema_version: u32,
+    controller_identity: String,
+    ltk_hex: String,
+    ediv: u16,
+    rand_hex: String,
+    irk_hex: String,
+    csrk_hex: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,11 +101,26 @@ impl BondStore {
             root.join("pairing-keys.json"),
         );
 
+        let has_existing_bonds = !key_store
+            .get_all()
+            .map_err(|error| Error::Remote(format!(
+                "failed to inspect pairing key store before local-identity load: {error}"
+            )))?
+            .is_empty()
+            || set_db.sets.values().any(|record| !record.members.is_empty());
+
+        let local_keys = load_or_create_local_identity(
+            &root.join("local-identity.json"),
+            &identity.public_address,
+            has_existing_bonds,
+        )?;
+
         Ok(Self {
             controller_identity: identity.public_address.clone(),
             root,
             key_store,
             set_db,
+            local_keys,
         })
     }
 
@@ -111,6 +139,24 @@ impl BondStore {
     pub fn set_db_path(&self) -> PathBuf {
         self.root.join("bond-sets.json")
     }
+    pub fn local_identity_path(&self) -> PathBuf {
+        self.root.join("local-identity.json")
+    }
+
+    pub fn has_persistent_local_identity(&self) -> bool {
+        self.local_keys.is_some()
+    }
+
+    pub(crate) fn local_key_material(&self) -> TransportResult<LocalKeyMaterial> {
+        self.local_keys.clone().ok_or_else(|| Error::Remote(
+            "legacy bond state has peer keys but no persisted local IRK. The original local IRK was ephemeral and cannot be reconstructed; archive/reset this controller bond state once, then re-pair so all set members see one stable coordinator identity.".into()
+        ))
+    }
+
+    pub(crate) fn local_irk(&self) -> TransportResult<[u8; 16]> {
+        Ok(self.local_key_material()?.irk)
+    }
+
 
     pub fn pairing_key_count(&self) -> TransportResult<usize> {
         self.key_store
@@ -409,6 +455,80 @@ fn enforce_controller_identity(path: &Path, identity: &str) -> TransportResult<(
     }
 }
 
+fn load_or_create_local_identity(
+    path: &Path,
+    controller_identity: &str,
+    has_existing_bonds: bool,
+) -> TransportResult<Option<LocalKeyMaterial>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let record: LocalIdentityRecord = serde_json::from_slice(&bytes)
+                .map_err(|error| Error::Remote(format!(
+                    "invalid local identity database: {error}"
+                )))?;
+            if record.schema_version != LOCAL_IDENTITY_SCHEMA_VERSION {
+                return Err(Error::Remote(format!(
+                    "unsupported local identity schema {}; expected {}",
+                    record.schema_version, LOCAL_IDENTITY_SCHEMA_VERSION
+                )));
+            }
+            if !record.controller_identity.eq_ignore_ascii_case(controller_identity) {
+                return Err(Error::Remote(
+                    "local identity database belongs to a different controller identity".into()
+                ));
+            }
+
+            let identity_address = Address::parse(
+                controller_identity,
+                AddressType::PUBLIC_DEVICE,
+            )
+            .map_err(|error| Error::InvalidSpec(format!(
+                "invalid controller identity for local key material: {error}"
+            )))?;
+
+            Ok(Some(LocalKeyMaterial {
+                ltk: decode_hex_16_named(&record.ltk_hex, "local LTK")?,
+                ediv: record.ediv,
+                rand: decode_hex_8_named(&record.rand_hex, "local RAND")?,
+                irk: decode_hex_16_named(&record.irk_hex, "local IRK")?,
+                identity_address,
+                csrk: decode_hex_16_named(&record.csrk_hex, "local CSRK")?,
+            }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if has_existing_bonds {
+                return Ok(None);
+            }
+
+            let identity_address = Address::parse(
+                controller_identity,
+                AddressType::PUBLIC_DEVICE,
+            )
+            .map_err(|error| Error::InvalidSpec(format!(
+                "invalid controller identity for local key generation: {error}"
+            )))?;
+            let local_keys = LocalKeyMaterial::generate(identity_address);
+            let record = LocalIdentityRecord {
+                schema_version: LOCAL_IDENTITY_SCHEMA_VERSION,
+                controller_identity: controller_identity.to_owned(),
+                ltk_hex: hex(&local_keys.ltk),
+                ediv: local_keys.ediv,
+                rand_hex: hex(&local_keys.rand),
+                irk_hex: hex(&local_keys.irk),
+                csrk_hex: hex(&local_keys.csrk),
+            };
+            let bytes = serde_json::to_vec_pretty(&record).map_err(|error| {
+                Error::Remote(format!("failed to encode local identity database: {error}"))
+            })?;
+            atomic_write(path, &bytes)?;
+            Ok(Some(local_keys))
+        }
+        Err(error) => Err(Error::Remote(format!(
+            "failed to read local identity database: {error}"
+        ))),
+    }
+}
+
 fn load_set_db(path: &Path, controller_identity: &str) -> TransportResult<BondSetDb> {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -458,6 +578,30 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> TransportResult<()> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_hex_16_named(value: &str, label: &str) -> TransportResult<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::Remote(format!("{label} is not 16-byte hexadecimal data")));
+    }
+    let mut output = [0u8; 16];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| Error::Remote(format!("{label} contains invalid hex")))?;
+    }
+    Ok(output)
+}
+
+fn decode_hex_8_named(value: &str, label: &str) -> TransportResult<[u8; 8]> {
+    if value.len() != 16 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::Remote(format!("{label} is not 8-byte hexadecimal data")));
+    }
+    let mut output = [0u8; 8];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| Error::Remote(format!("{label} contains invalid hex")))?;
+    }
+    Ok(output)
 }
 
 fn decode_hex_16(value: &str) -> TransportResult<[u8; 16]> {
