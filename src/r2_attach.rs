@@ -1143,6 +1143,25 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             acl.connection_handle, acl.peer_address
         );
 
+        let expected_peer_identity = if set_sirk.is_some() && selected.address_type == 0 {
+            Some(
+                selected
+                    .address
+                    .split('/')
+                    .next()
+                    .unwrap_or(&selected.address)
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if let Some(expected) = expected_peer_identity.as_deref() {
+            println!(
+                "Second-member identity guard: expected peer identity={} from CSIS-RSI-matching advertisement",
+                expected
+            );
+        }
+
         println!("Starting one-time SMP Secure Connections bonding...");
         let paired = match attached.pair_and_persist(
             acl.connection_handle,
