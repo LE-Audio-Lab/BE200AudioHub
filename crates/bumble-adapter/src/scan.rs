@@ -165,7 +165,7 @@ fn drain_advertisements(
 ) {
     for advertisement in device.take_advertisements() {
         *reports_seen += 1;
-        let address = advertisement.address.to_string();
+        let address = advertisement.address.to_string(true);
         let observation = ScanObservation {
             address: address.clone(),
             name: display_name(&advertisement.data_bytes),
