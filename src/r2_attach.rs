@@ -736,7 +736,24 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
     println!("Bond root: {}", store.root().display());
     println!("Pairing keys: {}", store.pairing_keys_path().display());
     println!("Set metadata: {}", store.set_db_path().display());
+    println!("Local identity: {}", store.local_identity_path().display());
+    println!(
+        "Persistent coordinator local IRK: {}",
+        if store.has_persistent_local_identity() {
+            "loaded"
+        } else {
+            "MISSING (legacy bond state)"
+        }
+    );
     println!("IRK resolver loaded: {resolving_keys} key(s)");
+
+    if !store.has_persistent_local_identity() && store.pairing_key_count()
+        .map_err(|error| AppError::Protocol(format!("Bond store inspect failed: {error}")))? > 0
+    {
+        return Err(AppError::Protocol(
+            "Legacy R2.4 bond state contains peer keys but no persisted coordinator local IRK. The first pairing distributed an ephemeral local IRK that is no longer recoverable. Archive pairing-keys.json + bond-sets.json once and re-pair from formal pairing mode; the new flow will persist one stable local identity for both set members.".into()
+        ));
+    }
 
     loop {
         let current = store.set_summary(wanted_name);
@@ -898,11 +915,15 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                 "Recovering CSIS metadata for existing bond {} via current RPA {} (no SMP)...",
                 identity_address, observation.address
             );
-            let acl = attached
-                .connect_scanned_observation(&observation, CONNECT_TIMEOUT)
-                .map_err(|error| AppError::Protocol(format!(
-                    "Known-bond ACL connect failed: {error}"
-                )))?;
+            let acl = connect_with_coordinator_privacy(
+                &mut attached,
+                &observation,
+                &store,
+                CONNECT_TIMEOUT,
+            )
+            .map_err(|error| AppError::Protocol(format!(
+                "Known-bond ACL connect failed: {error}"
+            )))?;
 
             let recovery = (|| -> Result<()> {
                 attached
@@ -985,11 +1006,15 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             };
             let (observation, identity_address) = &orphan_bonds[selected_index];
 
-            let acl = attached
-                .connect_scanned_observation(observation, CONNECT_TIMEOUT)
-                .map_err(|error| AppError::Protocol(format!(
-                    "Orphan-bond ACL connect failed: {error}"
-                )))?;
+            let acl = connect_with_coordinator_privacy(
+                &mut attached,
+                observation,
+                &store,
+                CONNECT_TIMEOUT,
+            )
+            .map_err(|error| AppError::Protocol(format!(
+                "Orphan-bond ACL connect failed: {error}"
+            )))?;
 
             let recovery = (|| -> Result<()> {
                 attached
@@ -1127,9 +1152,18 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             "Connecting candidate [{selected_index}] {}...",
             selected.address
         );
-        let acl = attached
-            .connect_scanned_observation(selected, CONNECT_TIMEOUT)
-            .map_err(|error| AppError::Protocol(format!("LE ACL connect failed: {error}")))?;
+        let use_coordinator_privacy = !current.members.is_empty() || set_sirk.is_some();
+        let acl = if use_coordinator_privacy {
+            connect_with_coordinator_privacy(
+                &mut attached,
+                selected,
+                &store,
+                CONNECT_TIMEOUT,
+            )
+        } else {
+            attached.connect_scanned_observation(selected, CONNECT_TIMEOUT)
+        }
+        .map_err(|error| AppError::Protocol(format!("LE ACL connect failed: {error}")))?;
         println!(
             "ACL: PASS handle=0x{:04X} peer={}",
             acl.connection_handle, acl.peer_address
@@ -1154,10 +1188,20 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             );
         }
 
-        println!("Starting one-time SMP Secure Connections bonding...");
+        let pairing_local_address = if acl.local_address_type == 0 {
+            identity.public_address.as_str()
+        } else {
+            acl.local_address.as_str()
+        };
+        println!(
+            "Starting one-time SMP Secure Connections bonding with local_link={} type={}...",
+            pairing_local_address,
+            acl.local_address_type
+        );
         let paired = match attached.pair_and_persist(
             acl.connection_handle,
-            &identity.public_address,
+            pairing_local_address,
+            acl.local_address_type,
             wanted_name,
             expected_peer_identity.as_deref(),
             &mut store,
@@ -1347,11 +1391,15 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
             selected.address, member.identity_address
         );
 
-        let acl = attached
-            .connect_scanned_observation(&selected, CONNECT_TIMEOUT)
-            .map_err(|error| AppError::Protocol(format!(
-                "Stored-bond ACL connect failed: {error}"
-            )))?;
+        let acl = connect_with_coordinator_privacy(
+            &mut attached,
+            &selected,
+            &store,
+            CONNECT_TIMEOUT,
+        )
+        .map_err(|error| AppError::Protocol(format!(
+            "Stored-bond ACL connect failed: {error}"
+        )))?;
         println!("  ACL: PASS handle=0x{:04X}", acl.connection_handle);
 
         let verification = (|| -> Result<()> {
@@ -1429,6 +1477,20 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
 
     println!("R2.4 RESULT: all recorded members reconnected, encrypted from stored LTK, and matched stored CSIS without SMP pairing.");
     Ok(())
+}
+
+fn connect_with_coordinator_privacy(
+    attached: &mut bumble_adapter::AttachedController,
+    observation: &bumble_adapter::ScanObservation,
+    store: &bumble_adapter::BondStore,
+    timeout: Duration,
+) -> std::result::Result<bumble_adapter::LeAclReport, bumble_transport::Error> {
+    let local_irk = store.local_irk()?;
+    attached.connect_scanned_observation_with_local_rpa(
+        observation,
+        local_irk,
+        timeout,
+    )
 }
 
 fn swift_pair_matches_target(
