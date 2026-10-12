@@ -10,6 +10,7 @@ mod csis;
 mod init;
 mod pairing;
 mod scan;
+mod usb_fixed;
 
 pub use bond::{
     BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
