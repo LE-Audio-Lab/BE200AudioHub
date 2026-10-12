@@ -1167,7 +1167,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             acl.connection_handle,
             &identity.public_address,
             wanted_name,
-            expected_pair_identity.as_deref(),
+            expected_peer_identity.as_deref(),
             &mut store,
             PAIRING_TIMEOUT,
         ) {
