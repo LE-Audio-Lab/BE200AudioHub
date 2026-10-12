@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use bumble_hci::{Command, ExtendedAdvertisingReport, ReturnParameters};
+use bumble_hci::{Command, ReturnParameters};
 use bumble_transport::{Error, ExternalHostActivity, Result as TransportResult};
 
 use crate::AttachedController;
@@ -65,7 +65,6 @@ impl AttachedController {
 
         self.device.poll(&mut self.host);
         self.device.take_advertisements();
-        self.device.take_extended_advertising_reports();
 
         let duration = seconds
             .checked_mul(100)
@@ -77,9 +76,7 @@ impl AttachedController {
                 &mut self.host,
                 Command::LeSetExtendedScanEnable {
                     enable: 1,
-                    // R2 needs every extended-advertising fragment/variant so
-                    // host-side reassembly can reconstruct complete AdvData.
-                    filter_duplicates: 0,
+                    filter_duplicates: 1,
                     duration,
                     period: 0,
                 },
@@ -89,14 +86,12 @@ impl AttachedController {
             let deadline = Instant::now() + Duration::from_secs(u64::from(seconds));
             let mut reports_seen = 0usize;
             let mut observations = BTreeMap::<String, ScanObservation>::new();
-            let mut fragments = BTreeMap::<String, ExtendedFragmentAccumulator>::new();
 
             while Instant::now() < deadline {
                 self.device.poll(&mut self.host);
-                drain_extended_reports(
+                drain_advertisements(
                     &mut self.device,
                     &mut reports_seen,
-                    &mut fragments,
                     &mut observations,
                 );
 
@@ -118,13 +113,11 @@ impl AttachedController {
             }
 
             self.device.poll(&mut self.host);
-            drain_extended_reports(
+            drain_advertisements(
                 &mut self.device,
                 &mut reports_seen,
-                &mut fragments,
                 &mut observations,
             );
-            flush_incomplete_fragments(&mut fragments, &mut observations);
 
             Ok(ScanSummary {
                 reports_seen,
@@ -157,148 +150,50 @@ impl AttachedController {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ExtendedFragmentAccumulator {
-    last_report: ExtendedAdvertisingReport,
-    data: Vec<u8>,
-}
-
-fn drain_extended_reports(
+fn drain_advertisements(
     device: &mut bumble_host::Device,
     reports_seen: &mut usize,
-    fragments: &mut BTreeMap<String, ExtendedFragmentAccumulator>,
     observations: &mut BTreeMap<String, ScanObservation>,
 ) {
-    // Device still produces high-level advertisements internally. R2 deliberately
-    // ignores them here because Bumble-RS does not reassemble extended-advertising
-    // fragments before emitting Advertisement objects.
-    device.take_advertisements();
-
-    for report in device.take_extended_advertising_reports() {
+    for advertisement in device.take_advertisements() {
         *reports_seen += 1;
+        let address = advertisement.address.to_string(true);
+        let observation = ScanObservation {
+            address: address.clone(),
+            address_type: advertisement.address.address_type().0,
+            name: display_name(&advertisement.data_bytes),
+            rsi: resolvable_set_identifier(&advertisement.data_bytes),
+            rssi: advertisement.rssi,
+            primary_phy: advertisement.primary_phy,
+            secondary_phy: advertisement.secondary_phy,
+            sid: advertisement.sid,
+            is_legacy: advertisement.is_legacy,
+            is_connectable: advertisement.is_connectable,
+            is_scannable: advertisement.is_scannable,
+            data_len: advertisement.data_bytes.len(),
+            raw_data: advertisement.data_bytes.clone(),
+        };
 
-        let address = report.address.to_string(true);
-        let address_type = report.address_type;
-        let sid = report.advertising_sid;
-        let key = format!("{address_type}|{address}|{sid}");
-        let data_status = (report.event_type >> 5) & 0x03;
-
-        match data_status {
-            // Incomplete, more data to come.
-            1 => {
-                let entry = fragments.entry(key).or_insert_with(|| ExtendedFragmentAccumulator {
-                    last_report: report.clone(),
-                    data: Vec::new(),
-                });
-                entry.data.extend_from_slice(&report.data);
-                entry.last_report = report;
+        match observations.get(&address) {
+            Some(previous) if observation.name.is_none() && previous.name.is_some() => {
+                let mut merged = observation;
+                merged.name = previous.name.clone();
+                if merged.rsi.is_none() {
+                    merged.rsi = previous.rsi;
+                }
+                observations.insert(address, merged);
             }
-            // Complete, or incomplete/truncated with no more data to come.
-            0 | 2 => {
-                let mut data = fragments
-                    .remove(&key)
-                    .map(|fragment| fragment.data)
-                    .unwrap_or_default();
-                data.extend_from_slice(&report.data);
-                retain_observation(observations, observation_from_extended_report(&report, data));
+            Some(previous) if observation.rsi.is_none() && previous.rsi.is_some() => {
+                let mut merged = observation;
+                merged.rsi = previous.rsi;
+                observations.insert(address, merged);
             }
-            // Reserved status: retain what the controller supplied as one
-            // observation rather than inventing a continuation rule.
             _ => {
-                retain_observation(
-                    observations,
-                    observation_from_extended_report(&report, report.data.clone()),
-                );
+                observations.insert(address, observation);
             }
         }
     }
 }
-
-fn flush_incomplete_fragments(
-    fragments: &mut BTreeMap<String, ExtendedFragmentAccumulator>,
-    observations: &mut BTreeMap<String, ScanObservation>,
-) {
-    for (_, fragment) in std::mem::take(fragments) {
-        retain_observation(
-            observations,
-            observation_from_extended_report(&fragment.last_report, fragment.data),
-        );
-    }
-}
-
-fn observation_from_extended_report(
-    report: &ExtendedAdvertisingReport,
-    data: Vec<u8>,
-) -> ScanObservation {
-    const CONNECTABLE: u16 = 1 << 0;
-    const SCANNABLE: u16 = 1 << 1;
-    const LEGACY_PDU: u16 = 1 << 4;
-
-    let address = report.address.to_string(true);
-    ScanObservation {
-        address,
-        address_type: report.address_type,
-        name: display_name(&data),
-        rsi: resolvable_set_identifier(&data),
-        rssi: report.rssi,
-        primary_phy: report.primary_phy,
-        secondary_phy: report.secondary_phy,
-        sid: report.advertising_sid,
-        is_legacy: report.event_type & LEGACY_PDU != 0,
-        is_connectable: report.event_type & CONNECTABLE != 0,
-        is_scannable: report.event_type & SCANNABLE != 0,
-        data_len: data.len(),
-        raw_data: data,
-    }
-}
-
-fn retain_observation(
-    observations: &mut BTreeMap<String, ScanObservation>,
-    observation: ScanObservation,
-) {
-    let address = observation.address.clone();
-
-    match observations.get(&address) {
-        None => {
-            observations.insert(address, observation);
-        }
-        Some(previous) => {
-            // Keep evidence monotonically: once a name or RSI was observed for
-            // an address during this scan, a later sparse/truncated report must
-            // not erase it. Prefer the richer raw-data variant otherwise.
-            let replace = observation.rsi.is_some() && previous.rsi.is_none()
-                || (observation.rsi.is_some() == previous.rsi.is_some()
-                    && observation.name.is_some()
-                    && previous.name.is_none())
-                || (observation.rsi.is_some() == previous.rsi.is_some()
-                    && observation.name.is_some() == previous.name.is_some()
-                    && observation.data_len > previous.data_len);
-
-            if replace {
-                let mut richer = observation;
-                if richer.name.is_none() {
-                    richer.name = previous.name.clone();
-                }
-                if richer.rsi.is_none() {
-                    richer.rsi = previous.rsi;
-                }
-                observations.insert(address, richer);
-            } else {
-                let previous = observations.get_mut(&address).expect("address exists");
-                if previous.name.is_none() {
-                    previous.name = observation.name;
-                }
-                if previous.rsi.is_none() {
-                    previous.rsi = observation.rsi;
-                }
-                if observation.rssi > previous.rssi {
-                    previous.rssi = observation.rssi;
-                }
-            }
-        }
-    }
-}
-
 
 fn display_name(data: &[u8]) -> Option<String> {
     let mut short = None;
