@@ -12,6 +12,7 @@ const SCAN_POLL_SLICE: Duration = Duration::from_millis(300);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanObservation {
     pub address: String,
+    pub address_type: u8,
     pub name: Option<String>,
     pub rssi: i8,
     pub primary_phy: u8,
@@ -72,7 +73,6 @@ impl AttachedController {
             .and_then(|value| value.checked_add(50))
             .ok_or_else(|| Error::InvalidSpec("R2 scan duration overflow".into()))?;
 
-        let mut possibly_enabled = true;
         let outcome = (|| -> TransportResult<ScanSummary> {
             successful_command(
                 &mut self.host,
@@ -127,23 +127,17 @@ impl AttachedController {
             })
         })();
 
-        let cleanup = if possibly_enabled {
-            successful_command(
-                &mut self.host,
-                Command::LeSetExtendedScanEnable {
-                    enable: 0,
-                    filter_duplicates: 0,
-                    duration: 0,
-                    period: 0,
-                },
-                COMMAND_TIMEOUT,
-            )
-            .map(|_| ())
-        } else {
-            Ok(())
-        };
-        possibly_enabled = false;
-        let _ = possibly_enabled;
+        let cleanup = successful_command(
+            &mut self.host,
+            Command::LeSetExtendedScanEnable {
+                enable: 0,
+                filter_duplicates: 0,
+                duration: 0,
+                period: 0,
+            },
+            COMMAND_TIMEOUT,
+        )
+        .map(|_| ());
 
         match (outcome, cleanup) {
             (Ok(summary), Ok(())) => Ok(summary),
@@ -168,6 +162,7 @@ fn drain_advertisements(
         let address = advertisement.address.to_string(true);
         let observation = ScanObservation {
             address: address.clone(),
+            address_type: advertisement.address.address_type().0,
             name: display_name(&advertisement.data_bytes),
             rssi: advertisement.rssi,
             primary_phy: advertisement.primary_phy,

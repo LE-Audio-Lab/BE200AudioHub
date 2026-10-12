@@ -26,6 +26,7 @@ fn usage() -> &'static str {
        be200hub ble scan --seconds <1..30> [--show-addresses]\n\
        be200hub r2 attach-probe\n\
        be200hub r2 scan --seconds <1..30> [--show-addresses]\n\
+       be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -35,7 +36,7 @@ fn usage() -> &'static str {
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
-     R2 attach-probe preserves an already Operational controller and never sends HCI Reset.\n\
+     R2 attach/scan/connect preserve an already Operational controller and never send HCI Reset.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
 
@@ -86,6 +87,10 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, c, seconds, flag] if a == "r2" && b == "scan"
             && c == "--seconds" && flag == "--show-addresses" => {
             r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
+        },
+        [a, b, c, seconds, d, name] if a == "r2" && b == "connect-probe"
+            && c == "--seconds" && d == "--name" => {
+            r2_attach::connect_probe(r2_attach::parse_scan_seconds(seconds)?, name)
         },
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
