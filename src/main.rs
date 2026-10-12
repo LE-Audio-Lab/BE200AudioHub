@@ -26,6 +26,7 @@ fn usage() -> &'static str {
        be200hub ble scan --seconds <1..30> [--show-addresses]\n\
        be200hub r2 attach-probe\n\
        be200hub r2 scan --seconds <1..30> [--show-addresses]\n\
+       be200hub r2 scan-forensics --seconds <1..30>\n\
        be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 bond-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 bond-verify --seconds <1..30> --name <DEVICE_NAME>\n\
@@ -89,6 +90,10 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, c, seconds, flag] if a == "r2" && b == "scan"
             && c == "--seconds" && flag == "--show-addresses" => {
             r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
+        },
+        [a, b, c, seconds] if a == "r2" && b == "scan-forensics"
+            && c == "--seconds" => {
+            r2_attach::scan_forensics(r2_attach::parse_scan_seconds(seconds)?)
         },
         [a, b, c, seconds, d, name] if a == "r2" && b == "connect-probe"
             && c == "--seconds" && d == "--name" => {
