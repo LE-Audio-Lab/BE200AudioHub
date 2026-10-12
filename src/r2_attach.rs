@@ -405,6 +405,14 @@ fn address_type_label(address: &str, address_type: u8) -> String {
     }
 }
 
+fn normalize_identity_address(address: &str) -> String {
+    address
+        .split('/')
+        .next()
+        .unwrap_or(address)
+        .to_ascii_uppercase()
+}
+
 fn print_rsi_match(
     label: &str,
     observation: &bumble_adapter::ScanObservation,
@@ -799,6 +807,9 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         let mut orphan_bonds = Vec::<(bumble_adapter::ScanObservation, String)>::new();
         let mut fresh = Vec::<bumble_adapter::ScanObservation>::new();
         let mut first_pair_anchors = Vec::<bumble_adapter::ScanObservation>::new();
+        let mut second_pair_anchors = Vec::<bumble_adapter::ScanObservation>::new();
+        let mut expected_second_identities = Vec::<String>::new();
+        let mut expected_pair_identity: Option<String> = None;
 
         for observation in scan
             .observations
@@ -858,31 +869,47 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                         continue;
                     }
 
-                    if observation.name.as_deref() != Some(wanted_name) {
-                        continue;
-                    }
-
                     if let Some(sirk) = set_sirk.as_ref() {
-                        print_rsi_match("unresolved-same-name", observation, sirk)?;
-                    }
-
-                    if candidate_matches_set(observation, set_sirk.as_ref())? {
-                        if set_sirk.is_some() && !is_resolvable_private_observation(observation) {
+                        if swift_pair_matches_target(observation, wanted_name) {
+                            second_pair_anchors.push(observation.clone());
                             println!(
-                                "  defer same-set identity-looking advertiser {} type={}: subsequent SMP requires the member's current RPA transport",
-                                observation.address,
-                                observation.address_type
+                                "  second-member formal-pairing anchor candidate {} type={} RSSI={}dBm",
+                                observation.address, observation.address_type, observation.rssi
                             );
                             continue;
                         }
-                        fresh.push(observation.clone());
-                    } else if set_sirk.is_some() {
-                        println!(
-                            "  reject same-name candidate {}: CSIS RSI did not validate; swift_pair={}",
-                            observation.address,
-                            swift_pair_matches_target(observation, wanted_name)
-                        );
+
+                        if observation.name.as_deref() == Some(wanted_name) {
+                            print_rsi_match("unresolved-same-name", observation, sirk)?;
+                            if candidate_matches_set(observation, Some(sirk))? {
+                                if !is_resolvable_private_observation(observation) {
+                                    let expected = normalize_identity_address(&observation.address);
+                                    if !current.members.iter().any(|member| {
+                                        member.identity_address.eq_ignore_ascii_case(&expected)
+                                    }) {
+                                        println!(
+                                            "  second-member identity candidate {} via matching RSI",
+                                            expected
+                                        );
+                                        expected_second_identities.push(expected);
+                                    }
+                                    continue;
+                                }
+                                fresh.push(observation.clone());
+                            } else {
+                                println!(
+                                    "  reject same-name candidate {}: CSIS RSI did not validate; swift_pair=false",
+                                    observation.address
+                                );
+                            }
+                        }
+                        continue;
                     }
+
+                    if observation.name.as_deref() != Some(wanted_name) {
+                        continue;
+                    }
+                    fresh.push(observation.clone());
                 }
             }
         }
@@ -895,6 +922,26 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                     first_pair_anchors.len()
                 );
                 fresh = first_pair_anchors;
+            }
+        } else if current.members.len() + 1 == TARGET_SET_MEMBERS && set_sirk.is_some() {
+            expected_second_identities.sort();
+            expected_second_identities.dedup();
+            second_pair_anchors.sort_by_key(|observation| std::cmp::Reverse(observation.rssi));
+
+            if expected_second_identities.len() == 1 && !second_pair_anchors.is_empty() {
+                expected_pair_identity = Some(expected_second_identities[0].clone());
+                println!(
+                    "Second-bond formal-pairing bridge: expected identity={} from CSIS-RSI-matching LE Audio advertisement; {} Swift Pair anchor(s) available.",
+                    expected_second_identities[0],
+                    second_pair_anchors.len()
+                );
+                fresh = second_pair_anchors;
+            } else if !second_pair_anchors.is_empty() || !expected_second_identities.is_empty() {
+                println!(
+                    "  second-member bridge incomplete: {} expected identity candidate(s), {} Swift Pair anchor(s)",
+                    expected_second_identities.len(),
+                    second_pair_anchors.len()
+                );
             }
         }
 
@@ -1148,6 +1195,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             acl.connection_handle,
             &identity.public_address,
             wanted_name,
+            expected_pair_identity.as_deref(),
             &mut store,
             PAIRING_TIMEOUT,
         ) {
