@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bumble_hci::metadata::supported_command_names;
@@ -106,6 +108,266 @@ fn attach_be200_existing_operational_impl(
     let mut device = Device::new(0);
     let info = initialize_existing_operational(&mut host, &mut device, timeout)?;
     Ok(AttachedController { host, device, info })
+}
+
+
+#[derive(Default)]
+struct EventFramingState {
+    partial: Vec<u8>,
+    pending: VecDeque<Vec<u8>>,
+}
+
+#[derive(Clone)]
+struct Be200EventFramingUsbIo<B> {
+    inner: B,
+    event_state: Arc<Mutex<EventFramingState>>,
+}
+
+impl<B> Be200EventFramingUsbIo<B> {
+    fn new(inner: B) -> Self {
+        Self {
+            inner,
+            event_state: Arc::new(Mutex::new(EventFramingState::default())),
+        }
+    }
+}
+
+impl<B: UsbIo> UsbIo for Be200EventFramingUsbIo<B> {
+    fn read_interrupt(
+        &mut self,
+        endpoint: u8,
+        buffer: &mut [u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        {
+            let mut state = self.event_state.lock().map_err(|_| {
+                UsbTransferError::Other("BE200 HCI event framing state lock poisoned".into())
+            })?;
+            if let Some(event) = state.pending.pop_front() {
+                return copy_usb_event(&event, buffer);
+            }
+        }
+
+        let mut transfer = vec![0u8; buffer.len()];
+        let count = self.inner.read_interrupt(endpoint, &mut transfer, timeout)?;
+        if count > transfer.len() {
+            return Err(UsbTransferError::Other(format!(
+                "BE200 interrupt transfer overflow: {count} > {}",
+                transfer.len()
+            )));
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let mut state = self.event_state.lock().map_err(|_| {
+            UsbTransferError::Other("BE200 HCI event framing state lock poisoned".into())
+        })?;
+        frame_hci_event_transfer(&mut state, &transfer[..count])?;
+        match state.pending.pop_front() {
+            Some(event) => copy_usb_event(&event, buffer),
+            None => Ok(0),
+        }
+    }
+
+    fn read_bulk(
+        &mut self,
+        endpoint: u8,
+        buffer: &mut [u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        self.inner.read_bulk(endpoint, buffer, timeout)
+    }
+
+    fn write_control(
+        &mut self,
+        request_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        buffer: &[u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        self.inner
+            .write_control(request_type, request, value, index, buffer, timeout)
+    }
+
+    fn write_bulk(
+        &mut self,
+        endpoint: u8,
+        buffer: &[u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        self.inner.write_bulk(endpoint, buffer, timeout)
+    }
+
+    fn read_isochronous(
+        &mut self,
+        endpoint: u8,
+        max_packet_size: u16,
+        buffer: &mut [u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        self.inner
+            .read_isochronous(endpoint, max_packet_size, buffer, timeout)
+    }
+
+    fn write_isochronous(
+        &mut self,
+        endpoint: u8,
+        max_packet_size: u16,
+        buffer: &[u8],
+        timeout: Duration,
+    ) -> core::result::Result<usize, UsbTransferError> {
+        self.inner
+            .write_isochronous(endpoint, max_packet_size, buffer, timeout)
+    }
+}
+
+fn copy_usb_event(
+    event: &[u8],
+    buffer: &mut [u8],
+) -> core::result::Result<usize, UsbTransferError> {
+    if event.len() > buffer.len() {
+        return Err(UsbTransferError::Other(format!(
+            "framed HCI event {} B exceeds caller buffer {} B",
+            event.len(),
+            buffer.len()
+        )));
+    }
+    buffer[..event.len()].copy_from_slice(event);
+    Ok(event.len())
+}
+
+/// Match Linux btusb_recv_intr() semantics:
+/// - one USB interrupt transfer may contain one or more HCI Events;
+/// - one HCI Event may continue in the next transfer;
+/// - after completing an event, a trailing fragment smaller than the
+///   two-byte HCI Event header is treated as an unexpected continuation and
+///   dropped rather than reinterpreted as a new H4 packet.
+fn frame_hci_event_transfer(
+    state: &mut EventFramingState,
+    transfer: &[u8],
+) -> core::result::Result<(), UsbTransferError> {
+    const HCI_EVENT_HEADER_SIZE: usize = 2;
+    const MAX_HCI_EVENT_SIZE: usize = HCI_EVENT_HEADER_SIZE + u8::MAX as usize;
+
+    let mut offset = 0usize;
+    let mut completed_in_transfer = false;
+
+    if !state.partial.is_empty() {
+        while state.partial.len() < HCI_EVENT_HEADER_SIZE && offset < transfer.len() {
+            state.partial.push(transfer[offset]);
+            offset += 1;
+        }
+        if state.partial.len() < HCI_EVENT_HEADER_SIZE {
+            return Ok(());
+        }
+
+        let packet_size = HCI_EVENT_HEADER_SIZE + usize::from(state.partial[1]);
+        if packet_size > MAX_HCI_EVENT_SIZE {
+            state.partial.clear();
+            return Err(UsbTransferError::Other(format!(
+                "invalid HCI event size {packet_size}"
+            )));
+        }
+
+        let needed = packet_size.saturating_sub(state.partial.len());
+        let available = transfer.len().saturating_sub(offset);
+        let take = needed.min(available);
+        state
+            .partial
+            .extend_from_slice(&transfer[offset..offset + take]);
+        offset += take;
+
+        if state.partial.len() < packet_size {
+            return Ok(());
+        }
+
+        state.pending.push_back(std::mem::take(&mut state.partial));
+        completed_in_transfer = true;
+    }
+
+    while offset < transfer.len() {
+        let remaining = transfer.len() - offset;
+
+        if remaining < HCI_EVENT_HEADER_SIZE {
+            if completed_in_transfer {
+                println!(
+                    "[R2/USB] dropping unexpected interrupt continuation: {} byte(s) after complete HCI event: {}",
+                    remaining,
+                    raw_hex(&transfer[offset..])
+                );
+            } else {
+                state.partial.extend_from_slice(&transfer[offset..]);
+            }
+            return Ok(());
+        }
+
+        let packet_size =
+            HCI_EVENT_HEADER_SIZE + usize::from(transfer[offset + 1]);
+        if packet_size > MAX_HCI_EVENT_SIZE {
+            return Err(UsbTransferError::Other(format!(
+                "invalid HCI event size {packet_size} at interrupt offset {offset}"
+            )));
+        }
+
+        if remaining < packet_size {
+            state.partial.extend_from_slice(&transfer[offset..]);
+            return Ok(());
+        }
+
+        state
+            .pending
+            .push_back(transfer[offset..offset + packet_size].to_vec());
+        offset += packet_size;
+        completed_in_transfer = true;
+    }
+
+    Ok(())
+}
+
+fn open_be200_split_transport() -> TransportResult<SplitOpenedTransport> {
+    let opened = SystemUsbTransport::open("8087:0036")?;
+    let layout = opened.layout();
+    let sco_layout = opened.sco_layout();
+    let vendor_id = opened.vendor_id();
+    let product_id = opened.product_id();
+    let bus = opened.bus();
+    let address = opened.address();
+
+    let backend = Be200EventFramingUsbIo::new(opened.get_ref().clone());
+    let source = UsbTransport::from_backend_with_sco(
+        backend.clone(),
+        layout,
+        sco_layout,
+        vendor_id,
+        product_id,
+        bus,
+        address,
+    );
+    let sink = UsbTransport::from_backend_with_sco(
+        backend,
+        layout,
+        sco_layout,
+        vendor_id,
+        product_id,
+        bus,
+        address,
+    );
+
+    let mut metadata = BTreeMap::new();
+    metadata.insert("vendor_id".into(), format!("{vendor_id:04x}"));
+    metadata.insert("product_id".into(), format!("{product_id:04x}"));
+    metadata.insert("bus".into(), bus.to_string());
+    metadata.insert("address".into(), address.to_string());
+    metadata.insert("event_framing".into(), "btusb-compatible".into());
+
+    Ok(SplitOpenedTransport {
+        source: Box::new(source),
+        sink: Box::new(sink),
+        metadata,
+    })
 }
 
 struct RawExtendedAdvertisingTracingSource {
