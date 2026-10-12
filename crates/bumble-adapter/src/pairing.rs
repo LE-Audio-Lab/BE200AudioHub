@@ -264,7 +264,7 @@ fn find_stored_identity(
 
     after
         .iter()
-        .find(|(_, stored)| *stored == keys)
+        .find(|(_, stored)| *stored == *keys)
         .map(|(name, _)| name.clone())
 }
 
