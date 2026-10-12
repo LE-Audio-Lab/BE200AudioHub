@@ -2,11 +2,13 @@ use std::time::{Duration, Instant};
 
 use bumble::keys::{Key, KeyStore, MemoryKeyStore, PairingKeys};
 use bumble::{Address, AddressType};
+use bumble_crypto::{random_128, EccKey};
 use bumble_smp::{
-    IdentityAddressType, PairingCapabilities, PairingConfig,
+    AcceptAllDelegate, IdentityAddressType, PairingCapabilities, PairingConfig, PairingRole,
+    ScPairingSession, ScPairingState, SmpPdu, SMP_CID,
 };
 use bumble_transport::{
-    Error, ExternalHostActivity, LePairingSession, Result as TransportResult,
+    Error, ExternalHostActivity, Result as TransportResult,
 };
 
 use crate::{AttachedController, BondStore};
@@ -37,19 +39,33 @@ impl AttachedController {
     pub fn pair_and_persist(
         &mut self,
         connection_handle: u16,
-        controller_public_address: &str,
+        connection_local_address: &str,
+        connection_local_address_type: u8,
         target_name: &str,
         expected_peer_identity: Option<&str>,
         store: &mut BondStore,
         timeout: Duration,
     ) -> TransportResult<PairPersistReport> {
         let local_address = Address::parse(
-            controller_public_address,
-            AddressType::PUBLIC_DEVICE,
+            connection_local_address,
+            AddressType(connection_local_address_type),
         )
         .map_err(|error| Error::InvalidSpec(format!(
-            "invalid controller public address: {error}"
+            "invalid connection-local address: {error}"
         )))?;
+        let connection = self
+            .device
+            .le_connection(connection_handle)
+            .cloned()
+            .ok_or_else(|| Error::Remote(format!(
+                "unknown LE connection handle 0x{connection_handle:04X}"
+            )))?;
+        if connection.role != 0 {
+            return Err(Error::Remote(
+                "R2.4 pairing currently requires the BE200 to be LE Central".into(),
+            ));
+        }
+        let peer_address = connection.peer_address.clone();
 
         let config = PairingConfig {
             secure_connections: true,
@@ -75,19 +91,37 @@ impl AttachedController {
             config.capabilities.maximum_encryption_key_size
         );
 
-        let mut pairing = LePairingSession::accept_all(
-            &self.device,
-            connection_handle,
+        let mut pairing = ScPairingSession::new(
+            PairingRole::Initiator,
+            config.clone(),
+            Box::new(AcceptAllDelegate),
             local_address,
-            config,
-        )?;
+            peer_address,
+            EccKey::generate(),
+            random_128(),
+        )
+        .map_err(|error| Error::Remote(format!(
+            "failed to create persistent-identity SC session: {error}"
+        )))?;
+        pairing
+            .set_local_key_material(store.local_key_material()?)
+            .map_err(|error| Error::Remote(format!(
+                "failed to inject persistent local key material: {error}"
+            )))?;
 
         println!(
-            "[R2.4/SMP] session created: handle=0x{connection_handle:04X} role={:?} encrypted={}",
-            pairing.role(),
+            "[R2.4/SMP] session created: handle=0x{connection_handle:04X} role=Initiator local_link={} type={} encrypted={}",
+            connection_local_address,
+            connection_local_address_type,
             self.device.is_encrypted_on_handle(connection_handle)
         );
-        pairing.begin(&mut self.host, &mut self.device)?;
+        println!(
+            "[R2.4/SMP] persistent coordinator identity: public={} local-IRK=loaded",
+            store.controller_identity()
+        );
+        pairing
+            .start()
+            .map_err(|error| Error::Remote(format!("failed to start SC pairing: {error}")))?;
         println!(
             "[R2.4/SMP] begin: Pairing Request queued; state={:?}",
             pairing.state()
@@ -97,42 +131,132 @@ impl AttachedController {
         let deadline = started_at + timeout;
         let mut last_state = pairing.state();
         let mut last_encrypted = self.device.is_encrypted_on_handle(connection_handle);
+        let mut encryption_started = false;
+        let mut marked_encrypted = false;
         let mut idle_slices: u32 = 0;
 
         let keys = loop {
-            match pairing.drive_once(&mut self.host, &mut self.device)? {
-                Some(keys) => {
-                    println!(
-                        "[R2.4/SMP] complete after {:?}: state={:?} encrypted={}",
-                        started_at.elapsed(),
-                        pairing.state(),
-                        self.device.is_encrypted_on_handle(connection_handle)
-                    );
-                    break keys;
-                }
-                None => {
-                    let state = pairing.state();
-                    if state != last_state {
-                        println!(
-                            "[R2.4/SMP] state: {:?} -> {:?} at {:?}",
-                            last_state,
-                            state,
-                            started_at.elapsed()
-                        );
-                        last_state = state;
-                    }
+            flush_sc_outbound(
+                &mut pairing,
+                &mut self.host,
+                &mut self.device,
+                connection_handle,
+            )?;
 
-                    let encrypted = self.device.is_encrypted_on_handle(connection_handle);
-                    if encrypted != last_encrypted {
-                        println!(
-                            "[R2.4/SMP] ACL encryption: {} -> {} at {:?}",
-                            last_encrypted,
-                            encrypted,
-                            started_at.elapsed()
-                        );
-                        last_encrypted = encrypted;
-                    }
+            self.device.poll(&mut self.host);
+            for payload in self.device.take_l2cap_on_handle(connection_handle, SMP_CID) {
+                let pdu = SmpPdu::from_bytes(&payload)
+                    .map_err(|error| Error::Remote(format!("invalid SMP PDU: {error}")))?;
+                if matches!(pdu, SmpPdu::SecurityRequest { .. }) {
+                    println!("[R2.4/SMP] peer Security Request observed while local pairing already active; continuing current initiator session");
+                    continue;
                 }
+                pairing
+                    .process(pdu)
+                    .map_err(|error| Error::Remote(format!("SC pairing process failed: {error}")))?;
+            }
+
+            for request in self
+                .device
+                .take_long_term_key_requests_on_handle(connection_handle)
+            {
+                let Some(key) = pairing.ltk() else {
+                    self.device
+                        .reject_long_term_key_request(&mut self.host, request.connection_handle);
+                    return Err(Error::Remote(format!(
+                        "controller requested LTK before SC session produced one on handle 0x{:04X}",
+                        request.connection_handle
+                    )));
+                };
+                if !self.device.reply_long_term_key_request(
+                    &mut self.host,
+                    request.connection_handle,
+                    key,
+                ) {
+                    return Err(Error::Remote(format!(
+                        "failed to answer controller LTK request on handle 0x{:04X}",
+                        request.connection_handle
+                    )));
+                }
+            }
+
+            if pairing.state() == ScPairingState::WaitEncryption {
+                if !encryption_started {
+                    let key = pairing
+                        .ltk()
+                        .ok_or_else(|| Error::Remote(
+                            "SC pairing reached encryption without an LTK".into()
+                        ))?;
+                    if !self.device.enable_encryption_on_handle(
+                        &mut self.host,
+                        connection_handle,
+                        key,
+                    ) {
+                        return Err(Error::Remote(format!(
+                            "failed to start encryption on handle 0x{connection_handle:04X}"
+                        )));
+                    }
+                    encryption_started = true;
+                }
+
+                if self.device.is_encrypted_on_handle(connection_handle) && !marked_encrypted {
+                    pairing
+                        .mark_encrypted()
+                        .map_err(|error| Error::Remote(format!(
+                            "failed to mark SC session encrypted: {error}"
+                        )))?;
+                    marked_encrypted = true;
+                }
+            }
+
+            flush_sc_outbound(
+                &mut pairing,
+                &mut self.host,
+                &mut self.device,
+                connection_handle,
+            )?;
+
+            if pairing.state() == ScPairingState::Failed {
+                return Err(Error::Remote(format!(
+                    "SMP pairing failed: {:?}",
+                    pairing.failure()
+                )));
+            }
+            if pairing.state() == ScPairingState::Complete {
+                let keys = pairing
+                    .pairing_keys()
+                    .ok_or_else(|| Error::Remote(
+                        "SC pairing completed without keys".into()
+                    ))?;
+                println!(
+                    "[R2.4/SMP] complete after {:?}: state={:?} encrypted={}",
+                    started_at.elapsed(),
+                    pairing.state(),
+                    self.device.is_encrypted_on_handle(connection_handle)
+                );
+                break keys;
+            }
+
+            let state = pairing.state();
+            if state != last_state {
+                println!(
+                    "[R2.4/SMP] state: {:?} -> {:?} at {:?}",
+                    last_state,
+                    state,
+                    started_at.elapsed()
+                );
+                last_state = state;
+            }
+
+            let encrypted = self.device.is_encrypted_on_handle(connection_handle);
+            if encrypted != last_encrypted {
+                println!(
+                    "[R2.4/SMP] ACL encryption: {} -> {} at {:?}",
+                    last_encrypted,
+                    encrypted,
+                    started_at.elapsed()
+                );
+                last_encrypted = encrypted;
             }
 
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -385,6 +509,27 @@ impl AttachedController {
             }
         }
     }
+}
+
+fn flush_sc_outbound(
+    pairing: &mut ScPairingSession,
+    host: &mut bumble_host::LocalLink,
+    device: &mut bumble_host::Device,
+    connection_handle: u16,
+) -> TransportResult<()> {
+    for pdu in pairing.drain_outbound() {
+        if !device.send_l2cap_on_handle(
+            host,
+            connection_handle,
+            SMP_CID,
+            &pdu.to_bytes(),
+        ) {
+            return Err(Error::Remote(format!(
+                "failed to send SMP PDU on handle 0x{connection_handle:04X}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn selected_encryption_key(
