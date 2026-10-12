@@ -896,7 +896,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                 );
                 fresh = first_pair_anchors;
             }
-        }        }
+        }
 
         if let Some((observation, identity_address)) = known_recovery
             .into_iter()
