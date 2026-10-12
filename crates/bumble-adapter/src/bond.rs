@@ -154,6 +154,29 @@ impl BondStore {
         self.save_set_db()
     }
 
+    pub fn adopt_existing_bond(
+        &mut self,
+        target_name: &str,
+        identity_address: &str,
+    ) -> TransportResult<bool> {
+        let Some(keys) = self
+            .key_store
+            .get(identity_address)
+            .map_err(|error| Error::Remote(format!(
+                "failed to inspect existing bond {identity_address}: {error}"
+            )))?
+        else {
+            return Ok(false);
+        };
+
+        let address_type = keys
+            .address_type
+            .map(|value| value.0)
+            .unwrap_or(AddressType::RANDOM_DEVICE.0);
+        self.record_member(target_name, identity_address, address_type)?;
+        Ok(true)
+    }
+
     pub fn update_csis(
         &mut self,
         target_name: &str,

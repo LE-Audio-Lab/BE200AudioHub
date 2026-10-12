@@ -27,6 +27,8 @@ fn usage() -> &'static str {
        be200hub r2 attach-probe\n\
        be200hub r2 scan --seconds <1..30> [--show-addresses]\n\
        be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r2 bond-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r2 bond-verify --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -91,6 +93,14 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, c, seconds, d, name] if a == "r2" && b == "connect-probe"
             && c == "--seconds" && d == "--name" => {
             r2_attach::connect_probe(r2_attach::parse_scan_seconds(seconds)?, name)
+        },
+        [a, b, c, seconds, d, name] if a == "r2" && b == "bond-onboard"
+            && c == "--seconds" && d == "--name" => {
+            r2_attach::bond_onboard(r2_attach::parse_scan_seconds(seconds)?, name)
+        },
+        [a, b, c, seconds, d, name] if a == "r2" && b == "bond-verify"
+            && c == "--seconds" && d == "--name" => {
+            r2_attach::bond_verify(r2_attach::parse_scan_seconds(seconds)?, name)
         },
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
