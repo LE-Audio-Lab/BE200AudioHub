@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bumble_hci::metadata::supported_command_names;
-use bumble_hci::{Command, ReturnParameters};
+use bumble_hci::{Command, HciPacket, ReturnParameters};
 use bumble_host::{
     ControllerBufferInfo, Device, HOST_DEFAULT_MAXIMUM_ADVERTISING_DATA_LENGTH,
     HOST_EVENT_MASK, HOST_EVENT_MASK_PAGE_2, HOST_LE_EVENT_MASK, HOST_LE_EVENT_MASK_LEGACY,
@@ -9,7 +9,7 @@ use bumble_host::{
 };
 use bumble_transport::{
     open_split_transport, Error, ExternalControllerInfo, ExternalHost, LocalControllerVersion,
-    Result as TransportResult,
+    PacketSource, Result as TransportResult, SplitOpenedTransport,
 };
 
 const BE200_TRANSPORT: &str = "usb:8087:0036";
@@ -59,11 +59,213 @@ impl AttachedController {
 pub fn attach_be200_existing_operational(
     timeout: Duration,
 ) -> TransportResult<AttachedController> {
+    attach_be200_existing_operational_impl(timeout, false)
+}
+
+/// R2 forensic variant: tap complete HCI packets immediately after the USB
+/// transport has framed/parsed them, but before ExternalHost/Device consumes
+/// them. Only LE Extended Advertising Report events are printed.
+///
+/// This is intentionally a packet-boundary trace, not a USBPcap byte tap:
+/// it can prove whether an address/data layout is already present in the HCI
+/// event delivered to the host state machine, while leaving the normal R2
+/// attach path unchanged.
+pub fn attach_be200_existing_operational_raw_trace(
+    timeout: Duration,
+) -> TransportResult<AttachedController> {
+    attach_be200_existing_operational_impl(timeout, true)
+}
+
+fn attach_be200_existing_operational_impl(
+    timeout: Duration,
+    raw_ext_adv_trace: bool,
+) -> TransportResult<AttachedController> {
     let transport = open_split_transport(BE200_TRANSPORT)?;
+    let transport = if raw_ext_adv_trace {
+        println!(
+            "[R2/RAW-HCI] tap enabled at transport packet boundary (post USB framing/HCI packet parse, pre ExternalHost/Device)"
+        );
+        let SplitOpenedTransport {
+            source,
+            sink,
+            metadata,
+        } = transport;
+        SplitOpenedTransport {
+            source: Box::new(RawExtendedAdvertisingTracingSource {
+                inner: source,
+                sequence: 0,
+            }),
+            sink,
+            metadata,
+        }
+    } else {
+        transport
+    };
+
     let mut host = ExternalHost::new(transport);
     let mut device = Device::new(0);
     let info = initialize_existing_operational(&mut host, &mut device, timeout)?;
     Ok(AttachedController { host, device, info })
+}
+
+struct RawExtendedAdvertisingTracingSource {
+    inner: Box<dyn PacketSource + Send>,
+    sequence: u64,
+}
+
+impl PacketSource for RawExtendedAdvertisingTracingSource {
+    fn read_packet(&mut self) -> TransportResult<Option<HciPacket>> {
+        let packet = self.inner.read_packet()?;
+        if let Some(packet) = packet.as_ref() {
+            let bytes = packet.to_bytes();
+            if is_le_extended_advertising_report(&bytes) {
+                self.sequence = self.sequence.saturating_add(1);
+                trace_le_extended_advertising_report(self.sequence, &bytes);
+            }
+        }
+        Ok(packet)
+    }
+}
+
+fn is_le_extended_advertising_report(bytes: &[u8]) -> bool {
+    bytes.len() >= 5
+        && bytes[0] == 0x04
+        && bytes[1] == 0x3E
+        && bytes[3] == 0x0D
+}
+
+fn trace_le_extended_advertising_report(sequence: u64, bytes: &[u8]) {
+    let parameter_len = usize::from(bytes[2]);
+    let expected_total = parameter_len.saturating_add(3);
+    let num_reports = usize::from(bytes[4]);
+
+    println!(
+        "[R2/RAW-HCI] ext-adv seq={sequence} h4_len={} expected_h4_len={} param_len={} num_reports={}",
+        bytes.len(),
+        expected_total,
+        parameter_len,
+        num_reports
+    );
+    println!("[R2/RAW-HCI] h4={}", raw_hex(bytes));
+
+    let mut offset = 5usize;
+    for report_index in 0..num_reports {
+        const FIXED_REPORT_BYTES: usize = 24;
+        if bytes.len().saturating_sub(offset) < FIXED_REPORT_BYTES {
+            println!(
+                "[R2/RAW-HCI] report[{report_index}] TRUNCATED fixed header at offset={offset} remaining={}",
+                bytes.len().saturating_sub(offset)
+            );
+            return;
+        }
+
+        let event_type = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        let address_type = bytes[offset + 2];
+        let address_raw = &bytes[offset + 3..offset + 9];
+        let primary_phy = bytes[offset + 9];
+        let secondary_phy = bytes[offset + 10];
+        let sid = bytes[offset + 11];
+        let tx_power = bytes[offset + 12] as i8;
+        let rssi = bytes[offset + 13] as i8;
+        let periodic_interval =
+            u16::from_le_bytes([bytes[offset + 14], bytes[offset + 15]]);
+        let direct_address_type = bytes[offset + 16];
+        let direct_address_raw = &bytes[offset + 17..offset + 23];
+        let data_len = usize::from(bytes[offset + 23]);
+        let data_start = offset + FIXED_REPORT_BYTES;
+        let data_end = data_start.saturating_add(data_len);
+
+        if data_end > bytes.len() {
+            println!(
+                "[R2/RAW-HCI] report[{report_index}] TRUNCATED data: offset={offset} data_len={data_len} available={}",
+                bytes.len().saturating_sub(data_start)
+            );
+            return;
+        }
+
+        let data = &bytes[data_start..data_end];
+        let data_status = (event_type >> 5) & 0x03;
+        println!(
+            "[R2/RAW-HCI] report[{report_index}] offset={offset} event_type=0x{event_type:04X} conn={} scan={} directed={} scan_rsp={} legacy={} data_status={}({})",
+            event_type & 0x0001 != 0,
+            event_type & 0x0002 != 0,
+            event_type & 0x0004 != 0,
+            event_type & 0x0008 != 0,
+            event_type & 0x0010 != 0,
+            data_status,
+            data_status_label(data_status)
+        );
+        println!(
+            "[R2/RAW-HCI] report[{report_index}] addr_type=0x{address_type:02X}({}) addr_raw_le={} addr_display={} primary_phy={} secondary_phy={} sid={} tx_power={} rssi={} periodic_interval=0x{periodic_interval:04X}",
+            hci_address_type_label(address_type),
+            raw_hex(address_raw),
+            display_hci_address(address_raw),
+            primary_phy,
+            secondary_phy,
+            sid,
+            tx_power,
+            rssi
+        );
+        println!(
+            "[R2/RAW-HCI] report[{report_index}] direct_addr_type=0x{direct_address_type:02X}({}) direct_addr_raw_le={} direct_addr_display={} data_len={} data={}",
+            hci_address_type_label(direct_address_type),
+            raw_hex(direct_address_raw),
+            display_hci_address(direct_address_raw),
+            data_len,
+            raw_hex(data)
+        );
+
+        offset = data_end;
+    }
+
+    if offset != bytes.len() {
+        println!(
+            "[R2/RAW-HCI] trailing_bytes={} offset={} total={} data={}",
+            bytes.len().saturating_sub(offset),
+            offset,
+            bytes.len(),
+            raw_hex(&bytes[offset..])
+        );
+    }
+}
+
+fn data_status_label(status: u16) -> &'static str {
+    match status {
+        0 => "complete",
+        1 => "incomplete-more-to-come",
+        2 => "incomplete-truncated",
+        _ => "reserved",
+    }
+}
+
+fn hci_address_type_label(address_type: u8) -> &'static str {
+    match address_type {
+        0x00 => "public",
+        0x01 => "random",
+        0x02 => "public-identity",
+        0x03 => "random-identity",
+        0xFF => "anonymous",
+        _ => "unknown",
+    }
+}
+
+fn display_hci_address(raw_le: &[u8]) -> String {
+    raw_le
+        .iter()
+        .rev()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn raw_hex(data: &[u8]) -> String {
+    if data.is_empty() {
+        return "-".into();
+    }
+    data.iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Mirror Bumble-RS ExternalHost::initialize_device(), except the controller
