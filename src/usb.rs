@@ -1,10 +1,12 @@
 //! USB descriptor discovery and a separate guarded WinUSB claim/release probe.
 //! The probe does not send HCI or reset the controller.
 use crate::error::{AppError, Result};
-use rusb::{self, Device, GlobalContext, DeviceDescriptor, DeviceHandle};
+use rusb::{self, Device, DeviceDescriptor, DeviceHandle, GlobalContext};
 
 pub const BE200_VID: u16 = 0x8087;
 pub const BE200_PID: u16 = 0x0036;
+
+const BLUETOOTH_HCI_CLASS: (u8, u8, u8) = (0xe0, 0x01, 0x01);
 
 pub fn parse_vid_pid(s: &str) -> Result<(u16,u16)> {
     let (a,b) = s.split_once(':').ok_or_else(|| AppError::Usage(
@@ -29,6 +31,81 @@ fn describe(dev:&Device<GlobalContext>, desc:&DeviceDescriptor) {
         desc.class_code(),desc.sub_class_code(),desc.protocol_code(),desc.num_configurations());
 }
 fn devices() -> Result<rusb::DeviceList<GlobalContext>> { Ok(rusb::devices()?) }
+
+fn descriptor_is_bluetooth_hci(desc: &DeviceDescriptor) -> bool {
+    (desc.class_code(), desc.sub_class_code(), desc.protocol_code()) == BLUETOOTH_HCI_CLASS
+}
+
+fn device_has_bluetooth_hci_interface(
+    dev: &Device<GlobalContext>,
+    desc: &DeviceDescriptor,
+) -> Result<bool> {
+    if descriptor_is_bluetooth_hci(desc) {
+        return Ok(true);
+    }
+
+    for index in 0..desc.num_configurations() {
+        let config = dev.config_descriptor(index)?;
+        for interface in config.interfaces() {
+            for setting in interface.descriptors() {
+                if (
+                    setting.class_code(),
+                    setting.sub_class_code(),
+                    setting.protocol_code(),
+                ) == BLUETOOTH_HCI_CLASS
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// R2 hot-path preflight.
+///
+/// This is intentionally descriptor-only and stays entirely in Rust:
+/// - exactly one 8087:0036 must be present;
+/// - it must expose the Bluetooth Primary Controller class triple;
+/// - no device handle is opened;
+/// - no interface is claimed;
+/// - no HCI command, reset, firmware load, or PnP/PowerShell query is issued.
+///
+/// Whether WinUSB can actually claim the interface is then proven by the
+/// Bumble USB transport itself. The heavyweight PowerShell driver audit remains
+/// available as the explicit `driver verify` diagnostic command.
+pub fn r2_fast_preflight() -> Result<()> {
+    let available = devices()?;
+    let mut target: Option<(Device<GlobalContext>, DeviceDescriptor)> = None;
+
+    for dev in available.iter() {
+        let Ok(desc) = dev.device_descriptor() else { continue; };
+        if desc.vendor_id() != BE200_VID || desc.product_id() != BE200_PID {
+            continue;
+        }
+        if target.is_some() {
+            return Err(AppError::Driver(
+                "Multiple 8087:0036 devices found; refusing ambiguous R2 attach".into(),
+            ));
+        }
+        target = Some((dev, desc));
+    }
+
+    let (device, desc) = target.ok_or(AppError::DeviceNotFound(BE200_VID, BE200_PID))?;
+    if !device_has_bluetooth_hci_interface(&device, &desc)? {
+        return Err(AppError::Driver(format!(
+            "8087:0036 at {} does not expose Bluetooth HCI class e0/01/01",
+            location(&device)
+        )));
+    }
+
+    println!(
+        "R2 fast USB preflight: 8087:0036 {} — Bluetooth HCI descriptor OK",
+        location(&device)
+    );
+    Ok(())
+}
 
 pub fn list(target_only: bool) -> Result<()> {
     let mut count=0usize;
@@ -108,7 +185,7 @@ pub fn open_be200_claimed() -> Result<DeviceHandle<GlobalContext>> {
 
     let device = target.ok_or(AppError::DeviceNotFound(BE200_VID, BE200_PID))?;
     let desc = device.device_descriptor()?;
-    if (desc.class_code(), desc.sub_class_code(), desc.protocol_code()) != (0xe0, 0x01, 0x01) {
+    if !descriptor_is_bluetooth_hci(&desc) {
         return Err(AppError::Driver(format!(
             "Unexpected USB device class {:02x}/{:02x}/{:02x}",
             desc.class_code(), desc.sub_class_code(), desc.protocol_code(),
@@ -145,5 +222,10 @@ mod tests {
         for s in ["8087","8087:36","8087:0036:ffff","ZZZZ:0036","8087:003g"] {
             assert!(parse_vid_pid(s).is_err(),"{s}");
         }
+    }
+
+    #[test]
+    fn bluetooth_hci_class_triple_is_exact() {
+        assert_eq!(BLUETOOTH_HCI_CLASS, (0xe0, 0x01, 0x01));
     }
 }

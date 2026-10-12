@@ -1,17 +1,16 @@
 use crate::{
-    driver,
     error::{AppError, Result},
+    usb,
 };
 use std::time::Duration;
 
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn probe() -> Result<()> {
-    driver::verify()?;
-
     println!("R2.1 attach probe");
     println!("Target: Intel BE200 8087:0036 via Bumble-RS USB transport");
     println!("Policy: preserve existing Operational firmware; HCI Reset is forbidden");
+    usb::r2_fast_preflight()?;
     println!("Opening Bumble-RS USB transport and initializing Host state...");
 
     let attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
@@ -61,11 +60,10 @@ pub fn parse_scan_seconds(value: &str) -> Result<u16> {
 }
 
 pub fn scan(seconds: u16, show_addresses: bool) -> Result<()> {
-    driver::verify()?;
-
     println!("R2.2 Bumble passive BLE scan");
     println!("Target: Intel BE200 8087:0036; LE 1M; {seconds}s");
     println!("Policy: no HCI Reset, no firmware reload, no connection, no pairing, no SCAN_REQ");
+    usb::r2_fast_preflight()?;
     println!("Attaching to existing Operational controller...");
 
     let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
