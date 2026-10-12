@@ -153,7 +153,7 @@ impl BondStore {
         ))
     }
 
-    pub(crate) fn local_irk(&self) -> TransportResult<[u8; 16]> {
+    pub fn local_irk(&self) -> TransportResult<[u8; 16]> {
         Ok(self.local_key_material()?.irk)
     }
 
