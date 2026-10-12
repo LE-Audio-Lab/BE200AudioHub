@@ -23,6 +23,8 @@ pub struct ControllerIdentity {
 pub struct BondMemberSummary {
     pub identity_address: String,
     pub address_type: u8,
+    pub rank: Option<u8>,
+    pub csis_verified: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +65,10 @@ struct BondSetRecord {
 struct BondMemberRecord {
     identity_address: String,
     address_type: u8,
+    #[serde(default)]
+    rank: Option<u8>,
+    #[serde(default)]
+    csis_verified: bool,
 }
 
 impl BondStore {
@@ -125,6 +131,8 @@ impl BondStore {
                         .map(|member| BondMemberSummary {
                             identity_address: member.identity_address.clone(),
                             address_type: member.address_type,
+                            rank: member.rank,
+                            csis_verified: member.csis_verified,
                         })
                         .collect()
                 })
@@ -149,6 +157,8 @@ impl BondStore {
             record.members.push(BondMemberRecord {
                 identity_address: identity_address.to_owned(),
                 address_type,
+                rank: None,
+                csis_verified: false,
             });
         }
         self.save_set_db()
@@ -177,6 +187,50 @@ impl BondStore {
         Ok(true)
     }
 
+    pub fn update_csis_member(
+        &mut self,
+        target_name: &str,
+        identity_address: &str,
+        set_size: Option<u8>,
+        sirk: [u8; 16],
+        rank: Option<u8>,
+    ) -> TransportResult<()> {
+        let sirk_hex = hex(&sirk);
+        let record = self.set_db.sets.entry(target_name.to_owned()).or_default();
+
+        if let Some(size) = set_size {
+            if let Some(existing) = record.set_size {
+                if existing != size {
+                    return Err(Error::Remote(format!(
+                        "CSIS set-size mismatch for {target_name:?}: stored {existing}, peer {size}"
+                    )));
+                }
+            }
+            record.set_size = Some(size);
+        }
+
+        match &record.sirk_hex {
+            Some(existing) if !existing.eq_ignore_ascii_case(&sirk_hex) => {
+                return Err(Error::Remote(format!(
+                    "CSIS SIRK mismatch for {target_name:?}; refusing to merge distinct sets"
+                )));
+            }
+            _ => record.sirk_hex = Some(sirk_hex),
+        }
+
+        let member = record
+            .members
+            .iter_mut()
+            .find(|member| member.identity_address.eq_ignore_ascii_case(identity_address))
+            .ok_or_else(|| Error::Remote(format!(
+                "cannot attach CSIS metadata to unknown member {identity_address}"
+            )))?;
+
+        member.rank = rank;
+        member.csis_verified = true;
+        self.save_set_db()
+    }
+
     pub fn update_csis(
         &mut self,
         target_name: &str,
@@ -198,6 +252,15 @@ impl BondStore {
             }
         }
         self.save_set_db()
+    }
+
+    pub fn set_sirk(&self, target_name: &str) -> TransportResult<Option<[u8; 16]>> {
+        self.set_db
+            .sets
+            .get(target_name)
+            .and_then(|record| record.sirk_hex.as_deref())
+            .map(decode_hex_16)
+            .transpose()
     }
 
     pub fn resolve_observation_identity(
@@ -237,6 +300,37 @@ impl BondStore {
                     .iter()
                     .any(|member| member.identity_address.eq_ignore_ascii_case(identity_address))
             })
+    }
+
+    pub(crate) fn encryption_key_for_identity(
+        &self,
+        identity_address: &str,
+    ) -> TransportResult<[u8; 16]> {
+        let keys = self
+            .key_store
+            .get(identity_address)
+            .map_err(|error| Error::Remote(format!(
+                "failed to read stored bond for {identity_address}: {error}"
+            )))?
+            .ok_or_else(|| Error::Remote(format!(
+                "no stored bond exists for identity {identity_address}"
+            )))?;
+
+        let key = keys
+            .ltk
+            .as_ref()
+            .or(keys.ltk_central.as_ref())
+            .or(keys.ltk_peripheral.as_ref())
+            .ok_or_else(|| Error::Remote(format!(
+                "stored bond for {identity_address} has no usable LTK"
+            )))?;
+
+        key.value
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Remote(format!(
+                "stored LTK for {identity_address} is not 16 bytes"
+            )))
     }
 
     pub(crate) fn key_store(&self) -> &JsonKeyStore {
@@ -362,6 +456,24 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> TransportResult<()> {
     Ok(())
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_hex_16(value: &str) -> TransportResult<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::Remote(
+            "stored CSIS SIRK is not 16-byte hexadecimal data".into(),
+        ));
+    }
+    let mut output = [0u8; 16];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| Error::Remote("stored CSIS SIRK contains invalid hex".into()))?;
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +486,11 @@ mod tests {
             sets: BTreeMap::new(),
         };
         assert!(db.sets.is_empty());
+    }
+
+    #[test]
+    fn sirk_hex_round_trip() {
+        let value = [0xAB; 16];
+        assert_eq!(decode_hex_16(&hex(&value)).unwrap(), value);
     }
 }

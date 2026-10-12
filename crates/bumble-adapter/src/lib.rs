@@ -6,6 +6,7 @@
 
 mod bond;
 mod connect;
+mod csis;
 mod init;
 mod pairing;
 mod scan;
@@ -14,6 +15,7 @@ pub use bond::{
     BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
 };
 pub use connect::LeAclReport;
+pub use csis::{rsi_matches_sirk, CsisMemberReport};
 pub use init::{
     attach_be200_existing_operational, initialize_existing_operational, AttachReport,
     AttachedController,
@@ -26,9 +28,7 @@ pub const UPSTREAM_REVISION: &str =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachMode {
-    /// Initial R2 mode: controller was already brought to Operational by R1.
     PreserveOperationalNoReset,
-    /// Future mode after a dedicated HCI Reset safety experiment.
     StandardHostReset,
 }
 

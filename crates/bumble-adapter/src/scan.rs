@@ -8,12 +8,14 @@ use crate::AttachedController;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const SCAN_POLL_SLICE: Duration = Duration::from_millis(300);
+const RESOLVABLE_SET_IDENTIFIER_AD_TYPE: u8 = 0x2E;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanObservation {
     pub address: String,
     pub address_type: u8,
     pub name: Option<String>,
+    pub rsi: Option<[u8; 6]>,
     pub rssi: i8,
     pub primary_phy: u8,
     pub secondary_phy: u8,
@@ -44,13 +46,6 @@ impl AttachedController {
             ));
         }
 
-        // R1.6-proven policy:
-        //   own address: public
-        //   filter policy: accept all
-        //   PHY: LE 1M
-        //   scan type: passive
-        //   interval: 0x0060 = 60 ms
-        //   window:   0x0030 = 30 ms
         successful_command(
             &mut self.host,
             Command::LeSetExtendedScanParameters {
@@ -64,7 +59,6 @@ impl AttachedController {
             COMMAND_TIMEOUT,
         )?;
 
-        // Clear anything left in the journal before this bounded scan.
         self.device.poll(&mut self.host);
         self.device.take_advertisements();
 
@@ -164,6 +158,7 @@ fn drain_advertisements(
             address: address.clone(),
             address_type: advertisement.address.address_type().0,
             name: display_name(&advertisement.data_bytes),
+            rsi: resolvable_set_identifier(&advertisement.data_bytes),
             rssi: advertisement.rssi,
             primary_phy: advertisement.primary_phy,
             secondary_phy: advertisement.secondary_phy,
@@ -178,6 +173,14 @@ fn drain_advertisements(
             Some(previous) if observation.name.is_none() && previous.name.is_some() => {
                 let mut merged = observation;
                 merged.name = previous.name.clone();
+                if merged.rsi.is_none() {
+                    merged.rsi = previous.rsi;
+                }
+                observations.insert(address, merged);
+            }
+            Some(previous) if observation.rsi.is_none() && previous.rsi.is_some() => {
+                let mut merged = observation;
+                merged.rsi = previous.rsi;
                 observations.insert(address, merged);
             }
             _ => {
@@ -187,40 +190,68 @@ fn drain_advertisements(
     }
 }
 
-/// Parse the Complete/Shortened Local Name AD structures and strip terminal
-/// control characters before rendering user-visible output.
 fn display_name(data: &[u8]) -> Option<String> {
-    let mut offset = 0usize;
     let mut short = None;
-    while offset < data.len() {
-        let count = usize::from(data[offset]);
-        if count == 0 {
-            break;
+    for (kind, value) in ad_structures(data) {
+        if !matches!(kind, 0x08 | 0x09) || value.is_empty() {
+            continue;
         }
-        let Some(end) = offset.checked_add(count + 1) else {
-            break;
-        };
-        if end > data.len() || count < 1 {
-            break;
+        let safe: String = String::from_utf8_lossy(value)
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(64)
+            .collect();
+        if safe.is_empty() {
+            continue;
         }
-
-        let kind = data[offset + 1];
-        if matches!(kind, 0x08 | 0x09) && count > 1 {
-            let safe: String = String::from_utf8_lossy(&data[offset + 2..end])
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(64)
-                .collect();
-            if !safe.is_empty() {
-                if kind == 0x09 {
-                    return Some(safe);
-                }
-                short = Some(safe);
-            }
+        if kind == 0x09 {
+            return Some(safe);
         }
-        offset = end;
+        short = Some(safe);
     }
     short
+}
+
+fn resolvable_set_identifier(data: &[u8]) -> Option<[u8; 6]> {
+    ad_structures(data).find_map(|(kind, value)| {
+        if kind != RESOLVABLE_SET_IDENTIFIER_AD_TYPE || value.len() != 6 {
+            return None;
+        }
+        value.try_into().ok()
+    })
+}
+
+fn ad_structures(data: &[u8]) -> impl Iterator<Item = (u8, &[u8])> {
+    struct AdIter<'a> {
+        data: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> Iterator for AdIter<'a> {
+        type Item = (u8, &'a [u8]);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            while self.offset < self.data.len() {
+                let count = usize::from(self.data[self.offset]);
+                if count == 0 {
+                    self.offset = self.data.len();
+                    return None;
+                }
+                let end = self.offset.checked_add(count + 1)?;
+                if end > self.data.len() || count < 1 {
+                    self.offset = self.data.len();
+                    return None;
+                }
+                let kind = self.data[self.offset + 1];
+                let value = &self.data[self.offset + 2..end];
+                self.offset = end;
+                return Some((kind, value));
+            }
+            None
+        }
+    }
+
+    AdIter { data, offset: 0 }
 }
 
 fn successful_command(
@@ -258,5 +289,11 @@ mod tests {
     #[test]
     fn ad_name_rejects_truncated_structure() {
         assert_eq!(display_name(&[5, 0x09, b'X']), None);
+    }
+
+    #[test]
+    fn parses_resolvable_set_identifier() {
+        let data = [7, 0x2E, 1, 2, 3, 4, 5, 6];
+        assert_eq!(resolvable_set_identifier(&data), Some([1, 2, 3, 4, 5, 6]));
     }
 }
