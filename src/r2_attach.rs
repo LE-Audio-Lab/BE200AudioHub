@@ -766,6 +766,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         let mut known_recovery = Vec::<(bumble_adapter::ScanObservation, String)>::new();
         let mut orphan_bonds = Vec::<(bumble_adapter::ScanObservation, String)>::new();
         let mut fresh = Vec::<bumble_adapter::ScanObservation>::new();
+        let mut first_pair_anchors = Vec::<bumble_adapter::ScanObservation>::new();
 
         for observation in scan
             .observations
@@ -801,11 +802,27 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                 Some(identity_address) => {
                     let same_set = candidate_matches_set(observation, set_sirk.as_ref())?;
                     let name_ok = observation.name.as_deref() == Some(wanted_name);
-                    if (set_sirk.is_some() && same_set) || (set_sirk.is_none() && name_ok) {
+                    let swift_pair_ok =
+                        swift_pair_matches_target(observation, wanted_name);
+                    if (set_sirk.is_some() && same_set)
+                        || (set_sirk.is_none() && (name_ok || swift_pair_ok))
+                    {
                         orphan_bonds.push((observation.clone(), identity_address));
                     }
                 }
                 None => {
+                    if current.members.is_empty() && set_sirk.is_none() {
+                        if swift_pair_matches_target(observation, wanted_name) {
+                            first_pair_anchors.push(observation.clone());
+                        } else if observation.name.as_deref() == Some(wanted_name) {
+                            println!(
+                                "  defer same-name LE Audio advertiser {}: first SMP requires pairing-only Swift Pair transport",
+                                observation.address
+                            );
+                        }
+                        continue;
+                    }
+
                     if observation.name.as_deref() != Some(wanted_name) {
                         continue;
                     }
@@ -818,6 +835,17 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                         );
                     }
                 }
+            }
+        }
+
+        if current.members.is_empty() && set_sirk.is_none() {
+            first_pair_anchors.sort_by_key(|observation| std::cmp::Reverse(observation.rssi));
+            if !first_pair_anchors.is_empty() {
+                println!(
+                    "First-bond transport policy: {} pairing-only Swift Pair LE+BR/EDR Secure Connections anchor(s) matched; same-name LE Audio public advertisements are not eligible for first SMP.",
+                    first_pair_anchors.len()
+                );
+                fresh = first_pair_anchors;
             }
         }
 
@@ -1014,6 +1042,8 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         if fresh.is_empty() {
             let detail = if set_sirk.is_some() {
                 "No unbonded same-set candidate with a valid CSIS RSI was visible."
+            } else if current.members.is_empty() {
+                "No pairing-only Swift Pair LE+BR/EDR Secure Connections anchor was visible. Put both earbuds in the case and enter formal pairing mode."
             } else {
                 "No unbonded connectable target was visible."
             };
@@ -1023,7 +1053,14 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             )));
         }
 
-        println!("Unbonded validated candidate(s):");
+        println!(
+            "{}:",
+            if current.members.is_empty() && set_sirk.is_none() {
+                "First-bond Swift Pair transport candidate(s)"
+            } else {
+                "Unbonded validated same-set candidate(s)"
+            }
+        );
         for (index, candidate) in fresh.iter().enumerate() {
             println!(
                 "  [{index}] {} type={} RSSI={}dBm PHY={}/{} SID={} RSI={}",
@@ -1331,6 +1368,17 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
 
     println!("R2.4 RESULT: all recorded members reconnected, encrypted from stored LTK, and matched stored CSIS without SMP pairing.");
     Ok(())
+}
+
+fn swift_pair_matches_target(
+    observation: &bumble_adapter::ScanObservation,
+    wanted_name: &str,
+) -> bool {
+    swift_pair_payload(&observation.raw_data).is_some_and(|payload| {
+        payload.beacon_id == 0x03
+            && payload.sub_scenario == 0x02
+            && payload.display_name.as_deref() == Some(wanted_name)
+    })
 }
 
 fn candidate_matches_set(
