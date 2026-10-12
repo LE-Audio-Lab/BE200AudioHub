@@ -1484,13 +1484,21 @@ fn connect_with_coordinator_privacy(
     observation: &bumble_adapter::ScanObservation,
     store: &bumble_adapter::BondStore,
     timeout: Duration,
-) -> std::result::Result<bumble_adapter::LeAclReport, bumble_transport::Error> {
-    let local_irk = store.local_irk()?;
-    attached.connect_scanned_observation_with_local_rpa(
-        observation,
-        local_irk,
-        timeout,
-    )
+) -> Result<bumble_adapter::LeAclReport> {
+    let local_irk = store
+        .local_irk()
+        .map_err(|error| AppError::Protocol(format!(
+            "Coordinator local IRK unavailable: {error}"
+        )))?;
+    attached
+        .connect_scanned_observation_with_local_rpa(
+            observation,
+            local_irk,
+            timeout,
+        )
+        .map_err(|error| AppError::Protocol(format!(
+            "Privacy-enabled LE ACL connect failed: {error}"
+        )))
 }
 
 fn swift_pair_matches_target(
