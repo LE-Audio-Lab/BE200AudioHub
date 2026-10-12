@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use bumble::{Address, AddressType};
 use bumble_hci::Command;
 use bumble_host::DeviceEvent;
+use bumble_smp::generate_resolvable_private_address;
 use bumble_transport::{Error, ExternalHostActivity, Result as TransportResult};
 
 use crate::{AttachedController, ScanObservation};
@@ -14,6 +15,8 @@ pub struct LeAclReport {
     pub connection_handle: u16,
     pub role: u8,
     pub peer_address: String,
+    pub local_address: String,
+    pub local_address_type: u8,
     pub connection_interval: u16,
     pub peripheral_latency: u16,
     pub supervision_timeout: u16,
@@ -26,6 +29,36 @@ impl AttachedController {
     pub fn connect_scanned_observation(
         &mut self,
         observation: &ScanObservation,
+        timeout: Duration,
+    ) -> TransportResult<LeAclReport> {
+        self.connect_scanned_observation_with_own_address(
+            observation,
+            None,
+            timeout,
+        )
+    }
+
+    /// Privacy-enabled central connection. The supplied local IRK is the same
+    /// stable coordinator IRK distributed during SMP; generate an RPA from it,
+    /// program LE Random Address, and initiate with Own_Address_Type=random.
+    pub fn connect_scanned_observation_with_local_rpa(
+        &mut self,
+        observation: &ScanObservation,
+        local_irk: [u8; 16],
+        timeout: Duration,
+    ) -> TransportResult<LeAclReport> {
+        let local_rpa = generate_resolvable_private_address(&local_irk);
+        self.connect_scanned_observation_with_own_address(
+            observation,
+            Some(local_rpa),
+            timeout,
+        )
+    }
+
+    fn connect_scanned_observation_with_own_address(
+        &mut self,
+        observation: &ScanObservation,
+        local_random_address: Option<Address>,
         timeout: Duration,
     ) -> TransportResult<LeAclReport> {
         if !observation.is_connectable {
@@ -46,6 +79,29 @@ impl AttachedController {
         )
         .map_err(|error| Error::InvalidSpec(format!("invalid scanned peer address: {error}")))?;
 
+        let (own_address_type, local_address, own_label) =
+            if let Some(local_rpa) = local_random_address {
+                let response = self.host.send_command(
+                    Command::LeSetRandomAddress {
+                        random_address: local_rpa.clone(),
+                    },
+                    Duration::from_secs(2),
+                )?;
+                if response.status() != Some(0) {
+                    return Err(Error::Remote(format!(
+                        "LE Set Random Address failed with status {:?}",
+                        response.status()
+                    )));
+                }
+                println!(
+                    "[R2/ACL] central privacy: programmed local RPA {} from persisted coordinator IRK",
+                    local_rpa.to_string(true)
+                );
+                (1u8, local_rpa.to_string(true), "random/RPA")
+            } else {
+                (0u8, String::new(), "public")
+            };
+
         // The scan command is already disabled before R2.3 arrives here.
         // Drain stale scan events so connection failure/success reporting is
         // scoped to this one procedure.
@@ -54,7 +110,7 @@ impl AttachedController {
 
         let command = Command::LeExtendedCreateConnection {
             initiator_filter_policy: 0,
-            own_address_type: 0,
+            own_address_type,
             peer_address_type: observation.address_type,
             peer_address: peer.clone(),
             initiating_phys: 0x01,
@@ -69,9 +125,15 @@ impl AttachedController {
         };
 
         println!(
-            "[R2/ACL] submit HCI 0x2043 LE Extended Create Connection: peer={} type={} own_type=public phys=1M scan=0x0010/0x0010 conn_interval=24..40 latency=0 supervision=42",
+            "[R2/ACL] submit HCI 0x2043 LE Extended Create Connection: peer={} type={} own_type={}{} phys=1M scan=0x0010/0x0010 conn_interval=24..40 latency=0 supervision=42",
             observation.address,
-            observation.address_type
+            observation.address_type,
+            own_label,
+            if local_address.is_empty() {
+                String::new()
+            } else {
+                format!(" local={local_address}")
+            }
         );
         let submit_started = Instant::now();
         if let Err(error) = successful_status(&mut self.host, command, timeout) {
@@ -131,10 +193,19 @@ impl AttachedController {
                     "[R2/ACL] LE Enhanced Connection Complete: SUCCESS after {:?}, handle=0x{handle:04X}",
                     wait_started.elapsed()
                 );
+                let effective_local_address = if own_address_type == 0 {
+                    // The product's controller identity is public on this path;
+                    // caller supplies that identity to SMP for first-bond use.
+                    String::new()
+                } else {
+                    local_address.clone()
+                };
                 return Ok(LeAclReport {
                     connection_handle: handle,
                     role: connection.role,
                     peer_address: connection.peer_address.to_string(true),
+                    local_address: effective_local_address,
+                    local_address_type: own_address_type,
                     connection_interval: connection.parameters.connection_interval,
                     peripheral_latency: connection.parameters.peripheral_latency,
                     supervision_timeout: connection.parameters.supervision_timeout,
