@@ -8,13 +8,14 @@ mod hci;
 mod intel;
 mod error;
 mod logging;
+mod r2_attach;
 mod usb;
 
 use error::{AppError, Result};
 use std::env;
 
 fn usage() -> &'static str {
-    "BE200AudioHub v0.1 (R1.5b Windows OEM cold-boot preflight)\n\
+    "BE200AudioHub v0.1 (R1.5b + R2 integration lab)\n\
      Usage:\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
@@ -23,6 +24,7 @@ fn usage() -> &'static str {
        be200hub hci version\n\
        be200hub hci capabilities\n\
        be200hub ble scan --seconds <1..30> [--show-addresses]\n\
+       be200hub r2 attach-probe\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -32,7 +34,7 @@ fn usage() -> &'static str {
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
-     WinUSB replacement is manual. Probe opens/claims/releases interface 0 without HCI.\n\
+     R2 attach-probe preserves an already Operational controller and never sends HCI Reset.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
 
@@ -76,6 +78,7 @@ fn run(args: &[String]) -> Result<()> {
             && c == "--seconds" && flag == "--show-addresses" => {
             ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
         },
+        [a, b] if a == "r2" && b == "attach-probe" => r2_attach::probe(),
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
         },
