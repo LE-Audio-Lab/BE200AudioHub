@@ -707,6 +707,38 @@ pub fn connect_probe(seconds: u16, wanted_name: &str) -> Result<()> {
 }
 
 
+pub fn bond_reseed_host(confirm: bool) -> Result<()> {
+    if !confirm {
+        return Err(AppError::Usage(
+            "r2 bond-reseed-host requires --confirm; this archives all BE200AudioHub-managed peer bonds and rotates the persistent coordinator local identity".into()
+        ));
+    }
+
+    println!("R2.4 host-identity reseed");
+    println!("Action: archive project-managed pairing keys/set metadata/local identity, then create one fresh persistent coordinator identity.");
+    println!("Scope: BE200AudioHub bond store only; Windows Bluetooth pairing database is not touched.");
+    usb::r2_fast_preflight()?;
+
+    let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
+        .map_err(|error| AppError::Protocol(format!("Bumble attach failed: {error}")))?;
+    println!("Attach: PASS");
+
+    let identity = attached
+        .read_controller_identity(ATTACH_TIMEOUT)
+        .map_err(|error| AppError::Protocol(format!("Read controller identity failed: {error}")))?;
+    println!("Controller identity: {}", identity.public_address);
+
+    let (store, archive) = bumble_adapter::BondStore::reseed_for_controller(&identity)
+        .map_err(|error| AppError::Protocol(format!("Host-identity reseed failed: {error}")))?;
+
+    println!("Archive: {}", archive.display());
+    println!("New local identity: {}", store.local_identity_path().display());
+    println!("Persistent coordinator local IRK: created");
+    println!("Peer bond state: empty");
+    println!("R2.4 reseed COMPLETE. Put Buds3 Pro into formal pairing mode and run bond-onboard once.");
+    Ok(())
+}
+
 pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
     if wanted_name.trim().is_empty() {
         return Err(AppError::Usage("--name requires a nonempty device name".into()));
