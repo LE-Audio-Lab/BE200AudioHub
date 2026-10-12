@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use bumble::keys::{Key, KeyStore, PairingKeys};
+use bumble::keys::{Key, KeyStore, MemoryKeyStore, PairingKeys};
 use bumble::{Address, AddressType};
 use bumble_smp::{
     IdentityAddressType, PairingCapabilities, PairingConfig,
@@ -39,6 +39,7 @@ impl AttachedController {
         connection_handle: u16,
         controller_public_address: &str,
         target_name: &str,
+        expected_peer_identity: Option<&str>,
         store: &mut BondStore,
         timeout: Duration,
     ) -> TransportResult<PairPersistReport> {
@@ -59,13 +60,6 @@ impl AttachedController {
             identity_address_type: Some(IdentityAddressType::Public),
             oob: None,
         };
-
-        let before = store
-            .key_store()
-            .get_all()
-            .map_err(|error| Error::Remote(format!(
-                "failed to snapshot bond store before pairing: {error}"
-            )))?;
 
         println!(
             "[R2.4/SMP] config: SC={} MITM={} bonding={} CT2={} IO=NoInputNoOutput local_identity=public",
@@ -197,27 +191,65 @@ impl AttachedController {
             ));
         }
 
-        println!("[R2.4/SMP] persisting bond into key store...");
-        let stored = pairing
-            .store_bond(store.key_store_mut())?;
-        println!("[R2.4/SMP] store_bond returned {stored}");
+        println!("[R2.4/SMP] staging bond in memory for identity validation...");
+        let mut staged = MemoryKeyStore::new();
+        let stored = pairing.store_bond(&mut staged)?;
+        println!("[R2.4/SMP] staged store_bond returned {stored}");
         if !stored {
             return Err(Error::Remote(
                 "peer completed pairing without a persistent bond".into(),
             ));
         }
 
-        let after = store
-            .key_store()
+        let staged_all = staged
             .get_all()
             .map_err(|error| Error::Remote(format!(
-                "failed to reload bond store after pairing: {error}"
+                "failed to inspect staged bond: {error}"
+            )))?;
+        let identity = staged_all
+            .iter()
+            .find(|(_, staged_keys)| **staged_keys == keys)
+            .map(|(name, _)| name.clone())
+            .or_else(|| {
+                if staged_all.len() == 1 {
+                    Some(staged_all[0].0.clone())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| Error::Remote(
+                "staged pairing keys did not expose one unambiguous peer identity".into(),
+            ))?;
+
+        if let Some(expected) = expected_peer_identity {
+            if !identity.eq_ignore_ascii_case(expected) {
+                return Err(Error::Remote(format!(
+                    "paired peer identity {identity} did not match expected coordinated-set member {expected}; staged keys were discarded and persistent bond store was NOT modified"
+                )));
+            }
+            println!(
+                "[R2.4/SMP] staged identity validation: PASS actual={} expected={}",
+                identity, expected
+            );
+        }
+
+        let staged_keys = staged
+            .get(&identity)
+            .map_err(|error| Error::Remote(format!(
+                "failed to read staged keys for {identity}: {error}"
+            )))?
+            .ok_or_else(|| Error::Remote(format!(
+                "staged bond for {identity} disappeared before commit"
             )))?;
 
-        let identity = find_stored_identity(&before, &after, &keys)
-            .ok_or_else(|| Error::Remote(
-                "pairing keys were persisted but the peer identity could not be identified".into(),
-            ))?;
+        println!("[R2.4/SMP] committing validated bond into persistent key store...");
+        store
+            .key_store_mut()
+            .update(&identity, staged_keys)
+            .map_err(|error| Error::Remote(format!(
+                "failed to commit validated bond for {identity}: {error}"
+            )))?;
+        println!("[R2.4/SMP] persistent bond commit: PASS identity={identity}");
 
         let address_type = keys
             .address_type
@@ -366,27 +398,6 @@ fn selected_encryption_key(
             keys.ltk_peripheral.as_ref()
         }
     })
-}
-
-fn find_stored_identity(
-    before: &[(String, PairingKeys)],
-    after: &[(String, PairingKeys)],
-    keys: &PairingKeys,
-) -> Option<String> {
-    let new_names = after
-        .iter()
-        .filter(|(name, _)| !before.iter().any(|(old, _)| old == name))
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-
-    if new_names.len() == 1 {
-        return new_names.into_iter().next();
-    }
-
-    after
-        .iter()
-        .find(|(_, stored)| *stored == *keys)
-        .map(|(name, _)| name.clone())
 }
 
 #[cfg(test)]
