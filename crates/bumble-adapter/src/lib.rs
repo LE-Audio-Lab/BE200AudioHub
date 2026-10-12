@@ -7,6 +7,7 @@
 mod bond;
 mod connect;
 mod init;
+mod pairing;
 mod scan;
 
 pub use bond::{
@@ -17,6 +18,7 @@ pub use init::{
     attach_be200_existing_operational, initialize_existing_operational, AttachReport,
     AttachedController,
 };
+pub use pairing::{BondResumeReport, PairPersistReport};
 pub use scan::{ScanObservation, ScanSummary};
 
 pub const UPSTREAM_REVISION: &str =
