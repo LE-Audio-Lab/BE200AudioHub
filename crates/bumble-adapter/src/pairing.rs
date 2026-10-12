@@ -208,7 +208,7 @@ impl AttachedController {
             )))?;
         let identity = staged_all
             .iter()
-            .find(|(_, staged_keys)| **staged_keys == keys)
+            .find(|(_, staged_keys)| *staged_keys == keys)
             .map(|(name, _)| name.clone())
             .or_else(|| {
                 if staged_all.len() == 1 {
