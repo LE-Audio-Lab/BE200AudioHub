@@ -294,6 +294,7 @@ fn decode_ad_structure(kind: u8, value: &[u8]) -> String {
         0xFF if value.len() >= 2 => {
             let company = u16::from_le_bytes([value[0], value[1]]);
             let label = match company {
+                0x0006 => "Microsoft",
                 0x0075 => "Samsung Electronics",
                 _ => "unknown-company",
             };
@@ -426,6 +427,150 @@ fn hex_bytes(data: &[u8]) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+
+pub fn swift_pair_probe(seconds: u16, wanted_name: &str) -> Result<()> {
+    if wanted_name.trim().is_empty() {
+        return Err(AppError::Usage("--name requires a nonempty device name".into()));
+    }
+
+    println!("R2 Swift Pair ACL-only probe");
+    println!("Target name: {wanted_name:?}");
+    println!("Policy: detect Microsoft Swift Pair beacon -> LE ACL -> linger -> disconnect; NO SMP/GATT/bonding.");
+    usb::r2_fast_preflight()?;
+
+    let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
+        .map_err(|error| AppError::Protocol(format!("Bumble attach failed: {error}")))?;
+    println!("Attach: PASS");
+
+    println!("Scanning for Swift Pair beacon ({seconds}s)...");
+    let summary = attached
+        .scan_passive_extended(seconds)
+        .map_err(|error| AppError::Protocol(format!("Bumble scan failed: {error}")))?;
+
+    let mut candidates = summary
+        .observations
+        .iter()
+        .filter(|observation| observation.is_connectable)
+        .filter_map(|observation| {
+            swift_pair_payload(&observation.raw_data)
+                .filter(|payload| {
+                    payload.beacon_id == 0x03
+                        && payload.sub_scenario == 0x02
+                        && payload.display_name.as_deref() == Some(wanted_name)
+                })
+                .map(|payload| (observation.clone(), payload))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|(observation, _)| std::cmp::Reverse(observation.rssi));
+
+    if candidates.is_empty() {
+        return Err(AppError::Protocol(format!(
+            "No connectable Microsoft Swift Pair LE+BR/EDR Secure Connections beacon matched {wanted_name:?}"
+        )));
+    }
+
+    println!("Matching Swift Pair candidate(s):");
+    for (index, (observation, payload)) in candidates.iter().enumerate() {
+        println!(
+            "  [{index}] addr={} type={} RSSI={}dBm beacon=0x{:02X} subscenario=0x{:02X} reserved_rssi=0x{:02X} display_name={:?}",
+            observation.address,
+            observation.address_type,
+            observation.rssi,
+            payload.beacon_id,
+            payload.sub_scenario,
+            payload.reserved_rssi,
+            payload.display_name
+        );
+    }
+
+    let (selected, payload) = &candidates[0];
+    println!(
+        "Selecting strongest Swift Pair beacon: {} type={} RSSI={}dBm",
+        selected.address, selected.address_type, selected.rssi
+    );
+    println!(
+        "Swift Pair decode: beacon=0x{:02X}, subscenario=0x{:02X} (LE + BR/EDR Secure Connections), reserved_rssi=0x{:02X}",
+        payload.beacon_id, payload.sub_scenario, payload.reserved_rssi
+    );
+
+    let acl = attached
+        .connect_scanned_observation(selected, CONNECT_TIMEOUT)
+        .map_err(|error| AppError::Protocol(format!("Swift Pair ACL connect failed: {error}")))?;
+
+    println!(
+        "Swift Pair ACL: PASS handle=0x{:04X} peer={}",
+        acl.connection_handle, acl.peer_address
+    );
+    println!("Holding ACL for {}s without SMP/GATT...", ACL_LINGER.as_secs());
+    attached
+        .linger_le_connection(acl.connection_handle, ACL_LINGER)
+        .map_err(|error| AppError::Protocol(format!("Swift Pair ACL linger failed: {error}")))?;
+    println!("ACL remained established: PASS");
+
+    let reason = attached
+        .disconnect_le_connection(acl.connection_handle, 0x13, DISCONNECT_TIMEOUT)
+        .map_err(|error| AppError::Protocol(format!("Swift Pair disconnect failed: {error}")))?;
+    println!("Disconnect: PASS reason=0x{reason:02X}");
+    println!("R2 RESULT: Swift Pair transport endpoint is ACL-connectable; no pairing was attempted.");
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct SwiftPairPayload {
+    beacon_id: u8,
+    sub_scenario: u8,
+    reserved_rssi: u8,
+    display_name: Option<String>,
+}
+
+fn swift_pair_payload(data: &[u8]) -> Option<SwiftPairPayload> {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let count = usize::from(*data.get(offset)?);
+        if count == 0 {
+            break;
+        }
+        let end = offset.checked_add(count + 1)?;
+        if count < 1 || end > data.len() {
+            break;
+        }
+        let kind = data[offset + 1];
+        let value = &data[offset + 2..end];
+
+        if kind == 0xFF && value.len() >= 5 {
+            let company = u16::from_le_bytes([value[0], value[1]]);
+            if company == 0x0006 {
+                let payload = &value[2..];
+                let beacon_id = payload[0];
+                let sub_scenario = payload[1];
+                let reserved_rssi = payload[2];
+
+                // Swift Pair dual-mode payloads may include three bytes of
+                // Class-of-Device before the fallback display name.
+                let name_start = if payload.len() >= 6 { 6 } else { 3 };
+                let display_name = if payload.len() > name_start {
+                    let rendered = String::from_utf8_lossy(&payload[name_start..])
+                        .trim_matches(char::from(0))
+                        .to_string();
+                    (!rendered.is_empty()).then_some(rendered)
+                } else {
+                    None
+                };
+
+                return Some(SwiftPairPayload {
+                    beacon_id,
+                    sub_scenario,
+                    reserved_rssi,
+                    display_name,
+                });
+            }
+        }
+        offset = end;
+    }
+    None
 }
 
 pub fn connect_probe(seconds: u16, wanted_name: &str) -> Result<()> {
