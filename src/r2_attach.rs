@@ -129,7 +129,8 @@ pub fn scan_forensics(seconds: u16) -> Result<()> {
     println!("Purpose: fingerprint TWS members / RPA / identity-looking advertisers / case / vendor beacons.");
     usb::r2_fast_preflight()?;
 
-    let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
+    println!("Raw HCI tracing: enabled for LE Extended Advertising Report (0x3E/0x0D).");
+    let mut attached = bumble_adapter::attach_be200_existing_operational_raw_trace(ATTACH_TIMEOUT)
         .map_err(|error| AppError::Protocol(format!("Bumble attach failed: {error}")))?;
     println!("Attach: PASS");
 
