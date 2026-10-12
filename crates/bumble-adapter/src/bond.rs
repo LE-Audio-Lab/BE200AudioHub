@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bumble::keys::{JsonKeyStore, KeyStore};
 use bumble::{Address, AddressType};
@@ -122,6 +122,49 @@ impl BondStore {
             set_db,
             local_keys,
         })
+    }
+
+    /// Archive all controller-local bond state and create a fresh persistent
+    /// coordinator identity. This is intentionally explicit because rotating
+    /// the local IRK invalidates the old peer view of this coordinator.
+    pub fn reseed_for_controller(
+        identity: &ControllerIdentity,
+    ) -> TransportResult<(Self, PathBuf)> {
+        let root = bonding_root()?;
+        std::fs::create_dir_all(&root)
+            .map_err(|error| Error::Remote(format!("failed to create bond directory: {error}")))?;
+
+        let identity_file = root.join("controller-identity.txt");
+        enforce_controller_identity(&identity_file, &identity.public_address)?;
+
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::Remote(format!("system clock is before UNIX epoch: {error}")))?
+            .as_secs();
+        let archive = root.join("archive").join(format!("reseed-{epoch}"));
+        std::fs::create_dir_all(&archive)
+            .map_err(|error| Error::Remote(format!(
+                "failed to create bond archive {}: {error}",
+                archive.display()
+            )))?;
+
+        for name in ["pairing-keys.json", "bond-sets.json", "local-identity.json"] {
+            let source = root.join(name);
+            if !source.exists() {
+                continue;
+            }
+            let destination = archive.join(name);
+            std::fs::rename(&source, &destination).map_err(|error| {
+                Error::Remote(format!(
+                    "failed to archive {} -> {}: {error}",
+                    source.display(),
+                    destination.display()
+                ))
+            })?;
+        }
+
+        let store = Self::open_for_controller(identity)?;
+        Ok((store, archive))
     }
 
     pub fn controller_identity(&self) -> &str {
