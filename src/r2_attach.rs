@@ -236,8 +236,8 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
 
     println!("R2.4 persistent dual-member bond onboarding");
     println!("Target name: {wanted_name:?}");
-    println!("Invariant: existing bonds are never deleted or re-paired automatically.");
-    println!("Goal: persist up to {TARGET_SET_MEMBERS} members, one SMP bond per physical member.");
+    println!("Invariant: an existing bond is never deleted or re-paired automatically.");
+    println!("Goal: one durable SMP bond per physical member, with CSIS/RSI set validation.");
     usb::r2_fast_preflight()?;
 
     let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
@@ -262,24 +262,45 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
 
     loop {
         let current = store.set_summary(wanted_name);
+        let set_sirk = store
+            .set_sirk(wanted_name)
+            .map_err(|error| AppError::Protocol(format!("Stored SIRK invalid: {error}")))?;
+
         println!(
-            "Persistent set state: {}/{} member(s)",
+            "Persistent set state: {}/{} member(s), SIRK={}, set_size={}",
             current.members.len(),
-            TARGET_SET_MEMBERS
+            TARGET_SET_MEMBERS,
+            if set_sirk.is_some() { "known" } else { "unknown" },
+            current
+                .set_size
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".into())
         );
         for (index, member) in current.members.iter().enumerate() {
             println!(
-                "  bonded[{index}] identity={} type={}",
-                member.identity_address, member.address_type
+                "  member[{index}] identity={} type={} rank={} csis_verified={}",
+                member.identity_address,
+                member.address_type,
+                member
+                    .rank
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                member.csis_verified
             );
         }
 
-        if current.members.len() >= TARGET_SET_MEMBERS {
-            println!("R2.4 onboarding already complete; no pairing was attempted.");
+        if current.members.len() >= TARGET_SET_MEMBERS
+            && set_sirk.is_some()
+            && current.members.iter().all(|member| member.csis_verified)
+        {
+            println!(
+                "R2.4 onboarding COMPLETE: {} CSIS-verified members are persisted; no pairing was attempted.",
+                current.members.len()
+            );
             return Ok(());
         }
 
-        println!("Scanning for {seconds}s to find an unbonded member...");
+        println!("Scanning for {seconds}s...");
         let scan = attached
             .scan_passive_extended(seconds)
             .map_err(|error| AppError::Protocol(format!("Bumble scan failed: {error}")))?;
@@ -289,78 +310,282 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             scan.observations.len()
         );
 
-        let mut fresh = Vec::new();
-        let mut metadata_changed = false;
+        let mut known_recovery = Vec::<(bumble_adapter::ScanObservation, String)>::new();
+        let mut orphan_bonds = Vec::<(bumble_adapter::ScanObservation, String)>::new();
+        let mut fresh = Vec::<bumble_adapter::ScanObservation>::new();
 
-        for observation in scan.observations.iter().filter(|observation| {
-            observation.is_connectable
-                && observation.name.as_deref() == Some(wanted_name)
-        }) {
-            match store
+        for observation in scan
+            .observations
+            .iter()
+            .filter(|observation| observation.is_connectable)
+        {
+            let resolved = store
                 .resolve_observation_identity(observation)
-                .map_err(|error| AppError::Protocol(format!("RPA resolution failed: {error}")))?
-            {
-                Some(identity_address) => {
-                    if store.is_member_of(wanted_name, &identity_address) {
+                .map_err(|error| AppError::Protocol(format!("RPA resolution failed: {error}")))?;
+
+            match resolved {
+                Some(identity_address) if store.is_member_of(wanted_name, &identity_address) => {
+                    let needs_csis = current
+                        .members
+                        .iter()
+                        .find(|member| {
+                            member
+                                .identity_address
+                                .eq_ignore_ascii_case(&identity_address)
+                        })
+                        .is_some_and(|member| !member.csis_verified)
+                        || set_sirk.is_none();
+
+                    if needs_csis {
+                        known_recovery.push((observation.clone(), identity_address));
+                    } else {
                         println!(
-                            "  skip known member {} via current RPA {}",
+                            "  skip known verified member {} via current RPA {}",
                             identity_address, observation.address
                         );
-                    } else if store
-                        .adopt_existing_bond(wanted_name, &identity_address)
-                        .map_err(|error| AppError::Protocol(format!(
-                            "Failed to adopt existing bond: {error}"
-                        )))?
-                    {
-                        println!(
-                            "  recovered orphan bond {} from existing pairing keys; no SMP pairing needed",
-                            identity_address
-                        );
-                        metadata_changed = true;
                     }
                 }
-                None => fresh.push(observation.clone()),
+                Some(identity_address) => {
+                    let same_set = candidate_matches_set(observation, set_sirk.as_ref())?;
+                    let name_ok = observation.name.as_deref() == Some(wanted_name);
+                    if (set_sirk.is_some() && same_set) || (set_sirk.is_none() && name_ok) {
+                        orphan_bonds.push((observation.clone(), identity_address));
+                    }
+                }
+                None => {
+                    if observation.name.as_deref() != Some(wanted_name) {
+                        continue;
+                    }
+                    if candidate_matches_set(observation, set_sirk.as_ref())? {
+                        fresh.push(observation.clone());
+                    } else if set_sirk.is_some() {
+                        println!(
+                            "  reject same-name candidate {}: missing/mismatched CSIS RSI",
+                            observation.address
+                        );
+                    }
+                }
             }
         }
 
-        if metadata_changed {
-            let loaded = attached
-                .install_bond_store(&store)
+        if let Some((observation, identity_address)) = known_recovery
+            .into_iter()
+            .max_by_key(|(observation, _)| observation.rssi)
+        {
+            println!(
+                "Recovering CSIS metadata for existing bond {} via current RPA {} (no SMP)...",
+                identity_address, observation.address
+            );
+            let acl = attached
+                .connect_scanned_observation(&observation, CONNECT_TIMEOUT)
                 .map_err(|error| AppError::Protocol(format!(
-                    "Failed to refresh recovered bond resolver: {error}"
+                    "Known-bond ACL connect failed: {error}"
                 )))?;
-            println!("Bond metadata repaired; resolver now has {loaded} key(s).");
+
+            let recovery = (|| -> Result<()> {
+                attached
+                    .resume_bonded_encryption(
+                        acl.connection_handle,
+                        &identity_address,
+                        &store,
+                        RESUME_TIMEOUT,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Known-bond encryption failed: {error}"
+                    )))?;
+
+                let csis = attached
+                    .read_csis_member(
+                        acl.connection_handle,
+                        &identity_address,
+                        &store,
+                        RESUME_TIMEOUT,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Known-bond CSIS recovery failed: {error}"
+                    )))?;
+
+                validate_csis(&store, wanted_name, &csis)?;
+                store
+                    .update_csis_member(
+                        wanted_name,
+                        &identity_address,
+                        csis.set_size,
+                        csis.sirk,
+                        csis.rank,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Failed to persist recovered CSIS metadata: {error}"
+                    )))?;
+
+                println!(
+                    "  CSIS recovered: set_size={} rank={}",
+                    csis.set_size
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    csis.rank
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into())
+                );
+                Ok(())
+            })();
+
+            let disconnect = attached.disconnect_le_connection(
+                acl.connection_handle,
+                0x13,
+                DISCONNECT_TIMEOUT,
+            );
+            if let Err(error) = recovery {
+                let _ = disconnect;
+                return Err(error);
+            }
+            disconnect.map_err(|error| AppError::Protocol(format!(
+                "CSIS-recovery disconnect failed: {error}"
+            )))?;
+            continue;
+        }
+
+        if !orphan_bonds.is_empty() {
+            println!("Existing untracked bond candidate(s) found; SMP will NOT be repeated:");
+            for (index, (observation, identity_address)) in orphan_bonds.iter().enumerate() {
+                println!(
+                    "  [{index}] identity={} current_rpa={} RSSI={}dBm RSI={}",
+                    identity_address,
+                    observation.address,
+                    observation.rssi,
+                    if observation.rsi.is_some() { "present" } else { "absent" }
+                );
+            }
+            let selected_index = if orphan_bonds.len() == 1 {
+                0
+            } else {
+                choose_candidate(orphan_bonds.len())?
+            };
+            let (observation, identity_address) = &orphan_bonds[selected_index];
+
+            let acl = attached
+                .connect_scanned_observation(observation, CONNECT_TIMEOUT)
+                .map_err(|error| AppError::Protocol(format!(
+                    "Orphan-bond ACL connect failed: {error}"
+                )))?;
+
+            let recovery = (|| -> Result<()> {
+                attached
+                    .resume_bonded_encryption(
+                        acl.connection_handle,
+                        identity_address,
+                        &store,
+                        RESUME_TIMEOUT,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Orphan-bond encryption failed: {error}"
+                    )))?;
+
+                let csis = attached
+                    .read_csis_member(
+                        acl.connection_handle,
+                        identity_address,
+                        &store,
+                        RESUME_TIMEOUT,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Orphan-bond CSIS verification failed: {error}"
+                    )))?;
+
+                validate_csis(&store, wanted_name, &csis)?;
+
+                if !store
+                    .adopt_existing_bond(wanted_name, identity_address)
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Failed to adopt verified existing bond: {error}"
+                    )))?
+                {
+                    return Err(AppError::Protocol(format!(
+                        "bond {} disappeared from the persistent key store during recovery",
+                        identity_address
+                    )));
+                }
+
+                store
+                    .update_csis_member(
+                        wanted_name,
+                        identity_address,
+                        csis.set_size,
+                        csis.sirk,
+                        csis.rank,
+                    )
+                    .map_err(|error| AppError::Protocol(format!(
+                        "Failed to persist adopted CSIS metadata: {error}"
+                    )))?;
+
+                println!(
+                    "  orphan bond adopted after encrypted CSIS verification: identity={} set_size={} rank={}",
+                    identity_address,
+                    csis.set_size
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    csis.rank
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into())
+                );
+                Ok(())
+            })();
+
+            let disconnect = attached.disconnect_le_connection(
+                acl.connection_handle,
+                0x13,
+                DISCONNECT_TIMEOUT,
+            );
+            if let Err(error) = recovery {
+                let _ = disconnect;
+                return Err(error);
+            }
+            disconnect.map_err(|error| AppError::Protocol(format!(
+                "Orphan-recovery disconnect failed: {error}"
+            )))?;
             continue;
         }
 
         let current = store.set_summary(wanted_name);
-        if current.members.len() >= TARGET_SET_MEMBERS {
-            println!("R2.4 onboarding complete from existing persistent bonds.");
-            return Ok(());
-        }
+        let set_sirk = store
+            .set_sirk(wanted_name)
+            .map_err(|error| AppError::Protocol(format!("Stored SIRK invalid: {error}")))?;
 
-        if fresh.is_empty() {
+        if !current.members.is_empty() && set_sirk.is_none() {
             return Err(AppError::Protocol(format!(
-                "No unbonded connectable {wanted_name:?} member was visible. {} member(s) are already safely persisted; do not delete them. Re-enter earbud pairing mode and rerun this same command.",
+                "{} bond(s) are safely persisted, but CSIS/SIRK has not yet been recovered. Do not pair another member. Make a known bonded earbud visible and rerun the same command.",
                 current.members.len()
             )));
         }
 
-        println!("Unbonded matching candidates:");
+        if fresh.is_empty() {
+            let detail = if set_sirk.is_some() {
+                "No unbonded same-set candidate with a valid CSIS RSI was visible."
+            } else {
+                "No unbonded connectable target was visible."
+            };
+            return Err(AppError::Protocol(format!(
+                "{detail} {} member(s) are already safely persisted; do not delete or re-pair them. Re-enter earbud pairing mode and rerun this same command.",
+                current.members.len()
+            )));
+        }
+
+        println!("Unbonded validated candidate(s):");
         for (index, candidate) in fresh.iter().enumerate() {
             println!(
-                "  [{index}] {} type={} RSSI={}dBm PHY={}/{} SID={}",
+                "  [{index}] {} type={} RSSI={}dBm PHY={}/{} SID={} RSI={}",
                 candidate.address,
                 candidate.address_type,
                 candidate.rssi,
                 candidate.primary_phy,
                 candidate.secondary_phy,
-                candidate.sid
+                candidate.sid,
+                if candidate.rsi.is_some() { "present" } else { "absent" }
             );
         }
 
         let selected_index = if fresh.len() == 1 {
-            println!("Only one unbonded candidate; selecting [0].");
+            println!("Only one candidate; selecting [0].");
             0
         } else {
             choose_candidate(fresh.len())?
@@ -368,7 +593,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         let selected = &fresh[selected_index];
 
         println!(
-            "Connecting unbonded candidate [{selected_index}] {}...",
+            "Connecting candidate [{selected_index}] {}...",
             selected.address
         );
         let acl = attached
@@ -380,15 +605,25 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         );
 
         println!("Starting one-time SMP Secure Connections bonding...");
-        let paired = attached
-            .pair_and_persist(
-                acl.connection_handle,
-                &identity.public_address,
-                wanted_name,
-                &mut store,
-                PAIRING_TIMEOUT,
-            )
-            .map_err(|error| AppError::Protocol(format!("SMP/bond failed: {error}")))?;
+        let paired = match attached.pair_and_persist(
+            acl.connection_handle,
+            &identity.public_address,
+            wanted_name,
+            &mut store,
+            PAIRING_TIMEOUT,
+        ) {
+            Ok(paired) => paired,
+            Err(error) => {
+                let _ = attached.disconnect_le_connection(
+                    acl.connection_handle,
+                    0x13,
+                    DISCONNECT_TIMEOUT,
+                );
+                return Err(AppError::Protocol(format!(
+                    "SMP/bond failed: {error}. Existing persisted keys, if any, were NOT deleted; rerun the same onboarding command rather than forgetting the device."
+                )));
+            }
+        };
 
         println!("Bond persisted: PASS");
         println!(
@@ -401,7 +636,63 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
             paired.has_irk
         );
 
-        println!("Disconnecting bonded member before searching for the next one...");
+        let csis = match attached.read_csis_member(
+            acl.connection_handle,
+            &paired.identity_address,
+            &store,
+            RESUME_TIMEOUT,
+        ) {
+            Ok(csis) => csis,
+            Err(error) => {
+                let _ = attached.disconnect_le_connection(
+                    acl.connection_handle,
+                    0x13,
+                    DISCONNECT_TIMEOUT,
+                );
+                return Err(AppError::Protocol(format!(
+                    "Bond {} is safely persisted, but encrypted CSIS discovery failed: {error}. Do NOT re-pair it; rerun onboarding and the stored bond will be resumed.",
+                    paired.identity_address
+                )));
+            }
+        };
+
+        if let Err(error) = validate_csis(&store, wanted_name, &csis) {
+            let _ = attached.disconnect_le_connection(
+                acl.connection_handle,
+                0x13,
+                DISCONNECT_TIMEOUT,
+            );
+            return Err(error);
+        }
+
+        if let Err(error) = store.update_csis_member(
+            wanted_name,
+            &paired.identity_address,
+            csis.set_size,
+            csis.sirk,
+            csis.rank,
+        ) {
+            let _ = attached.disconnect_le_connection(
+                acl.connection_handle,
+                0x13,
+                DISCONNECT_TIMEOUT,
+            );
+            return Err(AppError::Protocol(format!(
+                "Bond {} is persisted, but CSIS metadata commit failed: {error}. Do not re-pair; rerun onboarding to recover.",
+                paired.identity_address
+            )));
+        }
+
+        println!(
+            "CSIS verified: SIRK acquired, set_size={} rank={}",
+            csis.set_size
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".into()),
+            csis.rank
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".into())
+        );
+
         let reason = attached
             .disconnect_le_connection(acl.connection_handle, 0x13, DISCONNECT_TIMEOUT)
             .map_err(|error| AppError::Protocol(format!(
@@ -412,7 +703,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
         let current = store.set_summary(wanted_name);
         if current.members.len() < TARGET_SET_MEMBERS {
             println!(
-                "Member persisted. Continuing directly to member {}/{} without re-pairing existing members.",
+                "Member persisted + CSIS verified. Continuing directly to member {}/{} without re-pairing existing members.",
                 current.members.len() + 1,
                 TARGET_SET_MEMBERS
             );
@@ -448,14 +739,31 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
         )));
     }
 
+    let expected_sirk = store
+        .set_sirk(wanted_name)
+        .map_err(|error| AppError::Protocol(format!("Stored SIRK invalid: {error}")))?
+        .ok_or_else(|| AppError::Protocol(
+            "Persistent bonds exist but CSIS/SIRK metadata is incomplete; run bond-onboard to recover it without re-pairing".into()
+        ))?;
+
+    if set.members.iter().any(|member| !member.csis_verified) {
+        return Err(AppError::Protocol(
+            "Persistent bond set contains an unverified CSIS member; run bond-onboard to recover metadata without re-pairing".into()
+        ));
+    }
+
     println!("Verifying {} persisted member(s)...", set.members.len());
 
     for (index, member) in set.members.iter().enumerate() {
         println!(
-            "Member {}/{} identity={}",
+            "Member {}/{} identity={} rank={}",
             index + 1,
             set.members.len(),
-            member.identity_address
+            member.identity_address,
+            member
+                .rank
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".into())
         );
         println!("  scanning for current RPA ({seconds}s)...");
 
@@ -463,26 +771,20 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
             .scan_passive_extended(seconds)
             .map_err(|error| AppError::Protocol(format!("Bumble scan failed: {error}")))?;
 
-        let mut matches = Vec::new();
-        for observation in scan.observations.iter().filter(|observation| {
-            observation.is_connectable
-                && observation.name.as_deref() == Some(wanted_name)
-        }) {
-            let resolved = store
-                .resolve_observation_identity(observation)
-                .map_err(|error| AppError::Protocol(format!(
-                    "RPA resolution failed: {error}"
-                )))?;
-            if resolved
-                .as_deref()
-                .is_some_and(|identity| identity.eq_ignore_ascii_case(&member.identity_address))
-            {
-                matches.push(observation.clone());
-            }
-        }
-
-        let selected = matches
-            .into_iter()
+        let selected = scan
+            .observations
+            .iter()
+            .filter(|observation| observation.is_connectable)
+            .filter_map(|observation| {
+                store
+                    .resolve_observation_identity(observation)
+                    .ok()
+                    .flatten()
+                    .filter(|resolved| {
+                        resolved.eq_ignore_ascii_case(&member.identity_address)
+                    })
+                    .map(|_| observation.clone())
+            })
             .max_by_key(|observation| observation.rssi)
             .ok_or_else(|| AppError::Protocol(format!(
                 "Persisted member {} was not visible/resolvable in this scan",
@@ -501,36 +803,121 @@ pub fn bond_verify(seconds: u16, wanted_name: &str) -> Result<()> {
             )))?;
         println!("  ACL: PASS handle=0x{:04X}", acl.connection_handle);
 
-        let resumed = attached
-            .resume_bonded_encryption(
-                acl.connection_handle,
-                &member.identity_address,
-                &store,
-                RESUME_TIMEOUT,
-            )
-            .map_err(|error| AppError::Protocol(format!(
-                "Stored-bond encryption failed: {error}"
-            )))?;
-        println!(
-            "  encrypted from stored LTK: PASS identity={} handle=0x{:04X}",
-            resumed.identity_address, resumed.connection_handle
+        let verification = (|| -> Result<()> {
+            attached
+                .resume_bonded_encryption(
+                    acl.connection_handle,
+                    &member.identity_address,
+                    &store,
+                    RESUME_TIMEOUT,
+                )
+                .map_err(|error| AppError::Protocol(format!(
+                    "Stored-bond encryption failed: {error}"
+                )))?;
+            println!("  encrypted from stored LTK: PASS");
+
+            let csis = attached
+                .read_csis_member(
+                    acl.connection_handle,
+                    &member.identity_address,
+                    &store,
+                    RESUME_TIMEOUT,
+                )
+                .map_err(|error| AppError::Protocol(format!(
+                    "Stored-bond CSIS verification failed: {error}"
+                )))?;
+
+            if csis.sirk != expected_sirk {
+                return Err(AppError::Protocol(format!(
+                    "CSIS SIRK changed for persistent member {}",
+                    member.identity_address
+                )));
+            }
+            if let (Some(stored), Some(actual)) = (set.set_size, csis.set_size) {
+                if stored != actual {
+                    return Err(AppError::Protocol(format!(
+                        "CSIS Set Size changed for {}: stored {}, peer {}",
+                        member.identity_address, stored, actual
+                    )));
+                }
+            }
+            if let (Some(stored), Some(actual)) = (member.rank, csis.rank) {
+                if stored != actual {
+                    return Err(AppError::Protocol(format!(
+                        "CSIS rank changed for {}: stored {}, peer {}",
+                        member.identity_address, stored, actual
+                    )));
+                }
+            }
+            println!(
+                "  CSIS: PASS set_size={} rank={}",
+                csis.set_size
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                csis.rank
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".into())
+            );
+            Ok(())
+        })();
+
+        let disconnect = attached.disconnect_le_connection(
+            acl.connection_handle,
+            0x13,
+            DISCONNECT_TIMEOUT,
         );
-
-        attached
-            .linger_le_connection(acl.connection_handle, Duration::from_secs(1))
-            .map_err(|error| AppError::Protocol(format!(
-                "Stored-bond ACL linger failed: {error}"
-            )))?;
-
-        let reason = attached
-            .disconnect_le_connection(acl.connection_handle, 0x13, DISCONNECT_TIMEOUT)
-            .map_err(|error| AppError::Protocol(format!(
-                "Stored-bond disconnect failed: {error}"
-            )))?;
+        if let Err(error) = verification {
+            let _ = disconnect;
+            return Err(error);
+        }
+        let reason = disconnect.map_err(|error| AppError::Protocol(format!(
+            "Stored-bond disconnect failed: {error}"
+        )))?;
         println!("  disconnect: PASS reason=0x{reason:02X}");
     }
 
-    println!("R2.4 RESULT: all recorded members reconnected and encrypted without SMP pairing.");
+    println!("R2.4 RESULT: all recorded members reconnected, encrypted from stored LTK, and matched stored CSIS without SMP pairing.");
+    Ok(())
+}
+
+fn candidate_matches_set(
+    observation: &bumble_adapter::ScanObservation,
+    sirk: Option<&[u8; 16]>,
+) -> Result<bool> {
+    let Some(sirk) = sirk else {
+        return Ok(true);
+    };
+    let Some(rsi) = observation.rsi.as_ref() else {
+        return Ok(false);
+    };
+    bumble_adapter::rsi_matches_sirk(sirk, rsi)
+        .map_err(|error| AppError::Protocol(format!("CSIS RSI validation failed: {error}")))
+}
+
+fn validate_csis(
+    store: &bumble_adapter::BondStore,
+    wanted_name: &str,
+    report: &bumble_adapter::CsisMemberReport,
+) -> Result<()> {
+    if let Some(expected) = store
+        .set_sirk(wanted_name)
+        .map_err(|error| AppError::Protocol(format!("Stored SIRK invalid: {error}")))?
+    {
+        if report.sirk != expected {
+            return Err(AppError::Protocol(
+                "CSIS SIRK mismatch: peer does not belong to the already-persisted coordinated set".into()
+            ));
+        }
+    }
+
+    let current = store.set_summary(wanted_name);
+    if let (Some(stored), Some(actual)) = (current.set_size, report.set_size) {
+        if stored != actual {
+            return Err(AppError::Protocol(format!(
+                "CSIS Set Size mismatch: stored {stored}, peer {actual}"
+            )));
+        }
+    }
     Ok(())
 }
 

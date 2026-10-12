@@ -111,6 +111,19 @@ impl AttachedController {
             .map(|value| value.0)
             .unwrap_or(AddressType::RANDOM_DEVICE.0);
 
+        let encryption_key = selected_encryption_key(&keys, true);
+        let has_ltk = encryption_key.is_some();
+        let has_irk = keys.irk.is_some();
+        if !has_ltk || !has_irk {
+            return Err(Error::Remote(format!(
+                "bond keys were persisted for {identity}, but durable RPA reconnect requires both LTK and IRK (LTK={has_ltk}, IRK={has_irk}); set membership was not recorded and the bond was not deleted"
+            )));
+        }
+
+        let authenticated = encryption_key
+            .as_ref()
+            .is_some_and(|key| key.authenticated);
+
         store.record_member(target_name, &identity, address_type)?;
 
         self.device.set_key_store(store.clone_key_store());
@@ -120,18 +133,13 @@ impl AttachedController {
                 "failed to refresh RPA resolver after pairing: {error}"
             )))?;
 
-        let encryption_key = selected_encryption_key(&keys, true);
-        let authenticated = encryption_key
-            .as_ref()
-            .is_some_and(|key| key.authenticated);
-
         Ok(PairPersistReport {
             identity_address: identity,
             address_type,
             encrypted: true,
             authenticated,
-            has_ltk: encryption_key.is_some(),
-            has_irk: keys.irk.is_some(),
+            has_ltk,
+            has_irk,
         })
     }
 
