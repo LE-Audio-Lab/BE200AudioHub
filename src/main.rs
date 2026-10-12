@@ -25,6 +25,7 @@ fn usage() -> &'static str {
        be200hub hci capabilities\n\
        be200hub ble scan --seconds <1..30> [--show-addresses]\n\
        be200hub r2 attach-probe\n\
+       be200hub r2 scan --seconds <1..30> [--show-addresses]\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -79,6 +80,13 @@ fn run(args: &[String]) -> Result<()> {
             ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
         },
         [a, b] if a == "r2" && b == "attach-probe" => r2_attach::probe(),
+        [a, b, c, seconds] if a == "r2" && b == "scan" && c == "--seconds" => {
+            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, false)
+        },
+        [a, b, c, seconds, flag] if a == "r2" && b == "scan"
+            && c == "--seconds" && flag == "--show-addresses" => {
+            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
+        },
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
         },

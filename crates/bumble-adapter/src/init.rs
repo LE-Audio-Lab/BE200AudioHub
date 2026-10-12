@@ -27,9 +27,9 @@ pub struct AttachReport {
 }
 
 pub struct AttachedController {
-    host: ExternalHost,
-    device: Device,
-    info: ExternalControllerInfo,
+    pub(crate) host: ExternalHost,
+    pub(crate) device: Device,
+    pub(crate) info: ExternalControllerInfo,
 }
 
 impl AttachedController {

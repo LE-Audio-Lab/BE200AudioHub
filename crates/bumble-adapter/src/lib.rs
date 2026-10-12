@@ -5,11 +5,13 @@
 //! BE200AudioHub domain types.
 
 mod init;
+mod scan;
 
 pub use init::{
     attach_be200_existing_operational, initialize_existing_operational, AttachReport,
     AttachedController,
 };
+pub use scan::{ScanObservation, ScanSummary};
 
 pub const UPSTREAM_REVISION: &str =
     "bbac2a6803b8cab0920ab725a23aa408fc4fed85";
