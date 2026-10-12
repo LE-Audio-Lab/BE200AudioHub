@@ -68,8 +68,53 @@ impl AttachedController {
             max_ce_lengths: vec![0],
         };
 
-        successful_status(&mut self.host, command, timeout)?;
+        println!(
+            "[R2/ACL] submit HCI 0x2043 LE Extended Create Connection: peer={} type={} own_type=public phys=1M scan=0x0010/0x0010 conn_interval=24..40 latency=0 supervision=42",
+            observation.address,
+            observation.address_type
+        );
+        let submit_started = Instant::now();
+        if let Err(error) = successful_status(&mut self.host, command, timeout) {
+            println!(
+                "[R2/ACL] HCI 0x2043 submit failed after {:?}: {error}",
+                submit_started.elapsed()
+            );
+            println!(
+                "[R2/ACL] ambiguous initiator state; issuing best-effort LE Create Connection Cancel..."
+            );
+            let cancel_result = self.host.send_command(
+                Command::LeCreateConnectionCancel,
+                Duration::from_secs(2),
+            );
+            match &cancel_result {
+                Ok(response) => println!(
+                    "[R2/ACL] cancel response: status={:?} host_state={:?}",
+                    response.status(),
+                    self.host.state()
+                ),
+                Err(cancel_error) => println!(
+                    "[R2/ACL] cancel failed: {cancel_error}; host_state={:?}",
+                    self.host.state()
+                ),
+            }
+            self.device.poll(&mut self.host);
+            self.device.take_device_events();
+            return Err(Error::Remote(format!(
+                "LE Extended Create Connection command submission failed: {error}; cancel={}",
+                match cancel_result {
+                    Ok(response) => format!("status={:?}", response.status()),
+                    Err(cancel_error) => format!("error={cancel_error}"),
+                }
+            )));
+        }
+        println!(
+            "[R2/ACL] HCI 0x2043 Command Status: SUCCESS after {:?}",
+            submit_started.elapsed()
+        );
+
+        let wait_started = Instant::now();
         let deadline = Instant::now() + timeout;
+        let mut idle_slices: u32 = 0;
 
         loop {
             self.device.poll(&mut self.host);
@@ -82,6 +127,10 @@ impl AttachedController {
                     .ok_or_else(|| Error::Remote(
                         "LE connection handle appeared without connection metadata".into(),
                     ))?;
+                println!(
+                    "[R2/ACL] LE Enhanced Connection Complete: SUCCESS after {:?}, handle=0x{handle:04X}",
+                    wait_started.elapsed()
+                );
                 return Ok(LeAclReport {
                     connection_handle: handle,
                     role: connection.role,
@@ -100,6 +149,10 @@ impl AttachedController {
                 } = event
                 {
                     if peer_address == peer {
+                        println!(
+                            "[R2/ACL] LE Enhanced Connection Complete: FAILED status=0x{status:02X} after {:?}",
+                            wait_started.elapsed()
+                        );
                         return Err(Error::Remote(format!(
                             "LE Extended Create Connection failed with HCI status 0x{status:02X}"
                         )));
@@ -109,20 +162,52 @@ impl AttachedController {
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                let _ = self.host.send_command(
+                println!(
+                    "[R2/ACL] timed out waiting for LE Enhanced Connection Complete after {:?}; cancelling initiator...",
+                    wait_started.elapsed()
+                );
+                let cancel = self.host.send_command(
                     Command::LeCreateConnectionCancel,
                     Duration::from_secs(2),
                 );
-                return Err(Error::Remote(
-                    "timed out waiting for LE Enhanced Connection Complete".into(),
-                ));
+                match &cancel {
+                    Ok(response) => println!(
+                        "[R2/ACL] timeout cancel response: status={:?}",
+                        response.status()
+                    ),
+                    Err(error) => println!(
+                        "[R2/ACL] timeout cancel failed: {error}"
+                    ),
+                }
+                return Err(Error::Remote(format!(
+                    "timed out waiting for LE Enhanced Connection Complete; cancel={}",
+                    match cancel {
+                        Ok(response) => format!("status={:?}", response.status()),
+                        Err(error) => format!("error={error}"),
+                    }
+                )));
             }
 
             match self.host.wait_for_device_activity(
                 &mut self.device,
                 remaining.min(WAIT_SLICE),
             )? {
-                ExternalHostActivity::Packet | ExternalHostActivity::Timeout => {}
+                ExternalHostActivity::Packet => {
+                    idle_slices = 0;
+                    println!(
+                        "[R2/ACL] HCI activity while initiating at {:?}",
+                        wait_started.elapsed()
+                    );
+                }
+                ExternalHostActivity::Timeout => {
+                    idle_slices = idle_slices.saturating_add(1);
+                    if idle_slices == 1 || idle_slices % 4 == 0 {
+                        println!(
+                            "[R2/ACL] waiting for LE Enhanced Connection Complete: {:?} elapsed",
+                            wait_started.elapsed()
+                        );
+                    }
+                }
                 ExternalHostActivity::Ended => {
                     return Err(Error::Remote(
                         "Bumble HCI transport ended while connecting".into(),
