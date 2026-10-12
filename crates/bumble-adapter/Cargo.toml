@@ -11,3 +11,6 @@ bumble-host = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "b
 bumble-transport = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 bumble-profiles = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 bumble-codecs = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-smp = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

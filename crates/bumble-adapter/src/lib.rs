@@ -4,10 +4,14 @@
 //! attach-without-reset patch seam and translates upstream events/types into
 //! BE200AudioHub domain types.
 
+mod bond;
 mod connect;
 mod init;
 mod scan;
 
+pub use bond::{
+    BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
+};
 pub use connect::LeAclReport;
 pub use init::{
     attach_be200_existing_operational, initialize_existing_operational, AttachReport,
