@@ -405,6 +405,31 @@ fn address_type_label(address: &str, address_type: u8) -> String {
     }
 }
 
+fn print_rsi_match(
+    label: &str,
+    observation: &bumble_adapter::ScanObservation,
+    sirk: &[u8; 16],
+) -> Result<()> {
+    match observation.rsi.as_ref() {
+        None => println!(
+            "  [R2.4/RSI] {label} addr={} type={} RSI=absent",
+            observation.address, observation.address_type
+        ),
+        Some(rsi) => {
+            let matches = bumble_adapter::rsi_matches_sirk(sirk, rsi)
+                .map_err(|error| AppError::Protocol(format!("CSIS RSI validation failed: {error}")))?;
+            println!(
+                "  [R2.4/RSI] {label} addr={} type={} RSI={} result={}",
+                observation.address,
+                observation.address_type,
+                hex_bytes(rsi),
+                if matches { "MATCH" } else { "MISMATCH" }
+            );
+        }
+    }
+    Ok(())
+}
+
 fn is_resolvable_private_observation(
     observation: &bumble_adapter::ScanObservation,
 ) -> bool {
@@ -804,6 +829,9 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                             "  skip known verified member {} via current RPA {}",
                             identity_address, observation.address
                         );
+                        if let Some(sirk) = set_sirk.as_ref() {
+                            print_rsi_match("known-member", observation, sirk)?;
+                        }
                     }
                 }
                 Some(identity_address) => {
@@ -834,6 +862,10 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                         continue;
                     }
 
+                    if let Some(sirk) = set_sirk.as_ref() {
+                        print_rsi_match("unresolved-same-name", observation, sirk)?;
+                    }
+
                     if candidate_matches_set(observation, set_sirk.as_ref())? {
                         if set_sirk.is_some() && !is_resolvable_private_observation(observation) {
                             println!(
@@ -846,8 +878,9 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                         fresh.push(observation.clone());
                     } else if set_sirk.is_some() {
                         println!(
-                            "  reject same-name candidate {}: missing/mismatched CSIS RSI",
-                            observation.address
+                            "  reject same-name candidate {}: CSIS RSI did not validate; swift_pair={}",
+                            observation.address,
+                            swift_pair_matches_target(observation, wanted_name)
                         );
                     }
                 }
