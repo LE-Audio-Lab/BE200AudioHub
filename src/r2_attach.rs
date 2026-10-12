@@ -1161,9 +1161,12 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                 CONNECT_TIMEOUT,
             )
         } else {
-            attached.connect_scanned_observation(selected, CONNECT_TIMEOUT)
-        }
-        .map_err(|error| AppError::Protocol(format!("LE ACL connect failed: {error}")))?;
+            attached
+                .connect_scanned_observation(selected, CONNECT_TIMEOUT)
+                .map_err(|error| AppError::Protocol(format!(
+                    "LE ACL connect failed: {error}"
+                )))
+        }?;
         println!(
             "ACL: PASS handle=0x{:04X} peer={}",
             acl.connection_handle, acl.peer_address
