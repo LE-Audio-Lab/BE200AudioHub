@@ -405,6 +405,13 @@ fn address_type_label(address: &str, address_type: u8) -> String {
     }
 }
 
+fn is_resolvable_private_observation(
+    observation: &bumble_adapter::ScanObservation,
+) -> bool {
+    random_address_kind(&observation.address, observation.address_type)
+        == Some("resolvable-private(RPA)")
+}
+
 fn random_address_kind(address: &str, address_type: u8) -> Option<&'static str> {
     if address_type != 1 {
         return None;
@@ -826,7 +833,16 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
                     if observation.name.as_deref() != Some(wanted_name) {
                         continue;
                     }
+
                     if candidate_matches_set(observation, set_sirk.as_ref())? {
+                        if set_sirk.is_some() && !is_resolvable_private_observation(observation) {
+                            println!(
+                                "  defer same-set identity-looking advertiser {} type={}: subsequent SMP requires the member's current RPA transport",
+                                observation.address,
+                                observation.address_type
+                            );
+                            continue;
+                        }
                         fresh.push(observation.clone());
                     } else if set_sirk.is_some() {
                         println!(
@@ -1041,7 +1057,7 @@ pub fn bond_onboard(seconds: u16, wanted_name: &str) -> Result<()> {
 
         if fresh.is_empty() {
             let detail = if set_sirk.is_some() {
-                "No unbonded same-set candidate with a valid CSIS RSI was visible."
+                "No unbonded same-set current RPA with a valid CSIS RSI was visible. Identity-looking public LE Audio advertisements are intentionally not used as SMP transports. If the Buds3 Pro pairing light has gone out with both earbuds still in the case, take the earbuds out so the remaining set member advertises its current RPA, then rerun this same command."
             } else if current.members.is_empty() {
                 "No pairing-only Swift Pair LE+BR/EDR Secure Connections anchor was visible. Put both earbuds in the case and enter formal pairing mode."
             } else {
