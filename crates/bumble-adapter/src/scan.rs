@@ -24,6 +24,10 @@ pub struct ScanObservation {
     pub is_connectable: bool,
     pub is_scannable: bool,
     pub data_len: usize,
+    /// Raw advertising data exactly as surfaced by Bumble for the retained
+    /// observation. R2 forensic scans decode this without changing the normal
+    /// candidate-selection path.
+    pub raw_data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +171,7 @@ fn drain_advertisements(
             is_connectable: advertisement.is_connectable,
             is_scannable: advertisement.is_scannable,
             data_len: advertisement.data_bytes.len(),
+            raw_data: advertisement.data_bytes.clone(),
         };
 
         match observations.get(&address) {
