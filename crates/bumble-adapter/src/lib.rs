@@ -17,8 +17,8 @@ pub use bond::{
 pub use connect::LeAclReport;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
 pub use init::{
-    attach_be200_existing_operational, initialize_existing_operational, AttachReport,
-    AttachedController,
+    attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
+    initialize_existing_operational, AttachReport, AttachedController,
 };
 pub use pairing::{BondResumeReport, PairPersistReport};
 pub use scan::{ScanObservation, ScanSummary};
