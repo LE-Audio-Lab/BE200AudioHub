@@ -77,6 +77,28 @@ impl AttachedController {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RsiValidation {
+    pub observed_hash: [u8; 3],
+    pub prand: [u8; 3],
+    pub expected_hash: [u8; 3],
+    pub matches: bool,
+}
+
+/// Compute non-secret CSIS RSI diagnostics without exposing the stored SIRK.
+pub fn rsi_validation(sirk: &[u8; 16], rsi: &[u8; 6]) -> TransportResult<RsiValidation> {
+    let prand = [rsi[3], rsi[4], rsi[5]];
+    let observed_hash = [rsi[0], rsi[1], rsi[2]];
+    let expected_hash = sih(sirk, &prand)
+        .map_err(|error| Error::Remote(format!("CSIS RSI hash failed: {error}")))?;
+    Ok(RsiValidation {
+        observed_hash,
+        prand,
+        expected_hash,
+        matches: expected_hash == observed_hash,
+    })
+}
+
 /// Verify one six-byte Resolvable Set Identifier against a stored SIRK.
 pub fn rsi_matches_sirk(sirk: &[u8; 16], rsi: &[u8; 6]) -> TransportResult<bool> {
     let hash = sih(sirk, &rsi[3..])
