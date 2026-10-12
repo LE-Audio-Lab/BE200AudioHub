@@ -67,6 +67,20 @@ impl AttachedController {
                 "failed to snapshot bond store before pairing: {error}"
             )))?;
 
+        println!(
+            "[R2.4/SMP] config: SC={} MITM={} bonding={} CT2={} IO=NoInputNoOutput local_identity=public",
+            config.secure_connections,
+            config.mitm,
+            config.bonding,
+            config.ct2
+        );
+        println!(
+            "[R2.4/SMP] key distribution: initiator=0x{:02X} responder=0x{:02X} max_key_size={}",
+            config.capabilities.local_initiator_key_distribution.0,
+            config.capabilities.local_responder_key_distribution.0,
+            config.capabilities.maximum_encryption_key_size
+        );
+
         let mut pairing = LePairingSession::accept_all(
             &self.device,
             connection_handle,
@@ -74,11 +88,108 @@ impl AttachedController {
             config,
         )?;
 
-        let keys = pairing.pair(
-            &mut self.host,
-            &mut self.device,
-            timeout,
-        )?;
+        println!(
+            "[R2.4/SMP] session created: handle=0x{connection_handle:04X} role={:?} encrypted={}",
+            pairing.role(),
+            self.device.is_encrypted_on_handle(connection_handle)
+        );
+        pairing.begin(&mut self.host, &mut self.device)?;
+        println!(
+            "[R2.4/SMP] begin: Pairing Request queued; state={:?}",
+            pairing.state()
+        );
+
+        let started_at = Instant::now();
+        let deadline = started_at + timeout;
+        let mut last_state = pairing.state();
+        let mut last_encrypted = self.device.is_encrypted_on_handle(connection_handle);
+        let mut idle_slices: u32 = 0;
+
+        let keys = loop {
+            match pairing.drive_once(&mut self.host, &mut self.device)? {
+                Some(keys) => {
+                    println!(
+                        "[R2.4/SMP] complete after {:?}: state={:?} encrypted={}",
+                        started_at.elapsed(),
+                        pairing.state(),
+                        self.device.is_encrypted_on_handle(connection_handle)
+                    );
+                    break keys;
+                }
+                None => {
+                    let state = pairing.state();
+                    if state != last_state {
+                        println!(
+                            "[R2.4/SMP] state: {:?} -> {:?} at {:?}",
+                            last_state,
+                            state,
+                            started_at.elapsed()
+                        );
+                        last_state = state;
+                    }
+
+                    let encrypted = self.device.is_encrypted_on_handle(connection_handle);
+                    if encrypted != last_encrypted {
+                        println!(
+                            "[R2.4/SMP] ACL encryption: {} -> {} at {:?}",
+                            last_encrypted,
+                            encrypted,
+                            started_at.elapsed()
+                        );
+                        last_encrypted = encrypted;
+                    }
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::Remote(format!(
+                    "timed out pairing LE connection 0x{connection_handle:04X}; final_state={:?}; encrypted={}; host_state={:?}; elapsed={:?}",
+                    pairing.state(),
+                    self.device.is_encrypted_on_handle(connection_handle),
+                    self.host.state(),
+                    started_at.elapsed()
+                )));
+            }
+
+            match self.host.wait_for_device_activity(
+                &mut self.device,
+                remaining.min(WAIT_SLICE),
+            )? {
+                ExternalHostActivity::Packet => {
+                    idle_slices = 0;
+                    println!(
+                        "[R2.4/SMP] HCI activity: packet at {:?}; state={:?}",
+                        started_at.elapsed(),
+                        pairing.state()
+                    );
+                }
+                ExternalHostActivity::Timeout => {
+                    idle_slices = idle_slices.saturating_add(1);
+                    if idle_slices == 1 || idle_slices % 4 == 0 {
+                        println!(
+                            "[R2.4/SMP] waiting: {:?} elapsed, state={:?}, encrypted={}",
+                            started_at.elapsed(),
+                            pairing.state(),
+                            self.device.is_encrypted_on_handle(connection_handle)
+                        );
+                    }
+                }
+                ExternalHostActivity::Ended => {
+                    return Err(Error::Remote(format!(
+                        "transport ended while pairing LE connection 0x{connection_handle:04X}; state={:?}; elapsed={:?}",
+                        pairing.state(),
+                        started_at.elapsed()
+                    )));
+                }
+            }
+        };
+        println!(
+            "[R2.4/SMP] pairing keys ready: LTK={} IRK={} address_type={:?}",
+            selected_encryption_key(&keys, true).is_some(),
+            keys.irk.is_some(),
+            keys.address_type.map(|value| value.0)
+        );
 
         if !self.device.is_encrypted_on_handle(connection_handle) {
             return Err(Error::Remote(
@@ -86,8 +197,10 @@ impl AttachedController {
             ));
         }
 
+        println!("[R2.4/SMP] persisting bond into key store...");
         let stored = pairing
             .store_bond(store.key_store_mut())?;
+        println!("[R2.4/SMP] store_bond returned {stored}");
         if !stored {
             return Err(Error::Remote(
                 "peer completed pairing without a persistent bond".into(),
