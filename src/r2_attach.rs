@@ -405,14 +405,6 @@ fn address_type_label(address: &str, address_type: u8) -> String {
     }
 }
 
-fn normalize_identity_address(address: &str) -> String {
-    address
-        .split('/')
-        .next()
-        .unwrap_or(address)
-        .to_ascii_uppercase()
-}
-
 fn print_rsi_match(
     label: &str,
     observation: &bumble_adapter::ScanObservation,
