@@ -8,11 +8,11 @@ use bumble_host::{
     HOST_SUGGESTED_MAX_TX_OCTETS, HOST_SUGGESTED_MAX_TX_TIME, LeSuggestedDefaultDataLength,
 };
 use bumble_transport::{
-    open_split_transport, Error, ExternalControllerInfo, ExternalHost, LocalControllerVersion,
-    PacketSource, Result as TransportResult, SplitOpenedTransport,
+    Error, ExternalControllerInfo, ExternalHost, LocalControllerVersion, PacketSource,
+    Result as TransportResult, SplitOpenedTransport,
 };
 
-const BE200_TRANSPORT: &str = "usb:8087:0036";
+use crate::usb_fixed::open_be200_split_transport;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachReport {
@@ -80,7 +80,7 @@ fn attach_be200_existing_operational_impl(
     timeout: Duration,
     raw_ext_adv_trace: bool,
 ) -> TransportResult<AttachedController> {
-    let transport = open_split_transport(BE200_TRANSPORT)?;
+    let transport = open_be200_split_transport()?;
     let transport = if raw_ext_adv_trace {
         println!(
             "[R2/RAW-HCI] tap enabled at transport packet boundary (post USB framing/HCI packet parse, pre ExternalHost/Device)"
