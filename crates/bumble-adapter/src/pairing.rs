@@ -317,7 +317,11 @@ impl AttachedController {
 
         println!("[R2.4/SMP] staging bond in memory for identity validation...");
         let mut staged = MemoryKeyStore::new();
-        let stored = pairing.store_bond(&mut staged)?;
+        let stored = pairing
+            .store_bond(&mut staged)
+            .map_err(|error| Error::Remote(format!(
+                "failed to stage SC bond: {error}"
+            )))?;
         println!("[R2.4/SMP] staged store_bond returned {stored}");
         if !stored {
             return Err(Error::Remote(
