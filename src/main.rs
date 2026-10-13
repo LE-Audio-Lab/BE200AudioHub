@@ -38,6 +38,7 @@ fn usage() -> &'static str {
        be200hub r3 audio-set inspect --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r4 codec-plan --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r4 config-codec --seconds <1..30> --name <DEVICE_NAME> --side <left|right|both> --confirm-ascs-write\n\
+       be200hub r5 qos-plan --seconds <1..30> --name <DEVICE_NAME> --confirm-ascs-write\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -112,7 +113,27 @@ fn parse_r4_invocation(args: &[String]) -> Result<Option<R4Invocation<'_>>> {
     }
 }
 
+/// R5.1 pure CLI parse: intentionally requires R4.2 Config Codec consent.
+/// The R5 path cannot issue ASCS Config QoS or HCI Set CIG Parameters.
+fn parse_r5_qos_invocation(args: &[String]) -> Result<Option<(u16, &str)>> {
+    match args {
+        [r5, command, seconds_flag, seconds, name_flag, name, confirm]
+            if r5 == "r5"
+                && command == "qos-plan"
+                && seconds_flag == "--seconds"
+                && name_flag == "--name"
+                && confirm == "--confirm-ascs-write" =>
+        {
+            Ok(Some((audio_set::parse_seconds(seconds)?, name.as_str())))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn run(args: &[String]) -> Result<()> {
+    if let Some((seconds, name)) = parse_r5_qos_invocation(args)? {
+        return run_operational(|| audio_set::qos_plan(seconds, name));
+    }
     if let Some(invocation) = parse_r4_invocation(args)? {
         return match invocation {
             R4Invocation::CodecPlan { seconds, name } =>
@@ -338,5 +359,22 @@ mod r4_cli_tests {
         args[7] = "left".to_owned();
         args[3] = "0".to_owned();
         assert!(parse_r4_invocation(&args).is_err());
+    }
+
+    #[test]
+    fn r5_qos_plan_requires_seven_tokens_and_write_confirmation() {
+        let mut command = args(&[
+            "r5", "qos-plan", "--seconds", "8",
+            "--name", "Galaxy Buds3 Pro (2F23)", "--confirm-ascs-write"
+        ]);
+        assert_eq!(
+            parse_r5_qos_invocation(&command).unwrap(),
+            Some((8, "Galaxy Buds3 Pro (2F23)"))
+        );
+        command.pop();
+        assert_eq!(parse_r5_qos_invocation(&command).unwrap(), None);
+        command.push("--confirm-ascs-write".into());
+        command[3] = "31".into();
+        assert!(parse_r5_qos_invocation(&command).is_err());
     }
 }
