@@ -21,7 +21,12 @@ const MAX_LOGGED_BYTES: usize = 96;
 /// Keep full raw bytes visible (bounded for logging) so unexpected devices
 /// remain diagnosable rather than silently normalizing their responses.
 pub(crate) fn parse_ase_status_compat(value: &[u8]) -> bumble_profiles::Result<AseStatus> {
-    if value.len() > 2 && value[0] != 0 && value[1] == 0x00 {
+    // ASE_ID is 1..=255. The pinned upstream reader decodes ID 0 without
+    // checking this invariant, so enforce it at the product compatibility edge.
+    if value.first() == Some(&0) {
+        return Err(bumble_profiles::Error::InvalidValue("ASE ID must be nonzero".into()));
+    }
+    if value.len() > 2 && value[1] == 0x00 {
         let status = AseStatus::from_bytes(&value[..2])?;
         let captured = &value[..value.len().min(MAX_LOGGED_BYTES)];
         println!(
@@ -122,6 +127,7 @@ mod tests {
     #[test]
     fn rejects_zero_ase_id_missing_header_and_non_idle_trailing_bytes() {
         for raw in [
+            vec![0, 0],
             vec![0, 0, 1, 0, 0],
             vec![1],
             vec![1, 1, 1, 0, 0],
