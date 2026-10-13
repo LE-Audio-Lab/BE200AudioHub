@@ -73,7 +73,7 @@ static HMODULE ThisModule() {
 static bool IsOurItem(wux::UIElement const& element) {
     auto item = element.try_as<controls::GridViewItem>();
     if (!item) return false;
-    auto tag = winrt::unbox_value_or<winrt::hstring>(item.Tag(), L"");
+    auto tag = winrt::unbox_value_or<winrt::hstring>(item.Tag(), winrt::hstring{});
     return tag == kTileTag;
 }
 
@@ -140,7 +140,7 @@ static void InsertDirectTile(controls::ItemsWrapGrid const& host) {
         content.Children().Append(label);
 
         controls::GridViewItem item;
-        item.Tag(winrt::box_value(kTileTag));
+        item.Tag(winrt::box_value(winrt::hstring{kTileTag}));
         item.Width(96);
         item.Height(88);
         item.Padding({0, 0, 0, 0});
