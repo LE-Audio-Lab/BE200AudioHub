@@ -2,6 +2,7 @@
 mod console_ascii;
 mod ble_scan;
 mod boot;
+mod controller_bootstrap;
 mod driver;
 mod error;
 mod firmware;
@@ -42,6 +43,7 @@ fn usage() -> &'static str {
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
+     R2 bootstrap: Operational is reused; Bootloader is initialized once from .\\firmware.\n\
      Pairing route: discover -> FAL ACL -> provisional SMP -> CSIS gate -> atomic commit.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
@@ -55,6 +57,11 @@ fn doctor() -> Result<()> {
     println!("Log directory: {}", logging::default_directory().display());
     println!("BE200 status:");
     usb::list(true)
+}
+
+fn run_r2(action: impl FnOnce() -> Result<()>) -> Result<()> {
+    controller_bootstrap::ensure_operational()?;
+    action()
 }
 
 fn run(args: &[String]) -> Result<()> {
@@ -97,9 +104,12 @@ fn run(args: &[String]) -> Result<()> {
             ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
         }
 
-        [a, b] if a == "r2" && b == "attach-probe" => r2_attach::probe(),
+        [a, b] if a == "r2" && b == "attach-probe" => {
+            run_r2(r2_attach::probe)
+        }
         [a, b, c, seconds] if a == "r2" && b == "scan" && c == "--seconds" => {
-            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, false)
+            let seconds = r2_attach::parse_scan_seconds(seconds)?;
+            run_r2(|| r2_attach::scan(seconds, false))
         }
         [a, b, c, seconds, flag]
             if a == "r2"
@@ -107,17 +117,19 @@ fn run(args: &[String]) -> Result<()> {
                 && c == "--seconds"
                 && flag == "--show-addresses" =>
         {
-            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
+            let seconds = r2_attach::parse_scan_seconds(seconds)?;
+            run_r2(|| r2_attach::scan(seconds, true))
         }
         [a, b, c, seconds]
             if a == "r2" && b == "scan-forensics" && c == "--seconds" =>
         {
-            r2_attach::scan_forensics(r2_attach::parse_scan_seconds(seconds)?)
+            let seconds = r2_attach::parse_scan_seconds(seconds)?;
+            run_r2(|| r2_attach::scan_forensics(seconds))
         }
         [a, b, c, flag]
             if a == "r2" && b == "pair" && c == "reset" && flag == "--confirm" =>
         {
-            pairing::archive_reset(true)
+            run_r2(|| pairing::archive_reset(true))
         }
         [a, b, c, d, seconds, e, name]
             if a == "r2"
@@ -126,7 +138,8 @@ fn run(args: &[String]) -> Result<()> {
                 && d == "--seconds"
                 && e == "--name" =>
         {
-            pairing::onboard(pairing::parse_onboard_seconds(seconds)?, name)
+            let seconds = pairing::parse_onboard_seconds(seconds)?;
+            run_r2(|| pairing::onboard(seconds, name))
         }
         [a, b, c, d, seconds, e, name]
             if a == "r2"
@@ -135,7 +148,8 @@ fn run(args: &[String]) -> Result<()> {
                 && d == "--seconds"
                 && e == "--name" =>
         {
-            pairing::verify(pairing::parse_verify_seconds(seconds)?, name)
+            let seconds = pairing::parse_verify_seconds(seconds)?;
+            run_r2(|| pairing::verify(seconds, name))
         }
 
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
