@@ -67,9 +67,12 @@ N3 moves one layer up to the data source. The captured Quick Settings tree shows
 - the Bluetooth visual reports `Microsoft.QuickAction.Bluetooth` and position 2.
 
 The current N3 build is **read-only**. It locates the Quick Actions RootGridView,
-reads its ItemsSource through XamlOM, enumerates the 11 collection elements, parses
+reads its ItemsSource through XamlOM, enumerates the 11 collection elements, resolves
 their InstanceHandles, then dumps each ViewModel's runtime class, implemented IID
-list, and `GetPropertyValuesChain` output. No UI or collection mutation occurs.
+list, and `GetPropertyValuesChain` output. Handle discovery accepts both XamlOM
+`IsValueHandle` and `IsValueHandleAndEvaluatedValue`; if the collection only exposes
+an evaluated string, N3 independently reads each realized `GridViewItem.Content`
+handle as a read-only fallback. No UI or collection mutation occurs.
 
 Output:
 - normal TAP trace: `%LOCALAPPDATA%\BE200AudioHub\logs\qs-tap.log`
@@ -78,11 +81,13 @@ Output:
 Expected summary:
 ```text
 [N3] RootGridView.ItemsSource handle=... count=11
+[N3] realized container Content handles available=...
 [N3] VM snapshot complete; best Bluetooth candidate item[...] handle=... score=...
 ```
 
 The next write stage will only proceed after the Bluetooth VM's writable property
-surface and constructor/activation path are known. The intended clone strategy is:
+surface and constructor/activation path are known. A zero-score dump is treated as
+"identity not proven", not as item 0 being Bluetooth. The intended clone strategy is:
 create an equivalent `ControlCenter.QuickActionViewModel`, copy safe visual/state
 properties from Bluetooth, replace identity/command, and insert the VM into the
 ItemsSource vector so Windows owns container generation, pagination and layout.
