@@ -7,20 +7,23 @@
 
 use std::time::{Duration, Instant};
 
-use bumble_adapter::{AttachedController, AttValueEvent};
+use bumble_adapter::{AttachedController, AttValueEvent, CigAllocation, IsoControllerCapabilities};
 use bumble_profiles::ascs::{
     AseControlResponse, AseEvent, AseOpcode, AseOperation, AseResponseCode,
-    AseState, AseStatus, AseStatusDetails, AudioStreamControlServiceProxy,
+    AseQosConfiguration, AseState, AseStatus, AseStatusDetails,
+    AudioStreamControlServiceProxy, ConfigQosParameters,
 };
 use bumble_profiles::bap::CodecSpecificConfiguration;
 use bumble_transport::Error;
 
 use crate::ase_read::{parse_ase_status_compat, read_ase_checked};
 use crate::codec_plan::{CodecConfigurationPlan, PlannedSink, StereoSide};
+use crate::qos_plan::{plan_live_codec_configured_qos, StereoQosPlan, FIRST_SOUND_CIG_ID};
 
 const GATT_TIMEOUT: Duration = Duration::from_secs(12);
 const CP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(8);
+const QOS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 const REQUESTED_MTU: u16 = 247;
 const TARGET_LATENCY_BALANCED: u8 = 0x02;
 const TARGET_PHY_1M: u8 = 0x01;
@@ -91,6 +94,8 @@ impl ResponseGate {
                         || (self.expected_state == AseState::CODEC_CONFIGURED
                             && status.state == AseState::IDLE)
                         || (self.expected_state == AseState::IDLE
+                            && status.state == AseState::CODEC_CONFIGURED)
+                        || (self.expected_state == AseState::QOS_CONFIGURED
                             && status.state == AseState::CODEC_CONFIGURED)
                     {
                         // A pre-command snapshot or a delayed notification from
@@ -406,6 +411,182 @@ fn configure_sink(
         preferred_presentation_delay_min,
         preferred_presentation_delay_max,
         codec_specific_configuration,
+    })
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QosConfiguredMember {
+    pub side: StereoSide,
+    pub identity_address: String,
+    pub ase_id: u8,
+    pub actual: AseQosConfiguration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QosConfiguredSetSnapshot {
+    pub members: Vec<QosConfiguredMember>,
+    /// Assigned handles from the transient controller CIG (invalid after exit).
+    pub allocation: CigAllocation,
+    pub released_to_idle: bool,
+    pub cig_removed: bool,
+}
+
+fn verify_qos_status(
+    sink: &PlannedSink,
+    planned: &ConfigQosParameters,
+    status: AseStatus,
+) -> Result<QosConfiguredMember, String> {
+    if status.ase_id != planned.ase_id || status.state != AseState::QOS_CONFIGURED {
+        return Err(format!(
+            "{} QoS status wrong ASE/state: ASE={} state=0x{:02X}",
+            sink.side.as_str(), status.ase_id, status.state.0
+        ));
+    }
+    let AseStatusDetails::QosConfigured(actual) = status.details else {
+        return Err(format!("{} QoSConfigured status has no decoded QoS data", sink.side.as_str()));
+    };
+    if actual.cig_id != planned.cig_id || actual.cis_id != planned.cis_id
+        || actual.sdu_interval != planned.sdu_interval || actual.framing != planned.framing
+        || actual.phy != planned.phy || actual.max_sdu != planned.max_sdu
+        || actual.retransmission_number != planned.retransmission_number
+        || actual.max_transport_latency != planned.max_transport_latency
+        || actual.presentation_delay != planned.presentation_delay
+    {
+        return Err(format!(
+            "{} ASE={} QoS readback differs from plan: actual={actual:?} planned={planned:?}",
+            sink.side.as_str(), status.ase_id
+        ));
+    }
+    Ok(QosConfiguredMember {
+        side: sink.side,
+        identity_address: sink.identity_address.clone(),
+        ase_id: sink.ase_id,
+        actual,
+    })
+}
+
+fn configure_qos_sink(
+    controller: &mut AttachedController,
+    prepared: &PreparedSink<'_>,
+    qos: &StereoQosPlan,
+) -> Result<QosConfiguredMember, String> {
+    let parameter = if prepared.sink.side == StereoSide::Left {
+        &qos.left.ascs
+    } else {
+        &qos.right.ascs
+    };
+    let status = perform_operation(
+        controller, prepared,
+        AseOperation::ConfigQos(vec![parameter.clone()]),
+        AseState::QOS_CONFIGURED, QOS_RESPONSE_TIMEOUT,
+    )?;
+    let member = verify_qos_status(prepared.sink, parameter, status)?;
+    println!(
+        "[R5.2/QOS] {} ASE={} CIS={} QoSConfigured PASS (CP + notify + readback)",
+        prepared.sink.side.as_str(), prepared.sink.ase_id, parameter.cis_id
+    );
+    Ok(member)
+}
+
+/// R5.2-A: both Codec Configured -> Set CIG -> both QoS Configured,
+/// then Release each ASE to Idle and Remove the still-unestablished CIG.
+/// Does not send HCI Create CIS, ASCS Enable or any ISO data.
+pub fn configure_qos_and_release(
+    controller: &mut AttachedController,
+    codec: &CodecConfigurationPlan,
+    capabilities: IsoControllerCapabilities,
+) -> Result<QosConfiguredSetSnapshot, String> {
+    if codec.left.acl_handle == codec.right.acl_handle {
+        return Err("R5.2-A requires two distinct active ACL handles".into());
+    }
+    capabilities.validate_for_unfragmented_cis(codec.stream.octets_per_codec_frame)?;
+    // Both subscription/Idle gates finish before the first mutation.
+    let prepared = vec![
+        prepare_sink(controller, &codec.left)?,
+        prepare_sink(controller, &codec.right)?,
+    ];
+    println!("[R5.2/TXN] both ASEs prepared; Codec -> CIG -> QoS");
+
+    let mut attempted = 0usize;
+    let mut cig_may_exist = false;
+    let mut allocation = None::<CigAllocation>;
+    let mut codec_members = Vec::with_capacity(2);
+    let mut qos_members = Vec::with_capacity(2);
+
+    let stage = (|| -> Result<(), String> {
+        for sink in &prepared {
+            attempted += 1; // include any uncertain ATT write in rollback
+            codec_members.push(configure_sink(controller, sink)?);
+        }
+        let live = CodecConfiguredSetSnapshot {
+            members: codec_members.clone(),
+            all_released_to_idle: false,
+        };
+        let qos = plan_live_codec_configured_qos(codec, &live, capabilities)?;
+        println!(
+            "[R5.2/PLAN] CIG={} CIS={} PHY={} interval={}us RTN(L/R)={}/{} latency={}ms presentation={}us",
+            qos.cig.cig_id, qos.cig.cis_parameters.len(), qos.phy_c_to_p,
+            qos.sdu_interval_us, qos.left.ascs.retransmission_number,
+            qos.right.ascs.retransmission_number, qos.max_transport_latency_ms,
+            qos.presentation_delay_us
+        );
+        let cis_ids = qos.cig.cis_parameters.iter().map(|cis| cis.cis_id).collect::<Vec<_>>();
+        let new_allocation = controller.set_cig_parameters_unestablished(
+            qos.hci_set_cig_command(), qos.cig.cig_id, &cis_ids
+        ).map_err(|failure| {
+            cig_may_exist = failure.may_have_allocated;
+            format!("HCI Set CIG Parameters failed: {failure}")
+        })?;
+        cig_may_exist = true;
+        if new_allocation.cis.iter().any(|cis| {
+            cis.connection_handle == codec.left.acl_handle
+                || cis.connection_handle == codec.right.acl_handle
+        }) {
+            return Err("BE200 returned a CIS handle overlapping an active ACL".into());
+        }
+        allocation = Some(new_allocation);
+        for sink in &prepared {
+            qos_members.push(configure_qos_sink(controller, sink, &qos)?);
+        }
+        Ok(())
+    })();
+
+    // Guaranteed cleanup boundary for all *attempted* ASE mutations, even
+    // when a CP write succeeded but the response was lost.
+    let mut cleanup_errors = Vec::new();
+    for sink in prepared[..attempted].iter().rev() {
+        if let Err(error) = release_if_needed(controller, sink) {
+            cleanup_errors.push(format!("ASE Release/Idle: {error}"));
+        }
+    }
+    if cig_may_exist {
+        if let Err(error) = controller.remove_unestablished_cig(FIRST_SOUND_CIG_ID) {
+            cleanup_errors.push(format!("HCI Remove CIG unconfirmed: {error}"));
+        }
+    }
+    if let Err(error) = stage {
+        return Err(if cleanup_errors.is_empty() {
+            format!("R5.2-A failed; cleanup confirmed: {error}")
+        } else {
+            format!(
+                "R5.2-A failed: {error}; cleanup UNCONFIRMED: {}",
+                cleanup_errors.join("; ")
+            )
+        });
+    }
+    if !cleanup_errors.is_empty() {
+        return Err(format!(
+            "R5.2-A both QoS Configured but cleanup UNCONFIRMED: {}",
+            cleanup_errors.join("; ")
+        ));
+    }
+    let allocation = allocation.ok_or("R5.2-A missing controller CIG allocation")?;
+    Ok(QosConfiguredSetSnapshot {
+        members: qos_members,
+        allocation,
+        released_to_idle: true,
+        cig_removed: true,
     })
 }
 
