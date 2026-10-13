@@ -15,6 +15,7 @@ use bumble_profiles::ascs::{
 use bumble_profiles::bap::CodecSpecificConfiguration;
 use bumble_transport::Error;
 
+use crate::ase_read::read_ase_checked;
 use crate::codec_plan::{CodecConfigurationPlan, PlannedSink, StereoSide};
 
 const GATT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -183,7 +184,7 @@ fn read_sink_status(
                 .sink_ase.iter()
                 .find(|ase| ase.handle == prepared.sink.ase_value_handle)
                 .ok_or_else(|| Error::Remote("selected Sink ASE missing from ASCS proxy".into()))?;
-            AudioStreamControlServiceProxy::read_ase(characteristic, client, transport)
+            read_ase_checked(handle, characteristic, client, transport)
                 .map_err(|error| Error::Remote(format!("ASE status read failed: {error}")))
         }
     )
@@ -229,8 +230,8 @@ fn prepare_sink<'a>(
             let selected_ase = proxy.sink_ase.iter()
                 .find(|ase| ase.handle == sink.ase_value_handle)
                 .expect("selected ASE handle verified");
-            let current = AudioStreamControlServiceProxy::read_ase(
-                selected_ase, client, transport
+            let current = read_ase_checked(
+                sink.acl_handle, selected_ase, client, transport
             ).map_err(|error| Error::Remote(format!("pre-configuration ASE read failed: {error}")))?;
             if current.ase_id != sink.ase_id || current.state != AseState::IDLE {
                 return Err(Error::Remote(format!(
