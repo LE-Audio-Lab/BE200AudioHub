@@ -651,6 +651,66 @@ fn schedule_duplicate_native_vm(source:u64,vm:u64) {
     }
 }
 
+fn find_quick_actions_container(index:u32)->Option<u64> {
+    tree().lock().ok().and_then(|nodes| {
+        nodes.iter().find_map(|(&handle,node)| {
+            if node.index!=index || !node.ty.ends_with("GridViewItem"){return None;}
+            let parent=nodes.get(&node.parent)?;
+            if !parent.ty.ends_with("ItemsWrapGrid"){return None;}
+            if is_quick_settings_wrap(&nodes,node.parent){Some(handle)}else{None}
+        })
+    })
+}
+
+fn schedule_customize_carrier(container:u64) {
+    if !CUSTOM_TILE_MODE.load(Ordering::Acquire) ||
+       CUSTOMIZE_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    if CUSTOMIZE_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
+        return;
+    }
+    let hwnd=SUBCLASS_HWND.load(Ordering::Acquire) as Hwnd;
+    if hwnd.is_null() {
+        CUSTOMIZE_SCHEDULED.store(false,Ordering::Release);
+        log("[N4.1] carrier customization scheduling failed: ControlCenterWindow subclass unavailable");
+        return;
+    }
+    PENDING_CONTAINER.store(container,Ordering::Release);
+    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_CUSTOMIZE_CARRIER,0,0)};
+    if posted==0 {
+        PENDING_CONTAINER.store(0,Ordering::Release);
+        CUSTOMIZE_SCHEDULED.store(false,Ordering::Release);
+        log("[N4.1] PostMessageW(customize carrier) failed");
+    } else {
+        log(&format!("[N4.1] queued carrier customization container=0x{container:x}"));
+    }
+}
+
+fn schedule_wire_custom_button(button:u64) {
+    if !CUSTOM_TILE_MODE.load(Ordering::Acquire) || !CUSTOMIZE_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    if wired_buttons().lock().map(|set|set.contains(&button)).unwrap_or(true){return;}
+    if WIRE_BUTTON_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
+        return;
+    }
+    let hwnd=SUBCLASS_HWND.load(Ordering::Acquire) as Hwnd;
+    if hwnd.is_null() {
+        WIRE_BUTTON_SCHEDULED.store(false,Ordering::Release);
+        return;
+    }
+    PENDING_BUTTON.store(button,Ordering::Release);
+    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_WIRE_BUTTON,0,0)};
+    if posted==0 {
+        PENDING_BUTTON.store(0,Ordering::Release);
+        WIRE_BUTTON_SCHEDULED.store(false,Ordering::Release);
+        log("[N4.1] PostMessageW(wire custom button) failed");
+    } else {
+        log(&format!("[N4.1] queued custom button wiring handle=0x{button:x}"));
+    }
+}
+
 #[repr(C)]
 struct CollectionElementValue {
     index: u32,
@@ -1153,6 +1213,69 @@ unsafe fn property_handle(service:*mut c_void, object:u64, property_name:&str)->
     }
 }
 
+
+unsafe fn resolve_property_index(service:*mut c_void,object:u64,property_name:&str)->Result<u32,i32> {
+    let get_index:unsafe extern "system" fn(*mut c_void,u64,*const u16,*mut u32)->i32=
+        std::mem::transmute(slot(service,15));
+    let candidates:Vec<String>=match property_name {
+        "ContentTemplate"=>vec![
+            "ContentTemplate".into(),
+            "ContentControl.ContentTemplate".into(),
+            "Windows.UI.Xaml.Controls.ContentControl.ContentTemplate".into(),
+        ],
+        _=>vec![property_name.into()],
+    };
+    let mut last_hr=E_FAIL;
+    for candidate in candidates {
+        let mut index=0u32;
+        let hr=get_index(service,object,wide(&candidate).as_ptr(),&mut index);
+        if hr>=0 {
+            vm_log(&format!("property-index object=0x{object:x} requested={property_name:?} resolved={candidate:?} idx={index}"));
+            return Ok(index);
+        }
+        last_hr=hr;
+    }
+    match property_index_from_chain(service,object,property_name) {
+        Ok((index,_))=>Ok(index),
+        Err(_)=>Err(last_hr),
+    }
+}
+
+unsafe fn apply_carrier_template(container:u64)->Result<(),i32> {
+    let service=SERVICE_PTR.load(Ordering::Acquire) as *mut c_void;
+    let diagnostics=DIAGNOSTICS_PTR.load(Ordering::Acquire) as *mut c_void;
+    if service.is_null()||diagnostics.is_null(){return Err(E_FAIL);}
+
+    let expected_vm=BLUETOOTH_VM_HANDLE.load(Ordering::Acquire);
+    let actual_vm=property_handle(service,container,"Content")?;
+    if expected_vm==0 || actual_vm!=expected_vm {
+        log(&format!("[N4.1] refusing carrier customization: container=0x{container:x} content=0x{actual_vm:x} expected_bluetooth_vm=0x{expected_vm:x}"));
+        return Err(S_FALSE);
+    }
+
+    let template=make_carrier_data_template()?;
+    let register:unsafe extern "system" fn(*mut c_void,*mut c_void,*mut u64)->i32=
+        std::mem::transmute(slot(diagnostics,9));
+    let mut template_handle=0u64;
+    let hr=register(diagnostics,template.as_raw(),&mut template_handle);
+    if hr<0||template_handle==0 {
+        log(&format!("[N4.1] RegisterInstance(DataTemplate) failed: 0x{:08X}",hr as u32));
+        return Err(if hr<0{hr}else{E_FAIL});
+    }
+
+    let property=resolve_property_index(service,container,"ContentTemplate")?;
+    let set_property:unsafe extern "system" fn(*mut c_void,u64,u64,u32)->i32=
+        std::mem::transmute(slot(service,8));
+    let hr=set_property(service,container,template_handle,property);
+    if hr<0 {
+        log(&format!("[N4.1] SetProperty(ContentTemplate) failed: container=0x{container:x} property={property} template=0x{template_handle:x} hr=0x{:08X}",hr as u32));
+        return Err(hr);
+    }
+    CUSTOMIZE_DONE.store(true,Ordering::Release);
+    CARRIER_ARMED.store(false,Ordering::Release);
+    log(&format!("[N4.1] CARRIER TEMPLATE OK container=0x{container:x} vm=0x{actual_vm:x} property={property} template=0x{template_handle:x}"));
+    Ok(())
+}
 
 unsafe fn xaml_property_text(service:*mut c_void, object:u64, wanted:&str)->Option<String> {
     let get_chain:unsafe extern "system" fn(*mut c_void,u64,*mut u32,*mut *mut PropertyChainSource,
