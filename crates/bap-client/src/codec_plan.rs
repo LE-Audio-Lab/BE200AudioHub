@@ -290,8 +290,8 @@ mod tests {
 
     fn member(side: StereoSide) -> AudioMemberSnapshot {
         let (identity, rank, acl, location) = match side {
-            StereoSide::Left => ("E8:C9:13:F6:5C:E0", 2, 0x0801, AudioLocation::FRONT_LEFT),
-            StereoSide::Right => ("E8:C9:13:EF:2F:23", 1, 0x0800, AudioLocation::FRONT_RIGHT),
+            StereoSide::Left => ("02:00:00:00:00:02", 2, 0x0801, AudioLocation::FRONT_LEFT),
+            StereoSide::Right => ("02:00:00:00:00:01", 1, 0x0800, AudioLocation::FRONT_RIGHT),
         };
         let pac = PacRecord {
             coding_format: CodingFormat::LC3,
