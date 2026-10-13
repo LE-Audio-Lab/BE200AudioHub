@@ -237,18 +237,17 @@ const CARRIER_TEMPLATE_XAML: &str = r##"
 struct EventHandler { vtable: *const EventHandlerVtbl, count: AtomicU32 }
 #[repr(C)]
 struct EventHandlerVtbl {
+    // Windows Runtime delegate ABI: RoutedEventHandler derives directly from
+    // IUnknown, not IInspectable. Invoke is therefore vtable slot 3.
     query_interface: unsafe extern "system" fn(*mut EventHandler,*const Guid,*mut *mut c_void)->i32,
     add_ref: unsafe extern "system" fn(*mut EventHandler)->u32,
     release: unsafe extern "system" fn(*mut EventHandler)->u32,
-    get_iids: unsafe extern "system" fn(*mut EventHandler,*mut u32,*mut *mut Guid)->i32,
-    get_runtime_class_name: unsafe extern "system" fn(*mut EventHandler,*mut *mut c_void)->i32,
-    get_trust_level: unsafe extern "system" fn(*mut EventHandler,*mut i32)->i32,
     invoke: unsafe extern "system" fn(*mut EventHandler,*mut c_void,*mut c_void)->i32,
 }
 unsafe extern "system" fn ev_query(this:*mut EventHandler, iid:*const Guid, out:*mut *mut c_void)->i32 {
     if iid.is_null() || out.is_null() { return E_POINTER; }
     *out = null_mut();
-    if *iid==IID_IUNKNOWN || *iid==IID_IINSPECTABLE || *iid==IID_ROUTED_EVENT_HANDLER {
+    if *iid==IID_IUNKNOWN || *iid==IID_ROUTED_EVENT_HANDLER {
         *out = this.cast(); ev_add_ref(this); S_OK
     } else { E_NOINTERFACE }
 }
@@ -257,32 +256,13 @@ unsafe extern "system" fn ev_release(this:*mut EventHandler)->u32 {
     let prior = (*this).count.fetch_sub(1,Ordering::AcqRel);
     if prior==1 { drop(Box::from_raw(this)); 0 } else { prior-1 }
 }
-unsafe extern "system" fn ev_get_iids(_: *mut EventHandler, count:*mut u32, out:*mut *mut Guid)->i32 {
-    if count.is_null() || out.is_null() { return E_POINTER; }
-    let ptr=CoTaskMemAlloc(std::mem::size_of::<Guid>()) as *mut Guid;
-    if ptr.is_null() { *count=0; *out=null_mut(); return E_FAIL; }
-    *ptr=IID_ROUTED_EVENT_HANDLER;
-    *count=1; *out=ptr; S_OK
-}
-unsafe extern "system" fn ev_class_name(_: *mut EventHandler, out:*mut *mut c_void)->i32 {
-    if out.is_null() { return E_POINTER; }
-    let class="Windows.UI.Xaml.RoutedEventHandler";
-    let utf16:Vec<u16>=class.encode_utf16().collect();
-    WindowsCreateString(utf16.as_ptr(),utf16.len() as u32,out)
-}
-unsafe extern "system" fn ev_trust_level(_: *mut EventHandler, out:*mut i32)->i32 {
-    if out.is_null() { return E_POINTER; }
-    *out=0; S_OK
-}
 unsafe extern "system" fn ev_invoke(_: *mut EventHandler, _: *mut c_void, _: *mut c_void)->i32 {
     // An FFI callback must never unwind through the OS's COM event dispatcher.
     let _ = std::panic::catch_unwind(|| log("[CLICK] disconnect_b3p (UI ONLY; no backend)"));
     S_OK
 }
 static EVENT_VTBL: EventHandlerVtbl = EventHandlerVtbl {
-    query_interface:ev_query,add_ref:ev_add_ref,release:ev_release,
-    get_iids:ev_get_iids,get_runtime_class_name:ev_class_name,
-    get_trust_level:ev_trust_level,invoke:ev_invoke,
+    query_interface:ev_query,add_ref:ev_add_ref,release:ev_release,invoke:ev_invoke,
 };
 
 static SERVICE_PTR: AtomicUsize = AtomicUsize::new(0);
@@ -1894,6 +1874,11 @@ mod tests {
         assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
         assert_eq!(parse_instance_handle("12345"),Some(12345));
         assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
+    }
+
+    #[test]
+    fn routed_event_handler_abi_is_iunknown_plus_invoke() {
+        assert_eq!(std::mem::size_of::<EventHandlerVtbl>(),4*std::mem::size_of::<usize>());
     }
 
     #[test]
