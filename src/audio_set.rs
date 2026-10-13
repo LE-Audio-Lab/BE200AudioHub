@@ -3,8 +3,9 @@ use crate::{
     usb,
 };
 use bap_client::{
-    configure_and_release, plan_first_sound, AudioSetSnapshot, CodecConfigScope,
-    CodecConfigurationPlan, CodecConfiguredSetSnapshot, ConnectedAudioMember,
+    configure_and_release, plan_first_sound, plan_first_sound_qos, AudioSetSnapshot,
+    CodecConfigScope, CodecConfigurationPlan, CodecConfiguredSetSnapshot, ConnectedAudioMember,
+    StereoQosPlan,
 };
 use bumble_adapter::{
     BondMemberSummary, BondedPeerIdentity, LeAclReport, ScanObservation,
@@ -57,6 +58,7 @@ enum AudioSetAction {
     Inspect,
     CodecPlan,
     ConfigCodec(CodecConfigScope),
+    QosPlan,
 }
 
 pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
@@ -82,6 +84,12 @@ pub fn config_codec(seconds: u16, wanted_name: &str, scope: CodecConfigScope) ->
     inspect_impl(seconds, wanted_name, AudioSetAction::ConfigCodec(scope))
 }
 
+/// R5.1: reuse verified R4.2 ASCS Config Codec/Release, plan QoS offline.
+/// No HCI Set CIG, ASCS Config QoS, Create CIS or ISO writes.
+pub fn qos_plan(seconds: u16, wanted_name: &str) -> Result<()> {
+    inspect_impl(seconds, wanted_name, AudioSetAction::QosPlan)
+}
+
 fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Result<()> {
     if wanted_name.trim().is_empty() {
         return Err(AppError::Usage(
@@ -95,13 +103,14 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
             AudioSetAction::Inspect => "R3 bonded audio-set inspection",
             AudioSetAction::CodecPlan => "R4.1 read-only codec planning",
             AudioSetAction::ConfigCodec(_) => "R4.2 ASCS Config Codec + Release transaction",
+            AudioSetAction::QosPlan => "R5.1 QoS/CIG planner (R4.2 codec-write probe + dry run)",
         }
     );
     println!("Target name: {wanted_name:?}");
     println!("Path: one scan -> resolve all members -> identity/FAL dual bonded ACL -> PACS/ASCS/CAS discovery.");
-    if matches!(action, AudioSetAction::ConfigCodec(_)) {
+    if matches!(action, AudioSetAction::ConfigCodec(_) | AudioSetAction::QosPlan) {
         println!("Safety: ASCS Config Codec/Release writes are ENABLED by explicit CLI confirmation.");
-        println!("No SMP, Bond mutation, CIG, CIS, QoS or ISO activity. Every modified ASE must return to Idle.");
+        println!("No SMP, Bond mutation, HCI Set CIG, ASCS Config QoS, CIS or ISO activity; every ASE returns Idle.");
     } else {
         println!("Safety: no SMP, no ASCS Control Point write, no CIG/CIS/ISO, no persistent-state mutation.");
     }
@@ -110,6 +119,18 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
     let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
         .map_err(|error| AppError::Protocol(format!("Bumble attach failed: {error}")))?;
     println!("Attach: PASS");
+    // Cached HCI Local Features + Supported Commands + LE Buffer Size V2.
+    // This does not submit any new HCI commands.
+    let controller_iso = attached.iso_controller_capabilities();
+    if matches!(action, AudioSetAction::QosPlan) {
+        println!(
+            "[R5.1/ISO] controller capability snapshot: CIS_Central={} 2M={} SetCig={} CreateCis={} RemoveCig={} SetupIsoPath={} ISO={}B x {}",
+            controller_iso.cis_central, controller_iso.le_2m_phy,
+            controller_iso.set_cig_parameters, controller_iso.create_cis,
+            controller_iso.remove_cig, controller_iso.setup_iso_data_path,
+            controller_iso.iso_data_packet_length, controller_iso.iso_packet_count
+        );
+    }
 
     let controller_identity = attached
         .read_controller_identity(ATTACH_TIMEOUT)
@@ -168,7 +189,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         )))?;
 
     let mut active = Vec::<ActiveMember>::new();
-    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>, Option<CodecConfiguredSetSnapshot>)> {
+    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>, Option<CodecConfiguredSetSnapshot>, Option<StereoQosPlan>)> {
         for resolved_member in resolved {
             let rank = resolved_member.member.rank.expect("rank checked");
             let privacy_peer = find_privacy_peer(&privacy_peers, &resolved_member.member)?;
@@ -297,15 +318,35 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
                 AppError::Protocol(format!("R4.1 codec planning failed: {error}"))
             })?)
         };
+        if matches!(action, AudioSetAction::QosPlan) {
+            let max_sdu = plan.as_ref().expect("non-inspect action has codec plan")
+                .stream.octets_per_codec_frame;
+            // Refuse unsupported controllers BEFORE writing Config Codec.
+            controller_iso.validate_for_unfragmented_cis(max_sdu)
+                .map_err(|error| AppError::Protocol(format!("R5.1 ISO capability gate failed: {error}")))?;
+        }
         let configured = match (action, plan.as_ref()) {
             (AudioSetAction::ConfigCodec(scope), Some(plan)) => {
                 Some(configure_and_release(&mut attached, plan, scope).map_err(|error| {
                     AppError::Protocol(format!("R4.2 ASCS transaction failed: {error}"))
                 })?)
             }
+            (AudioSetAction::QosPlan, Some(plan)) => {
+                Some(configure_and_release(&mut attached, plan, CodecConfigScope::Both)
+                    .map_err(|error| AppError::Protocol(format!("R5.1 codec probe failed: {error}")))?)
+            }
             _ => None,
         };
-        Ok((snapshot, plan, configured))
+        // R4.2 has already released both ASEs to Idle. Planning does not
+        // send an HCI/GATT QoS command or keep any ACL session alive.
+        let qos = match (action, plan.as_ref(), configured.as_ref()) {
+            (AudioSetAction::QosPlan, Some(codec), Some(confirmed)) => {
+                Some(plan_first_sound_qos(codec, confirmed, controller_iso)
+                    .map_err(|error| AppError::Protocol(format!("R5.1 QoS planning failed: {error}")))?)
+            }
+            _ => None,
+        };
+        Ok((snapshot, plan, configured, qos))
     })();
 
     let disconnect_cleanup = disconnect_all(&mut attached, &active);
@@ -316,7 +357,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         )));
     let cleanup = combine_cleanup(disconnect_cleanup, privacy_cleanup);
 
-    let (snapshot, plan, configured) = match operation {
+    let (snapshot, plan, configured, qos) = match operation {
         Ok(value) => value,
         Err(error) => {
             if let Err(cleanup_error) = cleanup {
@@ -357,8 +398,13 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         print_codec_plan(&plan);
         if let Some(configured) = configured {
             print_codec_configured(&configured);
-            println!("R4.2 CONFIG CODEC PASS: {} ASE(s) configured, response+notification+readback verified, all released to Idle; no CIG/CIS/ISO or bond mutation.",
-                configured.members.len());
+            if let Some(qos) = qos {
+                print_qos_plan(&qos)?;
+                println!("R5.1 QOS PLAN PASS: 2 CIS parameter sets, ASCS Config QoS and HCI Set CIG serializations validated; no QoS/CIG/CIS/ISO command sent; all ASEs Idle and bonds unchanged.");
+            } else {
+                println!("R4.2 CONFIG CODEC PASS: {} ASE(s) configured, response+notification+readback verified, all released to Idle; no CIG/CIS/ISO or bond mutation.",
+                    configured.members.len());
+            }
         } else {
             println!("R4.1 dry-run: ACL handles shown above have been disconnected; no ASE state changed.");
             println!("R4.1 CODEC PLAN PASS: dual-mono LC3 configuration validated; no ASCS control writes, CIG/CIS/ISO, or bond mutation.");
@@ -601,6 +647,39 @@ fn print_snapshot(snapshot: &AudioSetSnapshot) {
             None => println!("    CAS: absent"),
         }
     }
+}
+
+fn print_qos_plan(plan: &StereoQosPlan) -> Result<()> {
+    println!();
+    println!(
+        "StereoQosPlan: CIG={} CIS={} interval={}us PHY_C_to_P={} framing={} max_SDU={} transport_latency={}ms presentation_delay={}us",
+        plan.cig.cig_id, plan.cig.cis_parameters.len(), plan.sdu_interval_us,
+        plan.phy_c_to_p, plan.cig.framing, plan.left.ascs.max_sdu,
+        plan.max_transport_latency_ms, plan.presentation_delay_us
+    );
+    for member in [&plan.left, &plan.right] {
+        println!(
+            "  {} CIS={} ASE={} identity={} ACL=0x{:04X} SDU={} rtn={} lat={}ms pd={}us",
+            member.side.as_str(), member.cis_id, member.ascs.ase_id,
+            member.identity_address, member.acl_handle, member.ascs.max_sdu,
+            member.ascs.retransmission_number, member.ascs.max_transport_latency,
+            member.ascs.presentation_delay
+        );
+        let ascs_bytes = plan.ascs_config_qos(member.side).to_bytes()
+            .map_err(|error| AppError::Protocol(format!("R5.1 ASCS serialization failed: {error}")))?;
+        println!("    ASCS Config QoS wire: {ascs_bytes:02X?}");
+    }
+    for cis in &plan.cig.cis_parameters {
+        println!(
+            "  CIG CIS={} C->P max_sdu={} phy={} rtn={} ; P->C max_sdu={} phy={} rtn={}",
+            cis.cis_id, cis.max_sdu_c_to_p, cis.phy_c_to_p, cis.rtn_c_to_p,
+            cis.max_sdu_p_to_c, cis.phy_p_to_c, cis.rtn_p_to_c
+        );
+    }
+    let hci_bytes = plan.hci_set_cig_command().to_bytes();
+    println!("  HCI LE Set CIG Parameters wire (NOT SENT): {hci_bytes:02X?}");
+    println!("  R5.1 dry-run: all ACL handles shown above have been disconnected.");
+    Ok(())
 }
 
 fn print_codec_configured(snapshot: &CodecConfiguredSetSnapshot) {
