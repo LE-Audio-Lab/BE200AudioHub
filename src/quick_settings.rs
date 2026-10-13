@@ -9,12 +9,13 @@ use crate::error::{AppError, Result};
 pub fn run(args: &[String]) -> Result<()> {
     if args.first().map(String::as_str) != Some("inject") {
         return Err(AppError::Usage(
-            "Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>] [--duplicate-native-vm]".into(),
+            "Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>] [--duplicate-native-vm | --custom-tile]".into(),
         ));
     }
 
     let mut tap: Option<&str> = None;
     let mut duplicate_native_vm = false;
+    let mut custom_tile = false;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -31,6 +32,10 @@ pub fn run(args: &[String]) -> Result<()> {
                 duplicate_native_vm = true;
                 i += 1;
             }
+            "--custom-tile" => {
+                custom_tile = true;
+                i += 1;
+            }
             other => {
                 return Err(AppError::Usage(format!(
                     "Unknown Quick Settings option: {other}. Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>] [--duplicate-native-vm]"
@@ -39,13 +44,18 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     }
 
-    platform::inject(tap, duplicate_native_vm)
+    if duplicate_native_vm && custom_tile {
+        return Err(AppError::Usage(
+            "--duplicate-native-vm and --custom-tile are mutually exclusive".into(),
+        ));
+    }
+    platform::inject(tap, duplicate_native_vm, custom_tile)
 }
 
 #[cfg(not(windows))]
 mod platform {
     use super::*;
-    pub fn inject(_: Option<&str>, _: bool) -> Result<()> {
+    pub fn inject(_: Option<&str>, _: bool, _: bool) -> Result<()> {
         Err(AppError::Protocol("Windows Shell integration is Windows-only".into()))
     }
 }
@@ -167,10 +177,12 @@ mod platform {
         Ok(path)
     }
 
-    pub fn inject(tap: Option<&str>, duplicate_native_vm: bool) -> Result<()> {
+    pub fn inject(tap: Option<&str>, duplicate_native_vm: bool, custom_tile: bool) -> Result<()> {
         let pid = shellhost_process_id()?;
         let path = tap_path(tap)?;
-        let mode = if duplicate_native_vm { "duplicate-native-vm" } else { "probe-only" };
+        let mode = if custom_tile { "custom-tile" }
+            else if duplicate_native_vm { "duplicate-native-vm" }
+            else { "probe-only" };
         println!("[QS] Target: ShellHost.exe PID={pid}");
         println!("[QS] Rust TAP: {}", path.display());
         println!("[QS] Mode: {mode}");
