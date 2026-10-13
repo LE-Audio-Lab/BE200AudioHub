@@ -97,6 +97,8 @@ impl ResponseGate {
                             && status.state == AseState::CODEC_CONFIGURED)
                         || (self.expected_state == AseState::QOS_CONFIGURED
                             && status.state == AseState::CODEC_CONFIGURED)
+                        || (self.expected_state == AseState::IDLE
+                            && status.state == AseState::QOS_CONFIGURED)
                     {
                         // A pre-command snapshot or a delayed notification from
                         // the prior state is not proof of this command's success.
@@ -750,6 +752,87 @@ mod tests {
         gate.accept(state(AseState::RELEASING)).unwrap();
         gate.accept(response(AseOpcode::Release, AseResponseCode::SUCCESS)).unwrap();
         assert!(!gate.complete());
+        gate.accept(state(AseState::IDLE)).unwrap();
+        assert!(gate.complete());
+    }
+
+    fn qos_gate_fixture() -> (PlannedSink, ConfigQosParameters, AseStatus) {
+        let sink = PlannedSink {
+            side: StereoSide::Left,
+            identity_address: "02:00:00:00:00:02".into(),
+            rank: 2,
+            acl_handle: 0x0801,
+            ase_id: 1,
+            ase_value_handle: 0x0046,
+            ascs_control_point_handle: 0x0043,
+            audio_location: bumble_profiles::bap::AudioLocation::FRONT_LEFT,
+            codec_id: bumble_hci::CodingFormat::LC3,
+            codec_specific_configuration: CodecSpecificConfiguration {
+                sampling_frequency: None,
+                frame_duration: None,
+                audio_channel_allocation: None,
+                octets_per_codec_frame: None,
+                codec_frames_per_sdu: None,
+            },
+        };
+        let parameters = ConfigQosParameters {
+            ase_id: 1, cig_id: 1, cis_id: 1,
+            sdu_interval: 10_000, framing: 0, phy: 2,
+            max_sdu: 100, retransmission_number: 13,
+            max_transport_latency: 95, presentation_delay: 40_000,
+        };
+        let qos = AseQosConfiguration {
+            cig_id: 1, cis_id: 1, sdu_interval: 10_000,
+            framing: 0, phy: 2, max_sdu: 100,
+            retransmission_number: 13, max_transport_latency: 95,
+            presentation_delay: 40_000,
+        };
+        let status = AseStatus {
+            ase_id: 1,
+            state: AseState::QOS_CONFIGURED,
+            details: AseStatusDetails::QosConfigured(qos),
+        };
+        (sink, parameters, status)
+    }
+
+    #[test]
+    fn qos_status_readback_must_match_all_nine_parameters() {
+        let (sink, parameters, status) = qos_gate_fixture();
+        let good = verify_qos_status(&sink, &parameters, status.clone()).unwrap();
+        assert_eq!(good.actual.presentation_delay, 40_000);
+        let mut changed = status.clone();
+        if let AseStatusDetails::QosConfigured(ref mut actual) = changed.details {
+            actual.max_sdu = 101;
+        }
+        assert!(verify_qos_status(&sink, &parameters, changed).is_err());
+        let mut wrong_cis = status.clone();
+        if let AseStatusDetails::QosConfigured(ref mut actual) = wrong_cis.details {
+            actual.cis_id = 2;
+        }
+        assert!(verify_qos_status(&sink, &parameters, wrong_cis).is_err());
+        let mut wrong_state = status;
+        wrong_state.state = AseState::CODEC_CONFIGURED;
+        assert!(verify_qos_status(&sink, &parameters, wrong_state).is_err());
+    }
+
+    #[test]
+    fn qos_gate_requires_cp_success_and_qos_state_even_out_of_order() {
+        let mut gate = ResponseGate::new(AseOpcode::ConfigQos, 1, AseState::QOS_CONFIGURED);
+        // Delayed Codec Configured notification is not a successful QoS gate.
+        gate.accept(state(AseState::CODEC_CONFIGURED)).unwrap();
+        assert!(!gate.complete());
+        gate.accept(response(AseOpcode::ConfigQos, AseResponseCode::SUCCESS)).unwrap();
+        assert!(!gate.complete());
+        gate.accept(state(AseState::QOS_CONFIGURED)).unwrap();
+        assert!(gate.complete());
+    }
+
+    #[test]
+    fn release_gate_tolerates_delayed_previous_qos_status() {
+        let mut gate = ResponseGate::new(AseOpcode::Release, 1, AseState::IDLE);
+        gate.accept(state(AseState::QOS_CONFIGURED)).unwrap();
+        gate.accept(state(AseState::RELEASING)).unwrap();
+        gate.accept(response(AseOpcode::Release, AseResponseCode::SUCCESS)).unwrap();
         gate.accept(state(AseState::IDLE)).unwrap();
         assert!(gate.complete());
     }
