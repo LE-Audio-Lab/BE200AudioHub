@@ -651,18 +651,107 @@ unsafe fn dump_vm_properties(service:*mut c_void,index:u32,handle:u64)->Result<i
     Ok(bluetooth_score)
 }
 
+unsafe fn property_index_from_chain(service:*mut c_void, object:u64, wanted:&str)
+    ->Result<(u32,Option<u64>),i32>
+{
+    let get_chain:unsafe extern "system" fn(*mut c_void,u64,*mut u32,*mut *mut PropertyChainSource,
+                                            *mut u32,*mut *mut PropertyChainValue)->i32=
+        std::mem::transmute(slot(service,7));
+    let mut source_count=0u32;
+    let mut sources=null_mut();
+    let mut property_count=0u32;
+    let mut properties=null_mut();
+    let hr=get_chain(service,object,&mut source_count,&mut sources,&mut property_count,&mut properties);
+    if hr<0 {
+        if !sources.is_null(){free_source_array(sources,source_count);}
+        if !properties.is_null(){free_property_array(properties,property_count);}
+        return Err(hr);
+    }
+
+    let mut found=None;
+    if !properties.is_null() {
+        for p in std::slice::from_raw_parts(properties,property_count as usize) {
+            let name=bstr_string(p.property_name);
+            let declaring=bstr_string(p.declaring_type);
+            let matches=name.eq_ignore_ascii_case(wanted)
+                || name.rsplit('.').next().map_or(false,|tail|tail.eq_ignore_ascii_case(wanted));
+            if matches {
+                let value=bstr_string(p.value);
+                let parsed=if metadata_has_value_handle(p.metadata_bits) {
+                    parse_instance_handle(&value)
+                } else { None };
+                vm_log(&format!("property-chain fallback object=0x{object:x} wanted={wanted:?} idx={} name={name:?} declaring={declaring:?} meta=0x{:x} parsed_handle={:?}",
+                    p.index,p.metadata_bits,parsed.map(|h|format!("0x{h:x}"))));
+                found=Some((p.index,parsed));
+                break;
+            }
+        }
+    }
+    free_source_array(sources,source_count);
+    free_property_array(properties,property_count);
+    found.ok_or(E_FAIL)
+}
+
 unsafe fn property_handle(service:*mut c_void, object:u64, property_name:&str)->Result<u64,i32> {
     let get_index:unsafe extern "system" fn(*mut c_void,u64,*const u16,*mut u32)->i32=
         std::mem::transmute(slot(service,15));
     let get_prop:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u64)->i32=
         std::mem::transmute(slot(service,16));
-    let mut property=0u32;
-    let hr=get_index(service,object,wide(property_name).as_ptr(),&mut property);
-    if hr<0{return Err(hr);}
-    let mut value=0u64;
-    let hr=get_prop(service,object,property,&mut value);
-    if hr<0||value==0{return Err(if hr<0{hr}else{E_FAIL});}
-    Ok(value)
+
+    // Build 26200 can reject the short inherited-property name with E_INVALIDARG.
+    // Try owner-qualified spellings first, then discover the exact property index
+    // from GetPropertyValuesChain instead of assuming one XamlOM naming convention.
+    let candidates:Vec<String>=match property_name {
+        "ItemsSource"=>vec![
+            "ItemsSource".into(),
+            "ItemsControl.ItemsSource".into(),
+            "Windows.UI.Xaml.Controls.ItemsControl.ItemsSource".into(),
+        ],
+        "Content"=>vec![
+            "Content".into(),
+            "ContentControl.Content".into(),
+            "Windows.UI.Xaml.Controls.ContentControl.Content".into(),
+        ],
+        _=>vec![property_name.into()],
+    };
+
+    let mut last_hr=E_FAIL;
+    for candidate in candidates {
+        let mut property=0u32;
+        let hr=get_index(service,object,wide(&candidate).as_ptr(),&mut property);
+        if hr<0 {
+            last_hr=hr;
+            continue;
+        }
+        let mut value=0u64;
+        let hr=get_prop(service,object,property,&mut value);
+        if hr>=0 && value!=0 {
+            vm_log(&format!("property lookup object=0x{object:x} requested={property_name:?} resolved={candidate:?} idx={property} handle=0x{value:x}"));
+            return Ok(value);
+        }
+        last_hr=if hr<0{hr}else{E_FAIL};
+    }
+
+    match property_index_from_chain(service,object,property_name) {
+        Ok((property,parsed))=>{
+            let mut value=0u64;
+            let hr=get_prop(service,object,property,&mut value);
+            if hr>=0 && value!=0 {
+                vm_log(&format!("property lookup object=0x{object:x} requested={property_name:?} resolved=property-chain idx={property} handle=0x{value:x}"));
+                Ok(value)
+            } else if let Some(handle)=parsed {
+                vm_log(&format!("property lookup object=0x{object:x} requested={property_name:?} using parsed property-chain handle=0x{handle:x}; GetProperty hr=0x{:08X}",hr as u32));
+                Ok(handle)
+            } else {
+                Err(if hr<0{hr}else{last_hr})
+            }
+        }
+        Err(chain_hr)=>{
+            vm_log(&format!("property lookup FAILED object=0x{object:x} requested={property_name:?} direct_hr=0x{:08X} chain_hr=0x{:08X}",
+                last_hr as u32,chain_hr as u32));
+            Err(if chain_hr<0{chain_hr}else{last_hr})
+        }
+    }
 }
 
 // GetCollectionElements can return only an evaluated string for a handle-backed
@@ -704,21 +793,18 @@ unsafe fn realized_vm_handles_for_grid(service:*mut c_void, grid:u64)->HashMap<u
 unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     let service=SERVICE_PTR.load(Ordering::Acquire) as *mut c_void;
     if service.is_null(){return Err(E_FAIL);}
-    let get_index:unsafe extern "system" fn(*mut c_void,u64,*const u16,*mut u32)->i32=
-        std::mem::transmute(slot(service,15));
-    let get_prop:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u64)->i32=
-        std::mem::transmute(slot(service,16));
     let get_count:unsafe extern "system" fn(*mut c_void,u64,*mut u32)->i32=
         std::mem::transmute(slot(service,10));
     let get_elements:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u32,*mut *mut CollectionElementValue)->i32=
         std::mem::transmute(slot(service,11));
 
-    let mut property=0u32;
-    let hr=get_index(service,grid,wide("ItemsSource").as_ptr(),&mut property);
-    if hr<0 {log(&format!("[N3] GetPropertyIndex(ItemsSource) failed: 0x{:08X}",hr as u32));return Err(hr);}
-    let mut source=0u64;
-    let hr=get_prop(service,grid,property,&mut source);
-    if hr<0||source==0 {log(&format!("[N3] GetProperty(ItemsSource) failed: 0x{:08X}",hr as u32));return Err(if hr<0{hr}else{E_FAIL});}
+    let source=match property_handle(service,grid,"ItemsSource") {
+        Ok(handle)=>handle,
+        Err(hr)=>{
+            log(&format!("[N3.1] ItemsSource property resolution failed: 0x{:08X}. See qs-vm-dump.log",hr as u32));
+            return Err(hr);
+        }
+    };
     let mut count=0u32;
     let hr=get_count(service,source,&mut count);
     if hr<0{return Err(hr);}
@@ -1131,6 +1217,14 @@ mod tests {
         assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
         assert_eq!(parse_instance_handle("12345"),Some(12345));
         assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
+    }
+
+    #[test]
+    fn inherited_property_candidate_names_cover_build_26200() {
+        let items=["ItemsSource","ItemsControl.ItemsSource","Windows.UI.Xaml.Controls.ItemsControl.ItemsSource"];
+        assert!(items.iter().any(|x|x.ends_with("ItemsSource")));
+        let content=["Content","ContentControl.Content","Windows.UI.Xaml.Controls.ContentControl.Content"];
+        assert!(content.iter().any(|x|x.ends_with("Content")));
     }
 
     #[test]
