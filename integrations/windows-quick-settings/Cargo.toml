@@ -1,0 +1,12 @@
+[package]
+name = "be200-quick-settings-tap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "be200_qs_tap"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
