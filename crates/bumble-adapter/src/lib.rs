@@ -1,40 +1,42 @@
-//! Narrow product adapter over the pinned Bumble-RS host substrate.
+//! Product adapter over the pinned Bumble-RS host substrate.
 //!
-//! Do not expose Bumble-RS types throughout the product. This crate owns the
-//! attach-without-reset patch seam and translates upstream events/types into
-//! BE200AudioHub domain types.
+//! Public API boundaries are intentionally narrow:
+//! - scan/attach below ACL establishment;
+//! - `LeConnectionManager` creates one ACL;
+//! - `LeBondManager` creates provisional peer security material;
+//! - CSIS verifies coordinated-set membership;
+//! - commit functions are the only persistent write boundary;
+//! - stored-security recovery never starts SMP.
 
 #[macro_use]
 mod console_ascii;
+mod acl_session;
 mod bond;
-mod bond_commit;
-mod bond_manager_v4;
-mod connect;
+mod commit;
 mod connection_manager;
 mod csis;
 mod init;
-mod pairing;
-mod primary_commit;
 mod scan;
+mod security;
 mod set_member_verifier;
+mod stored_security;
 mod usb_fixed;
 
-pub use bond::{
-    BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
+pub use acl_session::LeAclReport;
+pub use bond::{BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity};
+pub use commit::{
+    commit_primary_bond, commit_verified_set_member, CommittedBondReport,
 };
-pub use bond_commit::{commit_verified_set_member, CommittedBondReport};
-pub use bond_manager_v4::{LeBondManager, ProvisionalBond};
-pub use connect::LeAclReport;
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
 pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
     initialize_existing_operational, AttachReport, AttachedController,
 };
-pub use pairing::{BondResumeReport, PairPersistReport};
-pub use primary_commit::commit_primary_bond;
 pub use scan::{ScanObservation, ScanSummary};
+pub use security::{LeBondManager, ProvisionalBond};
 pub use set_member_verifier::{require_verified, SetMemberVerification};
+pub use stored_security::BondResumeReport;
 
 pub const UPSTREAM_REVISION: &str =
     "bbac2a6803b8cab0920ab725a23aa408fc4fed85";

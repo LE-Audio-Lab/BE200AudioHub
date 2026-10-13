@@ -1,26 +1,24 @@
 #[macro_use]
 mod console_ascii;
-mod driver;
-mod boot;
-mod hci_wire;
-mod hci_capabilities;
 mod ble_scan;
+mod boot;
+mod driver;
+mod error;
 mod firmware;
 mod hci;
+mod hci_capabilities;
+mod hci_wire;
 mod intel;
-mod error;
 mod logging;
+mod pairing;
 mod r2_attach;
-mod r2_pairing_refactor;
-mod r2_pairing_v2;
-mod r2_pairing_verify;
 mod usb;
 
 use error::{AppError, Result};
 use std::env;
 
 fn usage() -> &'static str {
-    "BE200AudioHub v0.1 (R1.5b + R2 integration lab)\n\
+    "BE200AudioHub v0.1\n\
      Usage:\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
@@ -32,14 +30,9 @@ fn usage() -> &'static str {
        be200hub r2 attach-probe\n\
        be200hub r2 scan --seconds <1..30> [--show-addresses]\n\
        be200hub r2 scan-forensics --seconds <1..30>\n\
-       be200hub r2 swift-pair-probe --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 set-member-connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 pairing-v2-reset --confirm\n\
-       be200hub r2 pairing-v2-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 pairing-v2-verify --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 bond-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 bond-verify --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r2 pair reset --confirm\n\
+       be200hub r2 pair onboard --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r2 pair verify --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -49,17 +42,16 @@ fn usage() -> &'static str {
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
-     R2 attach/scan/connect preserve an already Operational controller and never send HCI Reset.\n\
+     Pairing route: discover -> FAL ACL -> provisional SMP -> CSIS gate -> atomic commit.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
 
 fn doctor() -> Result<()> {
-    println!("BE200AudioHub 0.1.0 — read-only diagnostics");
+    println!("BE200AudioHub 0.1.0 - read-only diagnostics");
     println!("OS: {}", env::consts::OS);
     println!("Architecture: {}", env::consts::ARCH);
     println!("Target: {:04x}:{:04x}", usb::BE200_VID, usb::BE200_PID);
     println!("USB backend: libusb/rusb (vendored)");
-    println!("Driver installation: manual only; read driver status/verify before a BE200 boot experiment");
     println!("Log directory: {}", logging::default_directory().display());
     println!("BE200 status:");
     usb::list(true)
@@ -72,107 +64,119 @@ fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         [x] if x == "doctor" => doctor(),
+
         [a, b] if a == "usb" && b == "list" => usb::list(false),
         [a, b, c] if a == "usb" && b == "list" && c == "--target-only" => usb::list(true),
         [a, b] if a == "usb" && b == "inspect" => {
             usb::inspect(usb::BE200_VID, usb::BE200_PID)
         }
-        [a, b, c] if a == "usb" && b == "inspect" => {
-            let (vid, pid) = usb::parse_vid_pid(c)?;
+        [a, b, value] if a == "usb" && b == "inspect" => {
+            let (vid, pid) = usb::parse_vid_pid(value)?;
             usb::inspect(vid, pid)
         }
-        [a, b] if a == "hci" && b == "version" => {
-            driver::verify()?;
-            hci::read_intel_version()
-        },
-        [a, b] if a == "hci" && b == "capabilities" => hci_capabilities::query(),
-        [a,b,c,seconds] if a == "ble" && b == "scan" && c == "--seconds" => {
-            ble_scan::scan(ble_scan::parse_seconds(seconds)?, false)
-        },
-        [a,b,c,seconds,flag] if a == "ble" && b == "scan"
-            && c == "--seconds" && flag == "--show-addresses" => {
-            ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
-        },
-        [a, b] if a == "r2" && b == "attach-probe" => r2_attach::probe(),
-        [a, b, c, seconds] if a == "r2" && b == "scan" && c == "--seconds" => {
-            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, false)
-        },
-        [a, b, c, seconds, flag] if a == "r2" && b == "scan"
-            && c == "--seconds" && flag == "--show-addresses" => {
-            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
-        },
-        [a, b, c, seconds] if a == "r2" && b == "scan-forensics"
-            && c == "--seconds" => {
-            r2_attach::scan_forensics(r2_attach::parse_scan_seconds(seconds)?)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "swift-pair-probe"
-            && c == "--seconds" && d == "--name" => {
-            r2_attach::swift_pair_probe(r2_attach::parse_scan_seconds(seconds)?, name)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "connect-probe"
-            && c == "--seconds" && d == "--name" => {
-            r2_attach::connect_probe(r2_attach::parse_scan_seconds(seconds)?, name)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "set-member-connect-probe"
-            && c == "--seconds" && d == "--name" => {
-            r2_pairing_refactor::set_member_connect_probe(
-                r2_pairing_refactor::parse_seconds(seconds)?,
-                name,
-            )
-        },
-        [a, b, flag] if a == "r2" && b == "pairing-v2-reset"
-            && flag == "--confirm" => {
-            r2_pairing_v2::archive_reset(true)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "pairing-v2-onboard"
-            && c == "--seconds" && d == "--name" => {
-            r2_pairing_v2::onboard(r2_pairing_v2::parse_seconds(seconds)?, name)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "pairing-v2-verify"
-            && c == "--seconds" && d == "--name" => {
-            r2_pairing_verify::verify(r2_pairing_verify::parse_seconds(seconds)?, name)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "bond-onboard"
-            && c == "--seconds" && d == "--name" => {
-            r2_attach::bond_onboard(r2_attach::parse_scan_seconds(seconds)?, name)
-        },
-        [a, b, c, seconds, d, name] if a == "r2" && b == "bond-verify"
-            && c == "--seconds" && d == "--name" => {
-            r2_attach::bond_verify(r2_attach::parse_scan_seconds(seconds)?, name)
-        },
-        [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
-            firmware::inspect(sfi, None)
-        },
-        [a, b, c, sfi, d, ddc] if a == "firmware" && b == "inspect"
-            && c == "--sfi" && d == "--ddc" => {
-            firmware::inspect(sfi, Some(ddc))
-        },
-        [a, b, sfi] if a == "firmware" && b == "inspect" => firmware::inspect(sfi, None),
-        [a, b, sfi, ddc] if a == "firmware" && b == "inspect" => {
-            firmware::inspect(sfi, Some(ddc))
-        },
-        [a, b, c, sfi, d, ddc] if a == "firmware" && b == "plan"
-            && c == "--sfi" && d == "--ddc" => {
-            firmware::dry_run(sfi, ddc)
-        },
-        [a,b,c,sfi,d,ddc] if a == "firmware" && b == "preflight"
-            && c == "--sfi" && d == "--ddc" => {
-            boot::preflight(sfi,ddc)
-        },
-        [a,b,c,sfi,d,ddc,flag] if a == "firmware" && b == "boot"
-            && c == "--sfi" && d == "--ddc" && flag == "--confirm-cold-boot" => {
-            boot::boot_once(sfi,ddc)
-        },
-        [a, b] if a == "driver" && b == "status" => driver::status(),
-        [a, b] if a == "driver" && b == "verify" => driver::verify(),
         [a, b] if a == "usb" && b == "probe" => {
             driver::verify()?;
             usb::probe_winusb()
-        },
-        [a, b] if a == "driver" && b == "backup" => driver::backup(None),
-        [a, b, c, d] if a == "driver" && b == "backup" && c == "--out" => {
-            driver::backup(Some(d))
         }
+
+        [a, b] if a == "hci" && b == "version" => {
+            driver::verify()?;
+            hci::read_intel_version()
+        }
+        [a, b] if a == "hci" && b == "capabilities" => hci_capabilities::query(),
+
+        [a, b, c, seconds] if a == "ble" && b == "scan" && c == "--seconds" => {
+            ble_scan::scan(ble_scan::parse_seconds(seconds)?, false)
+        }
+        [a, b, c, seconds, flag]
+            if a == "ble"
+                && b == "scan"
+                && c == "--seconds"
+                && flag == "--show-addresses" =>
+        {
+            ble_scan::scan(ble_scan::parse_seconds(seconds)?, true)
+        }
+
+        [a, b] if a == "r2" && b == "attach-probe" => r2_attach::probe(),
+        [a, b, c, seconds] if a == "r2" && b == "scan" && c == "--seconds" => {
+            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, false)
+        }
+        [a, b, c, seconds, flag]
+            if a == "r2"
+                && b == "scan"
+                && c == "--seconds"
+                && flag == "--show-addresses" =>
+        {
+            r2_attach::scan(r2_attach::parse_scan_seconds(seconds)?, true)
+        }
+        [a, b, c, seconds]
+            if a == "r2" && b == "scan-forensics" && c == "--seconds" =>
+        {
+            r2_attach::scan_forensics(r2_attach::parse_scan_seconds(seconds)?)
+        }
+        [a, b, c, flag]
+            if a == "r2" && b == "pair" && c == "reset" && flag == "--confirm" =>
+        {
+            pairing::archive_reset(true)
+        }
+        [a, b, c, d, seconds, e, name]
+            if a == "r2"
+                && b == "pair"
+                && c == "onboard"
+                && d == "--seconds"
+                && e == "--name" =>
+        {
+            pairing::onboard(pairing::parse_onboard_seconds(seconds)?, name)
+        }
+        [a, b, c, d, seconds, e, name]
+            if a == "r2"
+                && b == "pair"
+                && c == "verify"
+                && d == "--seconds"
+                && e == "--name" =>
+        {
+            pairing::verify(pairing::parse_verify_seconds(seconds)?, name)
+        }
+
+        [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
+            firmware::inspect(sfi, None)
+        }
+        [a, b, c, sfi, d, ddc]
+            if a == "firmware" && b == "inspect" && c == "--sfi" && d == "--ddc" =>
+        {
+            firmware::inspect(sfi, Some(ddc))
+        }
+        [a, b, sfi] if a == "firmware" && b == "inspect" => firmware::inspect(sfi, None),
+        [a, b, sfi, ddc] if a == "firmware" && b == "inspect" => {
+            firmware::inspect(sfi, Some(ddc))
+        }
+        [a, b, c, sfi, d, ddc]
+            if a == "firmware" && b == "plan" && c == "--sfi" && d == "--ddc" =>
+        {
+            firmware::dry_run(sfi, ddc)
+        }
+        [a, b, c, sfi, d, ddc]
+            if a == "firmware" && b == "preflight" && c == "--sfi" && d == "--ddc" =>
+        {
+            boot::preflight(sfi, ddc)
+        }
+        [a, b, c, sfi, d, ddc, flag]
+            if a == "firmware"
+                && b == "boot"
+                && c == "--sfi"
+                && d == "--ddc"
+                && flag == "--confirm-cold-boot" =>
+        {
+            boot::boot_once(sfi, ddc)
+        }
+
+        [a, b] if a == "driver" && b == "status" => driver::status(),
+        [a, b] if a == "driver" && b == "verify" => driver::verify(),
+        [a, b] if a == "driver" && b == "backup" => driver::backup(None),
+        [a, b, c, output] if a == "driver" && b == "backup" && c == "--out" => {
+            driver::backup(Some(output))
+        }
+
         _ => Err(AppError::Usage(usage().into())),
     }
 }
@@ -180,18 +184,19 @@ fn run(args: &[String]) -> Result<()> {
 fn main() {
     let logger = match logging::install(&logging::default_directory()) {
         Ok(runtime) => Some(runtime),
-        Err(e) => {
-            eprintln!("Warning: file logging unavailable: {e}");
+        Err(error) => {
+            eprintln!("Warning: file logging unavailable: {error}");
             None
         }
     };
+
     let args: Vec<String> = env::args().skip(1).collect();
     log::info!("BE200AudioHub invoked: {:?}", args);
     match run(&args) {
         Ok(()) => log::info!("command completed successfully"),
-        Err(e) => {
-            eprintln!("Error: {e}");
-            log::error!("{e}");
+        Err(error) => {
+            eprintln!("Error: {error}");
+            log::error!("{error}");
             if let Some(logger) = logger.as_ref() {
                 logger.flush();
             }
