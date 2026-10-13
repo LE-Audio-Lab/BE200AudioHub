@@ -4,9 +4,13 @@
 //! normalized product snapshots only.
 
 mod codec_plan;
+mod codec_config;
 mod discovery;
 mod snapshot;
 
+pub use codec_config::{
+    configure_and_release, CodecConfigScope, CodecConfiguredMember, CodecConfiguredSetSnapshot,
+};
 pub use codec_plan::{
     plan_first_sound, plan_stereo_lc3, CodecConfigurationPlan, PlannedSink, StereoSide,
 };
