@@ -30,7 +30,6 @@ fn usage() -> &'static str {
        be200hub r2 swift-pair-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 bond-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
-       be200hub r2 bond-reseed-host --confirm\n\
        be200hub r2 bond-verify --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
@@ -108,10 +107,6 @@ fn run(args: &[String]) -> Result<()> {
         [a, b, c, seconds, d, name] if a == "r2" && b == "bond-onboard"
             && c == "--seconds" && d == "--name" => {
             r2_attach::bond_onboard(r2_attach::parse_scan_seconds(seconds)?, name)
-        },
-        [a, b, flag] if a == "r2" && b == "bond-reseed-host"
-            && flag == "--confirm" => {
-            r2_attach::bond_reseed_host(true)
         },
         [a, b, c, seconds, d, name] if a == "r2" && b == "bond-verify"
             && c == "--seconds" && d == "--name" => {
