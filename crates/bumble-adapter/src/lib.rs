@@ -4,6 +4,8 @@
 //! attach-without-reset patch seam and translates upstream events/types into
 //! BE200AudioHub domain types.
 
+#[macro_use]
+mod console_ascii;
 mod bond;
 mod bond_commit;
 mod bond_manager_v4;
