@@ -13,6 +13,7 @@ mod hci_wire;
 mod intel;
 mod logging;
 mod pairing;
+mod quick_settings;
 mod r2_attach;
 mod usb;
 
@@ -22,6 +23,7 @@ use std::env;
 fn usage() -> &'static str {
     "BE200AudioHub v0.1\n\
      Usage:\n\
+       be200hub ui quick-settings inject [--tap <DLL_PATH>]\n\\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
        be200hub usb inspect [VID:PID]\n\
@@ -167,6 +169,12 @@ fn parse_r5_establish_cis_invocation(args: &[String]) -> Result<Option<(u16, &st
 }
 
 fn run(args: &[String]) -> Result<()> {
+    // Windows Shell UI operates independently of the controller bootstrap.
+    if let [group, component, command @ ..] = args {
+        if group == "ui" && component == "quick-settings" {
+            return quick_settings::run(command);
+        }
+    }
     if let Some((seconds, name)) = parse_r5_establish_cis_invocation(args)? {
         return run_operational(|| audio_set::establish_cis(seconds, name));
     }
