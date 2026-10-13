@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::ptr::null_mut;
-use std::sync::{atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering}, Mutex, OnceLock};
+use std::sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}, Mutex, OnceLock};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -53,8 +53,28 @@ const IID_ROUTED_EVENT_HANDLER: Guid = Guid { d1:0xa856e674,d2:0xb0b6,d3:0x4bc3,
     d4:[0xbb,0xa8,0x1b,0xa0,0x6e,0x40,0xd4,0xb5] };
 
 
+type Hwnd = *mut c_void;
+type SubclassProc = unsafe extern "system" fn(Hwnd,u32,usize,isize,usize,usize)->isize;
+const WM_BE200_QS_INSERT: u32 = 0x8000 + 0x4B2;
+const QS_SUBCLASS_ID: usize = 0xBE20_0200;
+const EXPECTED_NATIVE_TILES: u32 = 11;
+
 #[link(name="kernel32")]
-extern "system" { fn OutputDebugStringW(s: *const u16); }
+extern "system" {
+    fn OutputDebugStringW(s: *const u16);
+    fn GetCurrentThreadId() -> u32;
+}
+#[link(name="user32")]
+extern "system" {
+    fn FindWindowW(class_name:*const u16, window_name:*const u16)->Hwnd;
+    fn GetWindowThreadProcessId(hwnd:Hwnd, pid:*mut u32)->u32;
+    fn PostMessageW(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize)->i32;
+}
+#[link(name="comctl32")]
+extern "system" {
+    fn SetWindowSubclass(hwnd:Hwnd,proc:SubclassProc,id:usize,ref_data:usize)->i32;
+    fn DefSubclassProc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize)->isize;
+}
 #[link(name="oleaut32")]
 extern "system" { fn SysStringLen(bstr: *const u16) -> u32; }
 #[link(name="ole32")]
@@ -225,6 +245,9 @@ static EVENT_VTBL: EventHandlerVtbl = EventHandlerVtbl {
 static SERVICE_PTR: AtomicUsize = AtomicUsize::new(0);
 static DIAGNOSTICS_PTR: AtomicUsize = AtomicUsize::new(0);
 static INSERT_BUSY: AtomicBool = AtomicBool::new(false);
+static INSERT_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static PENDING_HOST: AtomicU64 = AtomicU64::new(0);
+static SUBCLASS_HWND: AtomicUsize = AtomicUsize::new(0);
 static INSERTED_HOSTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 fn inserted_hosts() -> &'static Mutex<HashSet<u64>> {
     INSERTED_HOSTS.get_or_init(|| Mutex::new(HashSet::new()))
@@ -353,7 +376,10 @@ unsafe fn insert_tile(host:u64) -> Result<(),i32> {
             }
         }
     };
-    if count < 6 { return Err(S_FALSE); } // Wait for native item realization.
+    // The captured Build 26200 tree has 11 native Quick Action containers.
+    // Never mutate the ItemsHost while its ItemContainerGenerator is still
+    // realizing those children; doing so froze ShellHost in the N2 HIL run.
+    if count < EXPECTED_NATIVE_TILES { return Err(S_FALSE); }
 
     let item=make_xaml_tile()?;
     wire_ui_only_click(item.as_raw())?;
@@ -371,9 +397,8 @@ unsafe fn insert_tile(host:u64) -> Result<(),i32> {
     Ok(())
 }
 
-fn try_insert(host:u64) {
+fn try_insert_now(host:u64) {
     if INSERT_BUSY.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() { return; }
-    // Guard clears even if an unexpected panic happens while composing XAML.
     struct Guard;
     impl Drop for Guard { fn drop(&mut self){INSERT_BUSY.store(false,Ordering::Release);} }
     let _guard=Guard;
@@ -381,9 +406,71 @@ fn try_insert(host:u64) {
     let result=std::panic::catch_unwind(|| unsafe { insert_tile(host) });
     match result {
         Ok(Ok(()))=>{if let Ok(mut set)=inserted_hosts().lock(){set.insert(host);}},
-        Ok(Err(S_FALSE))=>{}, // no native containers realized yet
-        Ok(Err(hr))=>log(&format!("[N2] INSERT FAILED: 0x{:08X} (host=0x{host:x})",hr as u32)),
-        Err(_)=>log("[N2] panic caught while inserting (ShellHost left unchanged if AddChild not reached)"),
+        Ok(Err(S_FALSE))=>log(&format!("[N2.2] deferred insert waiting for {EXPECTED_NATIVE_TILES} native children")),
+        Ok(Err(hr))=>log(&format!("[N2.2] INSERT FAILED: 0x{:08X} (host=0x{host:x})",hr as u32)),
+        Err(_)=>log("[N2.2] panic caught while inserting (ShellHost left unchanged if AddChild not reached)"),
+    }
+}
+
+unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize,
+                                             _id:usize,_ref_data:usize)->isize {
+    if msg==WM_BE200_QS_INSERT {
+        let host=PENDING_HOST.swap(0,Ordering::AcqRel);
+        if host!=0 {
+            log(&format!("[N2.2] deferred UI-thread insert dispatch host=0x{host:x}"));
+            try_insert_now(host);
+        }
+        INSERT_SCHEDULED.store(false,Ordering::Release);
+        return 0;
+    }
+    DefSubclassProc(hwnd,msg,wparam,lparam)
+}
+
+fn schedule_insert(host:u64) {
+    if inserted_hosts().lock().map(|set|set.contains(&host)).unwrap_or(true) { return; }
+    if INSERT_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
+        return;
+    }
+    let ok=unsafe {
+        let class=wide("ControlCenterWindow");
+        let hwnd=FindWindowW(class.as_ptr(),null_mut());
+        if hwnd.is_null() {
+            log("[N2.2] ControlCenterWindow not found while scheduling insert");
+            false
+        } else {
+            let window_thread=GetWindowThreadProcessId(hwnd,null_mut());
+            let current_thread=GetCurrentThreadId();
+            if window_thread!=current_thread {
+                log(&format!("[N2.2] refusing cross-thread subclass: callback_tid={current_thread} window_tid={window_thread}"));
+                false
+            } else {
+                let previous=SUBCLASS_HWND.load(Ordering::Acquire);
+                if previous != hwnd as usize {
+                    if SetWindowSubclass(hwnd,qs_subclass_proc,QS_SUBCLASS_ID,0)==0 {
+                        log("[N2.2] SetWindowSubclass failed");
+                        false
+                    } else {
+                        SUBCLASS_HWND.store(hwnd as usize,Ordering::Release);
+                        log(&format!("[N2.2] ControlCenterWindow subclass installed tid={current_thread}"));
+                        true
+                    }
+                } else { true }
+            }
+        }
+    };
+    if !ok {
+        INSERT_SCHEDULED.store(false,Ordering::Release);
+        return;
+    }
+    PENDING_HOST.store(host,Ordering::Release);
+    let hwnd=SUBCLASS_HWND.load(Ordering::Acquire) as Hwnd;
+    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_INSERT,0,0)};
+    if posted==0 {
+        PENDING_HOST.store(0,Ordering::Release);
+        INSERT_SCHEDULED.store(false,Ordering::Release);
+        log("[N2.2] PostMessageW(deferred insert) failed");
+    } else {
+        log(&format!("[N2.2] insert queued after current XAML mutation host=0x{host:x}"));
     }
 }
 
@@ -515,8 +602,8 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         for host in candidate_hosts {
             // Never hold the tree mutex while editing the XAML tree: AddChild
             // invokes OnVisualTreeChange recursively from the same UI thread.
-            log(&format!("[N2/TRACE] target wrap matched, attempting insert host=0x{host:x}"));
-            try_insert(host);
+            log(&format!("[N2/TRACE] target wrap matched, scheduling deferred insert host=0x{host:x}"));
+            schedule_insert(host);
         }
     });
     if result.is_err(){log("[N2] callback panic trapped at COM boundary");}
@@ -707,6 +794,15 @@ mod tests {
         // must not be enough to match the Quick Actions host.
         nodes.remove(&2);
         assert!(!is_quick_settings_wrap(&nodes,4));
+    }
+
+    #[test]
+    fn missing_outer_ancestor_does_not_invalidate_proven_anchor_chain() {
+        let mut nodes=HashMap::new();
+        nodes.insert(4,Node{parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
+        nodes.insert(3,Node{parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
+        nodes.insert(2,Node{parent:99,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
+        assert!(is_quick_settings_wrap(&nodes,4));
     }
 
     #[test]
