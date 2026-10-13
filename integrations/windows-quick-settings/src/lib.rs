@@ -1125,11 +1125,6 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
             if collection_text.contains("qa_bluetooth"){score+=50;}
             if collection_text.contains("bluetooth"){score+=10;}
 
-            // QuickActionViewModel is a plain WinRT bindable object here.
-            // XamlOM GetPropertyValuesChain returned ERROR_NOT_FOUND for VM
-            // handles in HIL; query the advertised ICustomPropertyProvider
-            // interface instead.
-            probe_custom_property_provider(e.index,handle);
             if score>0 && best.map_or(true,|(_,_,old)|score>old){best=Some((e.index,handle,score));}
         }
     }
@@ -1140,7 +1135,12 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     CoTaskMemFree(elements.cast());
 
     if let Some((index,handle,score))=best {
-        log(&format!("[N3] VM snapshot complete; best Bluetooth candidate item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
+        // QuickActionViewModel is a plain WinRT bindable object here.
+        // XamlOM GetPropertyValuesChain returned ERROR_NOT_FOUND for VM
+        // handles in HIL; query only the visually-proven Bluetooth VM through
+        // its advertised ICustomPropertyProvider to keep the UI-thread probe bounded.
+        probe_custom_property_provider(index,handle);
+        log(&format!("[N3] VM snapshot complete; visually-proven Bluetooth item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
     } else {
         log("[N3.2] VM snapshot complete but no visual AutomationId proved the Bluetooth item. See qs-vm-dump.log");
     }
