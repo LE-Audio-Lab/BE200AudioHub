@@ -18,6 +18,7 @@ mod connection_manager;
 mod csis;
 mod gatt_session;
 mod init;
+mod privacy;
 mod scan;
 mod security;
 mod set_member_verifier;
@@ -36,6 +37,7 @@ pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
     initialize_existing_operational, AttachReport, AttachedController,
 };
+pub use privacy::BondedPeerIdentity;
 pub use scan::{ScanObservation, ScanSummary};
 pub use security::{LeBondManager, ProvisionalBond};
 pub use set_member_verifier::SetMemberVerification;
