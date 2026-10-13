@@ -2,7 +2,7 @@ use crate::{
     error::{AppError, Result},
     usb,
 };
-use bap_client::{AudioSetSnapshot, ConnectedAudioMember};
+use bap_client::{plan_first_sound, AudioSetSnapshot, CodecConfigurationPlan, ConnectedAudioMember};
 use bumble_adapter::{
     BondMemberSummary, BondedPeerIdentity, LeAclReport, ScanObservation,
 };
@@ -50,13 +50,25 @@ pub fn parse_seconds(value: &str) -> Result<u16> {
 }
 
 pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
+    inspect_impl(seconds, wanted_name, false)
+}
+
+/// R4.1 read-only hardware bridge: reuse R3 discovery, then plan offline.
+pub fn codec_plan(seconds: u16, wanted_name: &str) -> Result<()> {
+    inspect_impl(seconds, wanted_name, true)
+}
+
+fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Result<()> {
     if wanted_name.trim().is_empty() {
         return Err(AppError::Usage(
             "--name requires a nonempty device name".into(),
         ));
     }
 
-    println!("R3 bonded audio-set inspection");
+    println!(
+        "{}",
+        if with_codec_plan { "R4.1 read-only codec planning" } else { "R3 bonded audio-set inspection" }
+    );
     println!("Target name: {wanted_name:?}");
     println!("Path: one scan -> resolve all members -> identity/FAL dual bonded ACL -> PACS/ASCS/CAS discovery.");
     println!("Safety: no SMP, no ASCS Control Point write, no CIG/CIS/ISO, no persistent-state mutation.");
@@ -123,7 +135,7 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
         )))?;
 
     let mut active = Vec::<ActiveMember>::new();
-    let operation = (|| -> Result<AudioSetSnapshot> {
+    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>)> {
         for resolved_member in resolved {
             let rank = resolved_member.member.rank.expect("rank checked");
             let privacy_peer = find_privacy_peer(&privacy_peers, &resolved_member.member)?;
@@ -243,7 +255,15 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
             .validate_sink_discovery()
             .map_err(AppError::Protocol)?;
         validate_stereo_locations(&snapshot)?;
-        Ok(snapshot)
+        // Construct only typed configuration data. No ASCS CP writes in R4.1.
+        let plan = if with_codec_plan {
+            Some(plan_first_sound(&snapshot).map_err(|error| {
+                AppError::Protocol(format!("R4.1 codec planning failed: {error}"))
+            })?)
+        } else {
+            None
+        };
+        Ok((snapshot, plan))
     })();
 
     let disconnect_cleanup = disconnect_all(&mut attached, &active);
@@ -254,8 +274,8 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
         )));
     let cleanup = combine_cleanup(disconnect_cleanup, privacy_cleanup);
 
-    let snapshot = match operation {
-        Ok(snapshot) => snapshot,
+    let (snapshot, plan) = match operation {
+        Ok(value) => value,
         Err(error) => {
             if let Err(cleanup_error) = cleanup {
                 eprintln!("R3 cleanup also failed: {cleanup_error}");
@@ -274,10 +294,15 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
 
     println!();
     println!("Persistent-state fingerprint: UNCHANGED");
-    println!(
-        "R3 AUDIO-SET INSPECT PASS: {}/{} bonded member(s), PACS+ASCS discovered, stereo locations resolved, no control writes.",
-        snapshot.members.len(), snapshot.set_size
-    );
+    if let Some(plan) = plan {
+        print_codec_plan(&plan);
+        println!("R4.1 CODEC PLAN PASS: dual-mono LC3 configuration validated; no ASCS control writes, CIG/CIS/ISO, or bond mutation.");
+    } else {
+        println!(
+            "R3 AUDIO-SET INSPECT PASS: {}/{} bonded member(s), PACS+ASCS discovered, stereo locations resolved, no control writes.",
+            snapshot.members.len(), snapshot.set_size
+        );
+    }
     Ok(())
 }
 
@@ -509,6 +534,32 @@ fn print_snapshot(snapshot: &AudioSetSnapshot) {
             ),
             None => println!("    CAS: absent"),
         }
+    }
+}
+
+fn print_codec_plan(plan: &CodecConfigurationPlan) {
+    println!();
+    println!(
+        "CodecConfigurationPlan: LC3 {}Hz {}us {}octets/frame 1frame/SDU context=0x{:04X}",
+        plan.stream.sample_rate_hz,
+        plan.stream.frame_duration_us,
+        plan.stream.octets_per_codec_frame,
+        plan.context.0
+    );
+    for sink in [&plan.left, &plan.right] {
+        println!(
+            "  {} rank={} identity={} ACL=0x{:04X} ASE={} value=0x{:04X} CP=0x{:04X} location=0x{:08X}",
+            sink.side.as_str(),
+            sink.rank,
+            sink.identity_address,
+            sink.acl_handle,
+            sink.ase_id,
+            sink.ase_value_handle,
+            sink.ascs_control_point_handle,
+            sink.audio_location.0
+        );
+        let ltv = sink.codec_specific_configuration.to_bytes();
+        println!("    codec_id={:?} codec_specific_configuration={:02X?}", sink.codec_id, ltv);
     }
 }
 
