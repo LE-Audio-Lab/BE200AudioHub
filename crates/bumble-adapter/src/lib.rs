@@ -32,7 +32,7 @@ pub use commit::{
 };
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
-pub use gatt_session::LeAclState;
+pub use gatt_session::{AttValueEvent, LeAclState};
 pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
     initialize_existing_operational, AttachReport, AttachedController,
