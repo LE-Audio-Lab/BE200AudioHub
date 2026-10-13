@@ -1,3 +1,5 @@
+#[macro_use]
+mod console_ascii;
 mod driver;
 mod boot;
 mod hci_wire;
