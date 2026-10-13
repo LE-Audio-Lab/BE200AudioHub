@@ -8,6 +8,7 @@ use bumble_profiles::cap::CommonAudioServiceProxy;
 use bumble_profiles::pacs::PublishedAudioCapabilitiesServiceProxy;
 use bumble_transport::{Error, Result as TransportResult};
 
+use crate::ase_read::read_ase_checked;
 use crate::snapshot::{
     AseSnapshot, AscsSnapshot, AudioMemberSnapshot, CapSnapshot, ConnectedAudioMember,
     GattServiceRange, PacsSnapshot,
@@ -102,7 +103,8 @@ pub fn discover_audio_member(
 
             let mut sink_ases = Vec::with_capacity(ascs.sink_ase.len());
             for characteristic in &ascs.sink_ase {
-                let status = AudioStreamControlServiceProxy::read_ase(
+                let status = read_ase_checked(
+                    member.connection_handle,
                     characteristic,
                     client,
                     transport,
@@ -113,7 +115,8 @@ pub fn discover_audio_member(
 
             let mut source_ases = Vec::with_capacity(ascs.source_ase.len());
             for characteristic in &ascs.source_ase {
-                let status = AudioStreamControlServiceProxy::read_ase(
+                let status = read_ase_checked(
+                    member.connection_handle,
                     characteristic,
                     client,
                     transport,
