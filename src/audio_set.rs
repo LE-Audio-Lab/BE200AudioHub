@@ -3,7 +3,9 @@ use crate::{
     usb,
 };
 use bap_client::{AudioSetSnapshot, ConnectedAudioMember};
-use bumble_adapter::{BondMemberSummary, LeAclReport, ScanObservation};
+use bumble_adapter::{
+    BondMemberSummary, BondedPeerIdentity, LeAclReport, ScanObservation,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -56,7 +58,7 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
 
     println!("R3 bonded audio-set inspection");
     println!("Target name: {wanted_name:?}");
-    println!("Path: one scan -> resolve all members -> dual bonded ACL -> PACS/ASCS/CAS discovery.");
+    println!("Path: one scan -> resolve all members -> identity/FAL dual bonded ACL -> PACS/ASCS/CAS discovery.");
     println!("Safety: no SMP, no ASCS Control Point write, no CIG/CIS/ISO, no persistent-state mutation.");
     usb::r2_fast_preflight()?;
 
@@ -114,10 +116,17 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
         .map_err(|error| AppError::Protocol(format!("R3 member scan failed: {error}")))?;
     let resolved = resolve_all_members(&store, &set.members, &scan.observations)?;
 
+    let privacy_peers = attached
+        .configure_bonded_identity_resolution(&store, &set.members)
+        .map_err(|error| AppError::Protocol(format!(
+            "R3 controller identity-resolution setup failed: {error}"
+        )))?;
+
     let mut active = Vec::<ActiveMember>::new();
     let operation = (|| -> Result<AudioSetSnapshot> {
         for resolved_member in resolved {
             let rank = resolved_member.member.rank.expect("rank checked");
+            let privacy_peer = find_privacy_peer(&privacy_peers, &resolved_member.member)?;
             println!();
             println!(
                 "Member rank={rank}: identity={} current={} type={} RSSI={}dBm",
@@ -126,12 +135,20 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
                 resolved_member.observation.address_type,
                 resolved_member.observation.rssi
             );
+            println!(
+                "  connect policy: controller resolves current RPA; FAL target identity={} type={}",
+                privacy_peer.identity_address, privacy_peer.address_type
+            );
+
+            let mut identity_target = resolved_member.observation.clone();
+            identity_target.address = privacy_peer.identity_address.clone();
+            identity_target.address_type = privacy_peer.address_type;
 
             let acl = {
                 let mut manager = attached.le_connection_manager();
                 manager
                     .direct_connect_filter_accept_list(
-                        &resolved_member.observation,
+                        &identity_target,
                         CONNECT_TIMEOUT,
                     )
                     .map_err(|error| AppError::Protocol(format!(
@@ -224,7 +241,14 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
         Ok(snapshot)
     })();
 
-    let cleanup = disconnect_all(&mut attached, &active);
+    let disconnect_cleanup = disconnect_all(&mut attached, &active);
+    let privacy_cleanup = attached
+        .clear_bonded_identity_resolution()
+        .map_err(|error| AppError::Protocol(format!(
+            "R3 controller identity-resolution cleanup failed: {error}"
+        )));
+    let cleanup = combine_cleanup(disconnect_cleanup, privacy_cleanup);
+
     let snapshot = match operation {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -250,6 +274,32 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
         snapshot.members.len(), snapshot.set_size
     );
     Ok(())
+}
+
+fn find_privacy_peer<'a>(
+    peers: &'a [BondedPeerIdentity],
+    member: &BondMemberSummary,
+) -> Result<&'a BondedPeerIdentity> {
+    peers
+        .iter()
+        .find(|peer| {
+            peer.identity_address
+                .eq_ignore_ascii_case(&member.identity_address)
+        })
+        .ok_or_else(|| AppError::Protocol(format!(
+            "controller resolving-list setup omitted bonded identity {}",
+            member.identity_address
+        )))
+}
+
+fn combine_cleanup(disconnect: Result<()>, privacy: Result<()>) -> Result<()> {
+    match (disconnect, privacy) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(disconnect), Err(privacy)) => Err(AppError::Protocol(format!(
+            "{disconnect}; additionally {privacy}"
+        ))),
+    }
 }
 
 fn resolve_all_members(
