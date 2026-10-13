@@ -7,21 +7,45 @@
 use crate::error::{AppError, Result};
 
 pub fn run(args: &[String]) -> Result<()> {
-    match args {
-        [verb] if verb == "inject" => platform::inject(None),
-        [verb, flag, path] if verb == "inject" && flag == "--tap" => {
-            platform::inject(Some(path))
-        }
-        _ => Err(AppError::Usage(
-            "Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>]".into(),
-        )),
+    if args.first().map(String::as_str) != Some("inject") {
+        return Err(AppError::Usage(
+            "Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>] [--duplicate-native-vm]".into(),
+        ));
     }
+
+    let mut tap: Option<&str> = None;
+    let mut duplicate_native_vm = false;
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tap" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err(AppError::Usage(
+                        "--tap requires a DLL path".into(),
+                    ));
+                };
+                tap = Some(path.as_str());
+                i += 2;
+            }
+            "--duplicate-native-vm" => {
+                duplicate_native_vm = true;
+                i += 1;
+            }
+            other => {
+                return Err(AppError::Usage(format!(
+                    "Unknown Quick Settings option: {other}. Usage: be200hub ui quick-settings inject [--tap <be200_qs_tap.dll>] [--duplicate-native-vm]"
+                )));
+            }
+        }
+    }
+
+    platform::inject(tap, duplicate_native_vm)
 }
 
 #[cfg(not(windows))]
 mod platform {
     use super::*;
-    pub fn inject(_: Option<&String>) -> Result<()> {
+    pub fn inject(_: Option<&str>, _: bool) -> Result<()> {
         Err(AppError::Protocol("Windows Shell integration is Windows-only".into()))
     }
 }
@@ -126,7 +150,7 @@ mod platform {
         }
     }
 
-    fn tap_path(override_path: Option<&String>) -> Result<PathBuf> {
+    fn tap_path(override_path: Option<&str>) -> Result<PathBuf> {
         let path = match override_path {
             Some(path) => Path::new(path).to_path_buf(),
             None => std::env::current_exe()
@@ -143,11 +167,13 @@ mod platform {
         Ok(path)
     }
 
-    pub fn inject(tap: Option<&String>) -> Result<()> {
+    pub fn inject(tap: Option<&str>, duplicate_native_vm: bool) -> Result<()> {
         let pid = shellhost_process_id()?;
         let path = tap_path(tap)?;
+        let mode = if duplicate_native_vm { "duplicate-native-vm" } else { "probe-only" };
         println!("[QS] Target: ShellHost.exe PID={pid}");
         println!("[QS] Rust TAP: {}", path.display());
+        println!("[QS] Mode: {mode}");
         unsafe {
             let module = LoadLibraryW(wide(std::ffi::OsStr::new("Windows.UI.Xaml.dll")).as_ptr());
             if module.is_null() {
@@ -165,11 +191,12 @@ mod platform {
             let init: InitXamlDiagnosticsEx = std::mem::transmute(proc);
             let xaml_name = wide(std::ffi::OsStr::new(""));
             let tap_name = wide(path.as_os_str());
+            let initialization_data = wide(std::ffi::OsStr::new(mode));
             let mut last_hr = 0x80070490u32; // HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
             for i in 1..=10000u32 {
                 let endpoint = wide(std::ffi::OsStr::new(&format!("VisualDiagConnection{i}")));
                 let hr = init(endpoint.as_ptr(), pid, xaml_name.as_ptr(),
-                              tap_name.as_ptr(), TAP_CLSID, std::ptr::null());
+                              tap_name.as_ptr(), TAP_CLSID, initialization_data.as_ptr());
                 if hr as u32 == 0x80070490 {
                     continue;
                 }
