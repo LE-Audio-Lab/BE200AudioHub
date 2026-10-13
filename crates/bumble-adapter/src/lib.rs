@@ -6,7 +6,8 @@
 //! - `LeBondManager` creates provisional peer security material;
 //! - CSIS verifies coordinated-set membership;
 //! - commit functions are the only persistent write boundary;
-//! - stored-security recovery never starts SMP.
+//! - stored-security recovery never starts SMP;
+//! - encrypted GATT access stays behind one ownership bridge.
 
 #[macro_use]
 mod console_ascii;
@@ -15,6 +16,7 @@ mod bond;
 mod commit;
 mod connection_manager;
 mod csis;
+mod gatt_session;
 mod init;
 mod scan;
 mod security;
@@ -29,6 +31,7 @@ pub use commit::{
 };
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
+pub use gatt_session::LeAclState;
 pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
     initialize_existing_operational, AttachReport, AttachedController,
