@@ -69,6 +69,9 @@ const EXPECTED_NATIVE_TILES: u32 = 11;
 extern "system" {
     fn OutputDebugStringW(s: *const u16);
     fn GetCurrentThreadId() -> u32;
+    fn LoadLibraryW(name:*const u16)->*mut c_void;
+    fn GetProcAddress(module:*mut c_void,name:*const u8)->*mut c_void;
+    fn FreeLibrary(module:*mut c_void)->i32;
 }
 #[link(name="user32")]
 extern "system" {
@@ -790,6 +793,40 @@ unsafe fn probe_custom_property_provider(index:u32,handle:u64) {
     }
 }
 
+
+unsafe fn probe_runtime_metadata() {
+    let module=LoadLibraryW(wide("WinTypes.dll").as_ptr());
+    if module.is_null() {
+        vm_log("[N3.2] LoadLibraryW(WinTypes.dll) failed; metadata path probe skipped");
+        return;
+    }
+    let proc=GetProcAddress(module,b"RoGetMetaDataFile\0".as_ptr());
+    if proc.is_null() {
+        vm_log("[N3.2] WinTypes.dll has no RoGetMetaDataFile export");
+        FreeLibrary(module);
+        return;
+    }
+    let resolve:unsafe extern "system" fn(
+        *mut c_void,*mut c_void,*mut *mut c_void,*mut *mut c_void,*mut u32
+    )->i32=std::mem::transmute(proc);
+    let class=match HString::new("ControlCenter.QuickActionViewModel") {
+        Ok(x)=>x,
+        Err(hr)=>{
+            vm_log(&format!("[N3.2] metadata HSTRING failed hr=0x{:08X}",hr as u32));
+            FreeLibrary(module);
+            return;
+        }
+    };
+    let mut path=null_mut();
+    let mut metadata_import=null_mut();
+    let mut type_def=0u32;
+    let hr=resolve(class.0,null_mut(),&mut path,&mut metadata_import,&mut type_def);
+    let path_text=if !path.is_null(){take_hstring(path)}else{String::new()};
+    if !metadata_import.is_null(){com_release(metadata_import);}
+    FreeLibrary(module);
+    vm_log(&format!("[N3.2] RoGetMetaDataFile(ControlCenter.QuickActionViewModel) hr=0x{:08X} type_def=0x{type_def:08X} path={path_text:?}",hr as u32));
+}
+
 unsafe fn probe_activation_factory() {
     let class=match HString::new("ControlCenter.QuickActionViewModel"){Ok(x)=>x,Err(hr)=>{
         vm_log(&format!("[N3.2] QuickActionViewModel HSTRING failed hr=0x{:08X}",hr as u32));return;
@@ -1088,6 +1125,7 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     log(&format!("[N3] RootGridView.ItemsSource handle=0x{source:x} count={count}"));
     if count==0{return Err(S_FALSE);}
     probe_activation_factory();
+    probe_runtime_metadata();
     let visual_identities=visual_quick_action_identities(service,grid);
     let realized_vm_handles=realized_vm_handles_for_grid(service,grid);
     log(&format!("[N3] realized container Content handles available={}",realized_vm_handles.len()));
