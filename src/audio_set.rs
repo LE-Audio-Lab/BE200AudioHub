@@ -2,7 +2,10 @@ use crate::{
     error::{AppError, Result},
     usb,
 };
-use bap_client::{plan_first_sound, AudioSetSnapshot, CodecConfigurationPlan, ConnectedAudioMember};
+use bap_client::{
+    configure_and_release, plan_first_sound, AudioSetSnapshot, CodecConfigScope,
+    CodecConfigurationPlan, CodecConfiguredSetSnapshot, ConnectedAudioMember,
+};
 use bumble_adapter::{
     BondMemberSummary, BondedPeerIdentity, LeAclReport, ScanObservation,
 };
@@ -49,16 +52,37 @@ pub fn parse_seconds(value: &str) -> Result<u16> {
     Ok(seconds)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioSetAction {
+    Inspect,
+    CodecPlan,
+    ConfigCodec(CodecConfigScope),
+}
+
 pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
-    inspect_impl(seconds, wanted_name, false)
+    inspect_impl(seconds, wanted_name, AudioSetAction::Inspect)
 }
 
 /// R4.1 read-only hardware bridge: reuse R3 discovery, then plan offline.
 pub fn codec_plan(seconds: u16, wanted_name: &str) -> Result<()> {
-    inspect_impl(seconds, wanted_name, true)
+    inspect_impl(seconds, wanted_name, AudioSetAction::CodecPlan)
 }
 
-fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Result<()> {
+pub fn parse_config_scope(value: &str) -> Result<CodecConfigScope> {
+    match value {
+        "left" => Ok(CodecConfigScope::Left),
+        "right" => Ok(CodecConfigScope::Right),
+        "both" => Ok(CodecConfigScope::Both),
+        _ => Err(AppError::Usage("--side must be left, right or both".into())),
+    }
+}
+
+/// R4.2 intentional ASCS mutation. All configured ASEs are released to Idle.
+pub fn config_codec(seconds: u16, wanted_name: &str, scope: CodecConfigScope) -> Result<()> {
+    inspect_impl(seconds, wanted_name, AudioSetAction::ConfigCodec(scope))
+}
+
+fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Result<()> {
     if wanted_name.trim().is_empty() {
         return Err(AppError::Usage(
             "--name requires a nonempty device name".into(),
@@ -67,11 +91,20 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
 
     println!(
         "{}",
-        if with_codec_plan { "R4.1 read-only codec planning" } else { "R3 bonded audio-set inspection" }
+        match action {
+            AudioSetAction::Inspect => "R3 bonded audio-set inspection",
+            AudioSetAction::CodecPlan => "R4.1 read-only codec planning",
+            AudioSetAction::ConfigCodec(_) => "R4.2 ASCS Config Codec + Release transaction",
+        }
     );
     println!("Target name: {wanted_name:?}");
     println!("Path: one scan -> resolve all members -> identity/FAL dual bonded ACL -> PACS/ASCS/CAS discovery.");
-    println!("Safety: no SMP, no ASCS Control Point write, no CIG/CIS/ISO, no persistent-state mutation.");
+    if matches!(action, AudioSetAction::ConfigCodec(_)) {
+        println!("Safety: ASCS Config Codec/Release writes are ENABLED by explicit CLI confirmation.");
+        println!("No SMP, Bond mutation, CIG, CIS, QoS or ISO activity. Every modified ASE must return to Idle.");
+    } else {
+        println!("Safety: no SMP, no ASCS Control Point write, no CIG/CIS/ISO, no persistent-state mutation.");
+    }
     usb::r2_fast_preflight()?;
 
     let mut attached = bumble_adapter::attach_be200_existing_operational(ATTACH_TIMEOUT)
@@ -135,7 +168,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
         )))?;
 
     let mut active = Vec::<ActiveMember>::new();
-    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>)> {
+    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>, Option<CodecConfiguredSetSnapshot>)> {
         for resolved_member in resolved {
             let rank = resolved_member.member.rank.expect("rank checked");
             let privacy_peer = find_privacy_peer(&privacy_peers, &resolved_member.member)?;
@@ -255,15 +288,24 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
             .validate_sink_discovery()
             .map_err(AppError::Protocol)?;
         validate_stereo_locations(&snapshot)?;
-        // Construct only typed configuration data. No ASCS CP writes in R4.1.
-        let plan = if with_codec_plan {
+        // R3 reads only; R4.1 only plans; R4.2 mutates ASCS then releases
+        // every attempted ASE while the two encrypted ACLs are still live.
+        let plan = if matches!(action, AudioSetAction::Inspect) {
+            None
+        } else {
             Some(plan_first_sound(&snapshot).map_err(|error| {
                 AppError::Protocol(format!("R4.1 codec planning failed: {error}"))
             })?)
-        } else {
-            None
         };
-        Ok((snapshot, plan))
+        let configured = match (action, plan.as_ref()) {
+            (AudioSetAction::ConfigCodec(scope), Some(plan)) => {
+                Some(configure_and_release(&mut attached, plan, scope).map_err(|error| {
+                    AppError::Protocol(format!("R4.2 ASCS transaction failed: {error}"))
+                })?)
+            }
+            _ => None,
+        };
+        Ok((snapshot, plan, configured))
     })();
 
     let disconnect_cleanup = disconnect_all(&mut attached, &active);
@@ -274,7 +316,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
         )));
     let cleanup = combine_cleanup(disconnect_cleanup, privacy_cleanup);
 
-    let (snapshot, plan) = match operation {
+    let (snapshot, plan, configured) = match operation {
         Ok(value) => value,
         Err(error) => {
             if let Err(cleanup_error) = cleanup {
@@ -296,8 +338,14 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
     println!("Persistent-state fingerprint: UNCHANGED");
     if let Some(plan) = plan {
         print_codec_plan(&plan);
-        println!("R4.1 dry-run: ACL handles shown above have been disconnected; no ASE state changed.");
-        println!("R4.1 CODEC PLAN PASS: dual-mono LC3 configuration validated; no ASCS control writes, CIG/CIS/ISO, or bond mutation.");
+        if let Some(configured) = configured {
+            print_codec_configured(&configured);
+            println!("R4.2 CONFIG CODEC PASS: {} ASE(s) configured, response+notification+readback verified, all released to Idle; no CIG/CIS/ISO or bond mutation.",
+                configured.members.len());
+        } else {
+            println!("R4.1 dry-run: ACL handles shown above have been disconnected; no ASE state changed.");
+            println!("R4.1 CODEC PLAN PASS: dual-mono LC3 configuration validated; no ASCS control writes, CIG/CIS/ISO, or bond mutation.");
+        }
     } else {
         println!(
             "R3 AUDIO-SET INSPECT PASS: {}/{} bonded member(s), PACS+ASCS discovered, stereo locations resolved, no control writes.",
@@ -535,6 +583,32 @@ fn print_snapshot(snapshot: &AudioSetSnapshot) {
             ),
             None => println!("    CAS: absent"),
         }
+    }
+}
+
+fn print_codec_configured(snapshot: &CodecConfiguredSetSnapshot) {
+    println!();
+    println!("CodecConfiguredSetSnapshot: configured={} released_to_idle={}",
+        snapshot.members.len(), snapshot.all_released_to_idle);
+    for member in &snapshot.members {
+        println!(
+            "  {} identity={} ASE={} framing={} PHY={} retransmissions={} max_transport_latency={}ms",
+            member.side.as_str(),
+            member.identity_address,
+            member.ase_id,
+            member.preferred_framing,
+            member.preferred_phy,
+            member.preferred_retransmission_number,
+            member.preferred_max_transport_latency
+        );
+        println!(
+            "    supported_presentation_delay={}..{}us preferred={}..{}us codec_ltv={:02X?}",
+            member.supported_presentation_delay_min,
+            member.supported_presentation_delay_max,
+            member.preferred_presentation_delay_min,
+            member.preferred_presentation_delay_max,
+            member.codec_specific_configuration
+        );
     }
 }
 
