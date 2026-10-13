@@ -21,11 +21,9 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Product-local BE200 USB transport.
 ///
-/// Pinned Bumble-RS prepends one H4 packet type to an entire USB transfer.
-/// Bluetooth USB does not guarantee one HCI frame per transfer: one transfer
-/// may contain multiple complete frames, and a frame may continue across
-/// transfers. Linux btusb reassembles Event and ACL streams from their native
-/// HCI headers; R2 follows the same model here.
+/// Reassemble Event and ACL data from their native HCI headers. A USB read
+/// boundary is not an HCI frame boundary. In particular, a timed-out interrupt
+/// read may have transferred valid bytes that must reach the event assembler.
 pub(crate) fn open_be200_split_transport() -> TransportResult<SplitOpenedTransport> {
     let context = Context::new()?;
     let devices = context.devices()?;
@@ -66,9 +64,10 @@ pub(crate) fn open_be200_split_transport() -> TransportResult<SplitOpenedTranspo
     }
 
     println!(
-        "[R2/USB] fixed HCI USB framing active: interrupt=0x{:02X} bulk-in=0x{:02X} bulk-out=0x{:02X}; Event+ACL native-header reassembly",
+        "[R2/USB] fixed HCI USB framing active: interrupt=0x{:02X} bulk-in=0x{:02X} bulk-out=0x{:02X}; Event+ACL native-header reassembly; partial-timeout preservation",
         layout.interrupt_in, layout.bulk_in, layout.bulk_out
     );
+    println!("[R2/USB] ACL lifecycle event tracing enabled before HCI decode; no ACL payloads or pairing keys logged");
 
     let handle = Arc::new(handle);
     let source = Be200UsbPacketSource {
@@ -91,6 +90,7 @@ pub(crate) fn open_be200_split_transport() -> TransportResult<SplitOpenedTranspo
     metadata.insert("bus".into(), device.bus_number().to_string());
     metadata.insert("address".into(), device.address().to_string());
     metadata.insert("be200_usb_framing".into(), "native-header-reassembly".into());
+    metadata.insert("be200_interrupt_partial_timeout".into(), "preserve".into());
 
     Ok(SplitOpenedTransport {
         source: Box::new(source),
@@ -129,6 +129,82 @@ fn interface_infos<T: UsbContext>(device: &Device<T>) -> TransportResult<Vec<Usb
     }
 
     Ok(infos)
+}
+
+/// rusb 0.9.4 preserves partial TIMEOUT results for bulk reads but not for
+/// interrupt reads. Call the same synchronous libusb API while retaining its
+/// transferred count. No background transfer survives this function.
+fn read_interrupt_preserving_progress<T: UsbContext>(
+    handle: &DeviceHandle<T>,
+    endpoint: u8,
+    buffer: &mut [u8],
+    timeout: Duration,
+) -> TransportResult<usize> {
+    if endpoint & 0x80 == 0 || buffer.is_empty() {
+        return Err(Error::InvalidSpec(
+            "interrupt receive requires an IN endpoint and a nonempty buffer".into(),
+        ));
+    }
+    let length = i32::try_from(buffer.len()).map_err(|_| {
+        Error::InvalidSpec("interrupt receive buffer exceeds libusb length range".into())
+    })?;
+    let timeout_ms = u32::try_from(timeout.as_millis()).map_err(|_| {
+        Error::InvalidSpec("interrupt receive timeout exceeds libusb range".into())
+    })?;
+    if timeout_ms == 0 {
+        return Err(Error::InvalidSpec(
+            "interrupt receive requires a finite timeout of at least 1 ms".into(),
+        ));
+    }
+
+    let mut transferred: i32 = 0;
+    // SAFETY: the borrowed handle remains open, buffer is exclusively borrowed
+    // for this synchronous call, its writable allocation is at least length
+    // bytes, and transferred points to initialized, live i32 storage. Length
+    // and timeout conversions are checked. libusb retains none of these
+    // pointers after its synchronous function returns.
+    let status = unsafe {
+        rusb::ffi::libusb_interrupt_transfer(
+            handle.as_raw(),
+            endpoint,
+            buffer.as_mut_ptr(),
+            length,
+            &mut transferred,
+            timeout_ms,
+        )
+    };
+    let count = interrupt_read_result(status, transferred, buffer.len())?;
+    if status != 0 && count > 0 {
+        println!(
+            "[R2/USB] interrupt-IN partial read preserved: endpoint=0x{endpoint:02X} libusb_status={status} bytes={count}; forwarding received bytes"
+        );
+    }
+    Ok(count)
+}
+
+fn interrupt_read_result(
+    status: i32,
+    transferred: i32,
+    capacity: usize,
+) -> TransportResult<usize> {
+    use rusb::constants::{LIBUSB_ERROR_INTERRUPTED, LIBUSB_ERROR_TIMEOUT};
+
+    // Do not consume data from overflow, removal, stall, or other hard errors.
+    if status != 0 && status != LIBUSB_ERROR_TIMEOUT && status != LIBUSB_ERROR_INTERRUPTED {
+        return Err(Error::Remote(format!(
+            "BE200 interrupt-IN failed: libusb_status={status} transferred={transferred}"
+        )));
+    }
+    let count = usize::try_from(transferred).map_err(|_| {
+        Error::Remote("libusb interrupt-IN returned a negative byte count".into())
+    })?;
+    if count > capacity {
+        return Err(Error::Remote(format!(
+            "libusb interrupt-IN returned {count} bytes for a {capacity}-byte buffer"
+        )));
+    }
+    // TIMEOUT/INTERRUPTED + zero bytes is just an empty polling slice.
+    Ok(count)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,27 +286,16 @@ impl UsbHciReassembler {
             let mut h4 = Vec::with_capacity(packet_len + 1);
             h4.push(self.packet_type());
             h4.extend_from_slice(&packet_bytes);
+            if self.kind == InboundPacketKind::Event {
+                trace_acl_lifecycle_event(&h4);
+            }
             pending.push_back(HciPacket::from_bytes(&h4)?);
             completed += 1;
         }
 
-        // Match Linux btusb_recv_intr(): once an Event frame completed in this
-        // USB chunk, a leftover shorter than HCI_EVENT_HDR_SIZE is treated as
-        // an unexpected continuation/controller quirk and dropped instead of
-        // becoming a fresh H4 packet type on the next iteration.
-        if self.kind == InboundPacketKind::Event
-            && completed > 0
-            && !self.buffer.is_empty()
-            && self.buffer.len() < self.header_len()
-        {
-            println!(
-                "[R2/USB] dropping unexpected Event continuation: {} byte(s) {}",
-                self.buffer.len(),
-                hex_bytes(&self.buffer)
-            );
-            self.buffer.clear();
-        }
-
+        // Retain every incomplete header, including a single Event header byte
+        // following a completed frame. Dropping it would desynchronize the next
+        // read. Unknown/malformed data must fail decoding, not be guessed away.
         if completed > 1 {
             println!(
                 "[R2/USB] one {} transfer contained {completed} complete HCI frame(s)",
@@ -251,6 +316,56 @@ impl UsbHciReassembler {
     }
 }
 
+/// Select only non-secret connection/control events. Never dump ACL/SMP data,
+/// vendor responses, local key reads, or general Command Complete payloads.
+fn is_acl_lifecycle_event(h4: &[u8]) -> bool {
+    if h4.len() < 3 || h4[0] != HCI_EVENT_PACKET {
+        return false;
+    }
+    match h4[1] {
+        0x05 | 0x08 | 0x10 | 0x30 | 0x59 => true,
+        0x3E => h4.len() >= 4 && matches!(h4[3], 0x01 | 0x03 | 0x04 | 0x0A | 0x29),
+        0x0E if h4.len() >= 6 => {
+            is_lifecycle_opcode(u16::from_le_bytes([h4[4], h4[5]]))
+        }
+        0x0F if h4.len() >= 7 => {
+            is_lifecycle_opcode(u16::from_le_bytes([h4[5], h4[6]]))
+        }
+        _ => false,
+    }
+}
+
+fn is_lifecycle_opcode(opcode: u16) -> bool {
+    matches!(opcode, 0x0406 | 0x200D | 0x200E | 0x2019 | 0x2043)
+}
+
+fn trace_acl_lifecycle_event(h4: &[u8]) {
+    if !is_acl_lifecycle_event(h4) {
+        return;
+    }
+    let label = match h4[1] {
+        0x05 => "Disconnection Complete",
+        0x08 | 0x59 => "Encryption Change",
+        0x10 => "Hardware Error",
+        0x30 => "Encryption Key Refresh Complete",
+        0x0E => "Command Complete",
+        0x0F => "Command Status",
+        0x3E => match h4[3] {
+            0x01 => "LE Connection Complete",
+            0x0A => "LE Enhanced Connection Complete",
+            0x29 => "LE Enhanced Connection Complete V2",
+            0x03 => "LE Connection Update Complete",
+            0x04 => "LE Read Remote Features Complete",
+            _ => "LE connection event",
+        },
+        _ => "connection event",
+    };
+    println!(
+        "[R2/HCI-RX] {label} before Host/Device decode: h4={}",
+        hex_bytes(h4)
+    );
+}
+
 struct Be200UsbPacketSource {
     handle: Arc<DeviceHandle<Context>>,
     interrupt_in: u8,
@@ -264,19 +379,14 @@ struct Be200UsbPacketSource {
 impl Be200UsbPacketSource {
     fn poll_events(&mut self) -> TransportResult<()> {
         let mut transfer = vec![0u8; MAX_HCI_PACKET_SIZE - 1];
-        let count = match self
-            .handle
-            .read_interrupt(self.interrupt_in, &mut transfer, READ_TIMEOUT)
-        {
-            Ok(count) => count,
-            Err(rusb::Error::Timeout) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
+        let count = read_interrupt_preserving_progress(
+            self.handle.as_ref(),
+            self.interrupt_in,
+            &mut transfer,
+            READ_TIMEOUT,
+        )?;
         if count == 0 {
             return Ok(());
-        }
-        if count > transfer.len() {
-            return Err(Error::PacketTooLarge(count + 1));
         }
         self.event_framer
             .feed(&transfer[..count], &mut self.pending)
@@ -378,4 +488,90 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusb::constants::{
+        LIBUSB_ERROR_INTERRUPTED, LIBUSB_ERROR_NO_DEVICE, LIBUSB_ERROR_OVERFLOW,
+        LIBUSB_ERROR_TIMEOUT,
+    };
+
+    const STATUS: [u8; 6] = [0x0F, 0x04, 0x00, 0x01, 0x43, 0x20];
+    const DISCONNECTED: [u8; 6] = [0x05, 0x04, 0x00, 0x00, 0x08, 0x13];
+
+    fn framed_event(bytes: &[u8]) -> Vec<u8> {
+        let mut h4 = vec![HCI_EVENT_PACKET];
+        h4.extend_from_slice(bytes);
+        h4
+    }
+
+    #[test]
+    fn interrupt_timeout_preserves_received_bytes() {
+        assert_eq!(interrupt_read_result(LIBUSB_ERROR_TIMEOUT, 33, 260).unwrap(), 33);
+        assert_eq!(interrupt_read_result(LIBUSB_ERROR_TIMEOUT, 0, 260).unwrap(), 0);
+        assert_eq!(interrupt_read_result(LIBUSB_ERROR_INTERRUPTED, 7, 260).unwrap(), 7);
+        assert_eq!(interrupt_read_result(0, 6, 260).unwrap(), 6);
+    }
+
+    #[test]
+    fn interrupt_hard_errors_and_invalid_lengths_are_not_consumed() {
+        assert!(interrupt_read_result(LIBUSB_ERROR_NO_DEVICE, 6, 260).is_err());
+        assert!(interrupt_read_result(LIBUSB_ERROR_OVERFLOW, 260, 260).is_err());
+        assert!(interrupt_read_result(0, -1, 260).is_err());
+        assert!(interrupt_read_result(LIBUSB_ERROR_TIMEOUT, 261, 260).is_err());
+    }
+
+    #[test]
+    fn event_header_byte_after_complete_frame_is_retained() {
+        let mut framer = UsbHciReassembler::event();
+        let mut pending = VecDeque::new();
+        let mut first_read = STATUS.to_vec();
+        first_read.push(DISCONNECTED[0]);
+        framer.feed(&first_read, &mut pending).unwrap();
+        assert_eq!(pending.pop_front().unwrap().to_bytes(), framed_event(&STATUS));
+        assert_eq!(framer.buffer, [DISCONNECTED[0]]);
+        framer.feed(&DISCONNECTED[1..], &mut pending).unwrap();
+        assert_eq!(pending.pop_front().unwrap().to_bytes(), framed_event(&DISCONNECTED));
+        assert!(framer.buffer.is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn event_reassembly_is_independent_of_every_two_chunk_boundary() {
+        let mut stream = STATUS.to_vec();
+        stream.extend_from_slice(&DISCONNECTED);
+        for split in 0..=stream.len() {
+            let mut framer = UsbHciReassembler::event();
+            let mut pending = VecDeque::new();
+            framer.feed(&stream[..split], &mut pending).unwrap();
+            framer.feed(&stream[split..], &mut pending).unwrap();
+            let actual: Vec<_> = pending.into_iter().map(|packet| packet.to_bytes()).collect();
+            assert_eq!(actual, vec![framed_event(&STATUS), framed_event(&DISCONNECTED)]);
+            assert!(framer.buffer.is_empty());
+        }
+    }
+
+    #[test]
+    fn event_reassembly_accepts_one_byte_reads() {
+        let mut framer = UsbHciReassembler::event();
+        let mut pending = VecDeque::new();
+        for byte in STATUS {
+            framer.feed(&[byte], &mut pending).unwrap();
+        }
+        assert_eq!(pending.pop_front().unwrap().to_bytes(), framed_event(&STATUS));
+        assert!(framer.buffer.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_trace_excludes_acl_vendor_and_key_responses() {
+        assert!(is_acl_lifecycle_event(&framed_event(&STATUS)));
+        assert!(is_acl_lifecycle_event(&framed_event(&DISCONNECTED)));
+        assert!(!is_acl_lifecycle_event(&[0x02, 0x00, 0x20, 0x01, 0x00, 0x08]));
+        assert!(!is_acl_lifecycle_event(&[0x04, 0xFF, 0x01, 0x00]));
+        assert!(!is_acl_lifecycle_event(&[0x04, 0x0E, 0x04, 0x01, 0x15, 0xFC, 0x00]));
+        assert!(!is_acl_lifecycle_event(&[0x04, 0x3E, 0x01, 0x0D]));
+        assert!(!is_acl_lifecycle_event(&[]));
+    }
 }
