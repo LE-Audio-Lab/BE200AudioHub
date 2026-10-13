@@ -54,6 +54,47 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N4.1: generated carrier ContentTemplate override
+
+N4 HIL proved that inserting the already-existing Bluetooth
+`QuickActionViewModel` into `RootGridView.ItemsSource` at index 2 is structurally
+safe: Windows generated a second native Quick Settings container, paginated and
+laid it out correctly, and Control Center remained responsive.
+
+N4.1 keeps that data-source carrier but overrides **only the generated index-2
+GridViewItem's `ContentTemplate`**. The backing Bluetooth VM is not modified, so
+the original Bluetooth tile remains native and unchanged.
+
+The custom DataTemplate contains one full-width 48 px button plus the
+`断开 B3P` label. The button has
+`AutomationId=BE200.QuickAction.DisconnectB3P`. When its visual is realized, the
+TAP wires the existing Rust UI-only RoutedEventHandler. Clicking it only logs:
+
+```text
+[CLICK] disconnect_b3p (UI ONLY; no backend)
+```
+
+The default mode and `--duplicate-native-vm` remain available. N4.1 is explicit:
+
+```powershell
+.\target-qs\debug\be200hub.exe ui quick-settings inject `
+  --tap ".\target-qs\debug\be200_qs_tap.dll" `
+  --custom-tile
+```
+
+Expected markers:
+
+```text
+[N4] DATASOURCE INSERT OK ... count_before=11 count_after=12
+[N4.1] realized index-2 carrier candidate ...
+[N4.1] CARRIER TEMPLATE OK ...
+[N4.1] custom template button realized ...
+[N4.1] custom Button.Click registered ... (UI ONLY)
+```
+
+This still does not call WinUSB, HCI, BAP, CIS, Bluetooth APIs, or the AudioHub
+backend.
+
 ## N4: data-source insertion carrier proof
 
 N3.2 proved the Bluetooth VM at visual/data-source index 1, but also proved that
