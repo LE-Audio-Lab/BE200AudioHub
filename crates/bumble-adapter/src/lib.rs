@@ -12,6 +12,7 @@ mod connection_manager;
 mod csis;
 mod init;
 mod pairing;
+mod primary_commit;
 mod scan;
 mod set_member_verifier;
 mod usb_fixed;
@@ -29,6 +30,7 @@ pub use init::{
     initialize_existing_operational, AttachReport, AttachedController,
 };
 pub use pairing::{BondResumeReport, PairPersistReport};
+pub use primary_commit::commit_primary_bond;
 pub use scan::{ScanObservation, ScanSummary};
 pub use set_member_verifier::{require_verified, SetMemberVerification};
 
