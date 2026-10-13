@@ -15,7 +15,7 @@ use bumble_profiles::ascs::{
 use bumble_profiles::bap::CodecSpecificConfiguration;
 use bumble_transport::Error;
 
-use crate::ase_read::read_ase_checked;
+use crate::ase_read::{parse_ase_status_compat, read_ase_checked};
 use crate::codec_plan::{CodecConfigurationPlan, PlannedSink, StereoSide};
 
 const GATT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -155,9 +155,19 @@ fn observe_events(
         let is_our_handle = event.attribute_handle == prepared.proxy.ase_control_point.handle
             || event.attribute_handle == prepared.sink.ase_value_handle;
         if is_our_handle {
-            let parsed = prepared.proxy
-                .event_from_notification(event.attribute_handle, &event.value)
-                .map_err(|error| format!("invalid ASCS notification: {error}"))?;
+            // Keep upstream Control Point parsing strict. Only the selected
+            // ASE status notification may use the observed Idle compatibility
+            // gate; this is the same parser used for GATT readbacks.
+            let parsed = if event.attribute_handle == prepared.sink.ase_value_handle {
+                AseEvent::Status(
+                    parse_ase_status_compat(&event.value)
+                        .map_err(|error| format!("invalid selected ASE notification: {error}"))?,
+                )
+            } else {
+                prepared.proxy
+                    .event_from_notification(event.attribute_handle, &event.value)
+                    .map_err(|error| format!("invalid ASCS Control Point notification: {error}"))?
+            };
             gate.accept(parsed)?;
         } else if !prepared.proxy.sink_ase.iter()
             .chain(prepared.proxy.source_ase.iter())
