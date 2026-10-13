@@ -54,6 +54,47 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N4: data-source insertion carrier proof
+
+N3.2 proved the Bluetooth VM at visual/data-source index 1, but also proved that
+`ControlCenter.QuickActionViewModel` has no normal activation factory
+(`0x80040154`) and is not resolvable through public WinRT metadata
+(`RO_E_METADATA_NAME_NOT_FOUND`). Generic `ICustomPropertyProvider` probing is
+read-only and does not expose a useful writable construction surface.
+
+Before reverse-engineering the private VM ABI, N4 tests the more important
+structural question: **can Windows safely regenerate a Quick Settings container
+when the ItemsSource itself changes?**
+
+The default `inject` command remains read-only. The explicit experimental mode:
+
+```powershell
+.\target-qs\debug\be200hub.exe ui quick-settings inject `
+  --tap ".\target-qs\debug\be200_qs_tap.dll" `
+  --duplicate-native-vm
+```
+
+passes `duplicate-native-vm` through XAML Diagnostics initialization data. After
+the Bluetooth VM is visually proven by
+`AutomationId=Microsoft.QuickAction.Bluetooth`, the TAP posts a second UI-loop
+message and calls `IVisualTreeService::AddChild` on the **ItemsSource collection
+handle**, inserting the already-existing Bluetooth VM at index 2.
+
+This intentionally produces a second native Bluetooth-backed item. It is only a
+carrier/generator proof: **do not click the duplicate**. No B3P/backend command is
+wired. Killing `ShellHost.exe` removes the in-memory duplicate.
+
+Success marker:
+
+```text
+[N4] DATASOURCE INSERT OK ... count_before=11 count_after=12
+```
+
+If the panel remains responsive and Windows creates the second container, the
+next stage can use the generated container as a safe carrier and modify only
+that container's presentation, instead of ever editing `ItemsWrapGrid.Children`
+again.
+
 ## N3.2: VM ABI + visual identity probe
 
 The N3.1 HIL run resolved `RootGridView.ItemsSource` through
