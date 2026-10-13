@@ -11,13 +11,15 @@ mod ase_read;
 mod snapshot;
 
 pub use codec_config::{
-    configure_and_release, CodecConfigScope, CodecConfiguredMember, CodecConfiguredSetSnapshot,
+    configure_and_release, configure_qos_and_release,
+    CodecConfigScope, CodecConfiguredMember, CodecConfiguredSetSnapshot,
+    QosConfiguredMember, QosConfiguredSetSnapshot,
 };
 pub use codec_plan::{
     plan_first_sound, plan_stereo_lc3, CodecConfigurationPlan, PlannedSink, StereoSide,
 };
 pub use qos_plan::{
-    plan_first_sound_qos, PlannedQosMember, StereoQosPlan,
+    plan_first_sound_qos, plan_live_codec_configured_qos, PlannedQosMember, StereoQosPlan,
     FIRST_SOUND_CIG_ID, LEFT_CIS_ID, RIGHT_CIS_ID,
 };
 pub use discovery::discover_audio_member;
