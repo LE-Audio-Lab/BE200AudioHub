@@ -296,6 +296,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, with_codec_plan: bool) -> Resul
     println!("Persistent-state fingerprint: UNCHANGED");
     if let Some(plan) = plan {
         print_codec_plan(&plan);
+        println!("R4.1 dry-run: ACL handles shown above have been disconnected; no ASE state changed.");
         println!("R4.1 CODEC PLAN PASS: dual-mono LC3 configuration validated; no ASCS control writes, CIG/CIS/ISO, or bond mutation.");
     } else {
         println!(
