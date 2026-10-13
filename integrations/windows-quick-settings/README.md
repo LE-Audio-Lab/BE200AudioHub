@@ -54,6 +54,41 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N2.2: rebuild when ShellHost locks the old TAP DLL
+
+Once Windows has loaded `be200_qs_tap.dll`, Cargo cannot overwrite that
+DLL in `target\\debug`; Windows returns `os error 5` (access denied).
+This does **not** mean the new Rust code failed to compile.
+
+The recommended development loop avoids the occupied output path:
+
+```powershell
+# In the isolated BE200QuickSettings worktree
+git pull --ff-only
+cargo test -p be200-quick-settings-tap
+cargo build -p be200-quick-settings-tap --target-dir target-qs-n22
+```
+
+The new DLL is `target-qs-n22\\debug\\be200_qs_tap.dll`.
+The unchanged launcher can point directly to it:
+
+```powershell
+# Save work; sign out and back in first to exit the OLD ShellHost session.
+# Then open Win+A and inject only once:
+.\\target\\debug\\be200hub.exe ui quick-settings inject --tap ".\\target-qs-n22\\debug\\be200_qs_tap.dll"
+```
+
+Use a fresh target directory for later iterations while an older DLL is
+loaded. **Do not inject again in the same old ShellHost process**: the
+existing TAP is process-lifetime pinned. Restarting Explorer alone does
+not guarantee the ShellHost DLL is unloaded.
+
+N2.1 regression fix: `is_quick_settings_wrap` previously rejected a
+complete `RootGridView -> TogglesGroup` chain if an even higher ancestor
+had not arrived. Now missing outer ancestors do not invalidate anchors
+already confirmed along the same parent chain. The updated test also
+ensures a missing `TogglesGroup` is rejected.
+
 ## Unload and limitations
 
 This N2 experimental build is deliberately process-lifetime pinned; there is **no clean detach or reinstall command** yet. To remove the test tile, restart the `ShellHost.exe` process or sign out and back in; it will not reinject automatically. `DllCanUnloadNow` returns S_FALSE. Do not leave this experiment enabled for daily use until lifecycle handling is implemented.
