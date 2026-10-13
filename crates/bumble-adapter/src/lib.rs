@@ -6,6 +6,7 @@
 
 mod bond;
 mod connect;
+mod connection_manager;
 mod csis;
 mod init;
 mod pairing;
@@ -16,6 +17,7 @@ pub use bond::{
     BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
 };
 pub use connect::LeAclReport;
+pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
 pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
