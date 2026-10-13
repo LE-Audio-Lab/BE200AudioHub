@@ -1,6 +1,16 @@
 //! Product BAP Unicast Client coordinator.
 //!
-//! Protocol primitives come from Bumble-RS. This crate owns orchestration only.
+//! Protocol primitives come from Bumble-RS. This crate owns orchestration and
+//! normalized product snapshots only.
+
+mod discovery;
+mod snapshot;
+
+pub use discovery::discover_audio_member;
+pub use snapshot::{
+    AseSnapshot, AscsSnapshot, AudioMemberSnapshot, AudioSetSnapshot, CapSnapshot,
+    ConnectedAudioMember, GattServiceRange, PacsSnapshot,
+};
 
 use device_policy::StreamPlan;
 
@@ -24,8 +34,6 @@ pub struct SessionSnapshot {
     pub plan: Option<StreamPlan>,
 }
 
-/// Hardware actions are deliberately not wired in this bootstrap commit.
-/// See docs/R2_PSEUDOCODE.md and docs/UPSTREAM_REUSE_MAP.md.
 pub struct BapCoordinator {
     snapshot: SessionSnapshot,
 }
