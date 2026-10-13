@@ -69,7 +69,58 @@ fn run_operational(action: impl FnOnce() -> Result<()>) -> Result<()> {
     action()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum R4Invocation<'a> {
+    CodecPlan { seconds: u16, name: &'a str },
+    ConfigCodec {
+        seconds: u16,
+        name: &'a str,
+        scope: bap_client::CodecConfigScope,
+    },
+}
+
+/// Pure parser used before the hardware bootstrap. Regression-tested so a
+/// help-listed command cannot silently fall through to Usage again.
+fn parse_r4_invocation(args: &[String]) -> Result<Option<R4Invocation<'_>>> {
+    match args {
+        [a, b, seconds_flag, seconds, name_flag, name]
+            if a == "r4"
+                && b == "codec-plan"
+                && seconds_flag == "--seconds"
+                && name_flag == "--name" =>
+        {
+            Ok(Some(R4Invocation::CodecPlan {
+                seconds: audio_set::parse_seconds(seconds)?,
+                name: name.as_str(),
+            }))
+        }
+        [a, b, seconds_flag, seconds, name_flag, name, side_flag, side, confirm]
+            if a == "r4"
+                && b == "config-codec"
+                && seconds_flag == "--seconds"
+                && name_flag == "--name"
+                && side_flag == "--side"
+                && confirm == "--confirm-ascs-write" =>
+        {
+            Ok(Some(R4Invocation::ConfigCodec {
+                seconds: audio_set::parse_seconds(seconds)?,
+                name: name.as_str(),
+                scope: audio_set::parse_config_scope(side)?,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn run(args: &[String]) -> Result<()> {
+    if let Some(invocation) = parse_r4_invocation(args)? {
+        return match invocation {
+            R4Invocation::CodecPlan { seconds, name } =>
+                run_operational(|| audio_set::codec_plan(seconds, name)),
+            R4Invocation::ConfigCodec { seconds, name, scope } =>
+                run_operational(|| audio_set::config_codec(seconds, name, scope)),
+        };
+    }
     match args {
         [x] if x == "help" || x == "--help" || x == "-h" => {
             println!("{}", usage());
@@ -168,28 +219,6 @@ fn run(args: &[String]) -> Result<()> {
             run_operational(|| audio_set::inspect(seconds, name))
         }
 
-        [a, b, seconds_flag, seconds, name_flag, name]
-            if a == "r4"
-                && b == "codec-plan"
-                && seconds_flag == "--seconds"
-                && name_flag == "--name" =>
-        {
-            let seconds = audio_set::parse_seconds(seconds)?;
-            run_operational(|| audio_set::codec_plan(seconds, name))
-        }
-
-        [a, b, seconds_flag, seconds, name_flag, name, side_flag, side, confirm]
-            if a == "r4"
-                && b == "config-codec"
-                && seconds_flag == "--seconds"
-                && name_flag == "--name"
-                && side_flag == "--side"
-                && confirm == "--confirm-ascs-write" =>
-        {
-            let seconds = audio_set::parse_seconds(seconds)?;
-            let scope = audio_set::parse_config_scope(side)?;
-            run_operational(|| audio_set::config_codec(seconds, name, scope))
-        }
 
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
             firmware::inspect(sfi, None)
@@ -259,5 +288,55 @@ fn main() {
     if let Some(logger) = logger.as_ref() {
         logger.flush();
         log::debug!("Log file: {}", logger.path().display());
+    }
+}
+
+#[cfg(test)]
+mod r4_cli_tests {
+    use super::*;
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn codec_plan_six_tokens_resolve_without_bootstrapping() {
+        let args = args(&[
+            "r4", "codec-plan", "--seconds", "8",
+            "--name", "Galaxy Buds3 Pro (2F23)"
+        ]);
+        assert_eq!(parse_r4_invocation(&args).unwrap(),
+            Some(R4Invocation::CodecPlan {
+                seconds: 8, name: "Galaxy Buds3 Pro (2F23)"
+            }));
+    }
+
+    #[test]
+    fn config_codec_nine_tokens_require_explicit_confirmation() {
+        let mut args = args(&[
+            "r4", "config-codec", "--seconds", "8",
+            "--name", "Galaxy Buds3 Pro (2F23)",
+            "--side", "both", "--confirm-ascs-write"
+        ]);
+        assert_eq!(parse_r4_invocation(&args).unwrap(),
+            Some(R4Invocation::ConfigCodec {
+                seconds: 8, name: "Galaxy Buds3 Pro (2F23)",
+                scope: bap_client::CodecConfigScope::Both
+            }));
+        args.pop();
+        assert_eq!(parse_r4_invocation(&args).unwrap(), None);
+    }
+
+    #[test]
+    fn bad_side_and_bad_seconds_are_rejected_before_hardware_access() {
+        let mut args = args(&[
+            "r4", "config-codec", "--seconds", "8",
+            "--name", "Galaxy Buds3 Pro (2F23)",
+            "--side", "none", "--confirm-ascs-write"
+        ]);
+        assert!(parse_r4_invocation(&args).is_err());
+        args[7] = "left".to_owned();
+        args[3] = "0".to_owned();
+        assert!(parse_r4_invocation(&args).is_err());
     }
 }
