@@ -1,5 +1,6 @@
 #[macro_use]
 mod console_ascii;
+mod audio_set;
 mod ble_scan;
 mod boot;
 mod controller_bootstrap;
@@ -34,6 +35,7 @@ fn usage() -> &'static str {
        be200hub r2 pair reset --confirm\n\
        be200hub r2 pair onboard --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 pair verify --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r3 audio-set inspect --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -43,8 +45,9 @@ fn usage() -> &'static str {
        be200hub driver backup [--out DIRECTORY]\n\
        be200hub help\n\
      BE200 default target: 8087:0036\n\
-     R2 bootstrap: Operational is reused; Bootloader is initialized once from .\\firmware.\n\
+     R2/R3 bootstrap: Operational is reused; Bootloader is initialized once from .\\firmware.\n\
      Pairing route: discover -> FAL ACL -> provisional SMP -> CSIS gate -> atomic commit.\n\
+     R3 route: one scan -> dual bonded ACL -> PACS/ASCS/CAS read-only discovery.\n\
      Logging: %LOCALAPPDATA%\\BE200AudioHub\\logs\\be200hub.log; BE200_LOG=debug"
 }
 
@@ -59,7 +62,7 @@ fn doctor() -> Result<()> {
     usb::list(true)
 }
 
-fn run_r2(action: impl FnOnce() -> Result<()>) -> Result<()> {
+fn run_operational(action: impl FnOnce() -> Result<()>) -> Result<()> {
     controller_bootstrap::ensure_operational()?;
     action()
 }
@@ -105,11 +108,11 @@ fn run(args: &[String]) -> Result<()> {
         }
 
         [a, b] if a == "r2" && b == "attach-probe" => {
-            run_r2(r2_attach::probe)
+            run_operational(r2_attach::probe)
         }
         [a, b, c, seconds] if a == "r2" && b == "scan" && c == "--seconds" => {
             let seconds = r2_attach::parse_scan_seconds(seconds)?;
-            run_r2(|| r2_attach::scan(seconds, false))
+            run_operational(|| r2_attach::scan(seconds, false))
         }
         [a, b, c, seconds, flag]
             if a == "r2"
@@ -118,18 +121,18 @@ fn run(args: &[String]) -> Result<()> {
                 && flag == "--show-addresses" =>
         {
             let seconds = r2_attach::parse_scan_seconds(seconds)?;
-            run_r2(|| r2_attach::scan(seconds, true))
+            run_operational(|| r2_attach::scan(seconds, true))
         }
         [a, b, c, seconds]
             if a == "r2" && b == "scan-forensics" && c == "--seconds" =>
         {
             let seconds = r2_attach::parse_scan_seconds(seconds)?;
-            run_r2(|| r2_attach::scan_forensics(seconds))
+            run_operational(|| r2_attach::scan_forensics(seconds))
         }
         [a, b, c, flag]
             if a == "r2" && b == "pair" && c == "reset" && flag == "--confirm" =>
         {
-            run_r2(|| pairing::archive_reset(true))
+            run_operational(|| pairing::archive_reset(true))
         }
         [a, b, c, d, seconds, e, name]
             if a == "r2"
@@ -139,7 +142,7 @@ fn run(args: &[String]) -> Result<()> {
                 && e == "--name" =>
         {
             let seconds = pairing::parse_onboard_seconds(seconds)?;
-            run_r2(|| pairing::onboard(seconds, name))
+            run_operational(|| pairing::onboard(seconds, name))
         }
         [a, b, c, d, seconds, e, name]
             if a == "r2"
@@ -149,7 +152,18 @@ fn run(args: &[String]) -> Result<()> {
                 && e == "--name" =>
         {
             let seconds = pairing::parse_verify_seconds(seconds)?;
-            run_r2(|| pairing::verify(seconds, name))
+            run_operational(|| pairing::verify(seconds, name))
+        }
+
+        [a, b, c, d, seconds, e, name]
+            if a == "r3"
+                && b == "audio-set"
+                && c == "inspect"
+                && d == "--seconds"
+                && e == "--name" =>
+        {
+            let seconds = audio_set::parse_seconds(seconds)?;
+            run_operational(|| audio_set::inspect(seconds, name))
         }
 
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
