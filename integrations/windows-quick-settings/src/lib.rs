@@ -1016,6 +1016,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<ParentChildRelation>(), 24);
         assert_eq!(std::mem::size_of::<SourceInfo>(), 32);
         assert_eq!(std::mem::size_of::<VisualElement>(), 64);
+        assert_eq!(std::mem::size_of::<CollectionElementValue>(), 32);
+        assert_eq!(std::mem::size_of::<PropertyChainSource>(), 64);
+        assert_eq!(std::mem::size_of::<PropertyChainValue>(), 80);
     }
 
     #[test]
