@@ -5,4 +5,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
+bumble-adapter = { path = "../bumble-adapter" }
+bumble-gatt = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-profiles = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
+bumble-transport = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 device-policy = { path = "../device-policy" }
