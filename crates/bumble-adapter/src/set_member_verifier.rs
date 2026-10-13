@@ -1,22 +1,13 @@
 use std::time::Duration;
 
-use bumble_transport::{Error, Result as TransportResult};
+use bumble_transport::Result as TransportResult;
 
 use crate::{AttachedController, CsisMemberReport, ProvisionalBond};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SetMemberVerification {
     Verified(CsisMemberReport),
-    Rejected {
-        report: CsisMemberReport,
-        reason: String,
-    },
-}
-
-impl SetMemberVerification {
-    pub fn is_verified(&self) -> bool {
-        matches!(self, Self::Verified(_))
-    }
+    Rejected { reason: String },
 }
 
 impl AttachedController {
@@ -55,7 +46,7 @@ impl AttachedController {
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "?".into())
             ),
-            SetMemberVerification::Rejected { reason, .. } => println!(
+            SetMemberVerification::Rejected { reason } => println!(
                 "[R2/SET-VERIFY] REJECT: identity={} reason={}",
                 provisional.identity_address(),
                 reason
@@ -72,7 +63,6 @@ fn evaluate_set_member(
 ) -> SetMemberVerification {
     if report.sirk != expected_sirk {
         return SetMemberVerification::Rejected {
-            report,
             reason: "peer SIRK does not match the expected coordinated set".into(),
         };
     }
@@ -80,7 +70,6 @@ fn evaluate_set_member(
     if let (Some(expected), Some(actual)) = (expected_set_size, report.set_size) {
         if expected != actual {
             return SetMemberVerification::Rejected {
-                report,
                 reason: format!(
                     "peer Set Size {actual} does not match expected Set Size {expected}"
                 ),
@@ -90,21 +79,11 @@ fn evaluate_set_member(
 
     if report.rank == Some(0) {
         return SetMemberVerification::Rejected {
-            report,
             reason: "peer returned invalid CSIS rank 0".into(),
         };
     }
 
     SetMemberVerification::Verified(report)
-}
-
-pub fn require_verified(
-    verification: SetMemberVerification,
-) -> TransportResult<CsisMemberReport> {
-    match verification {
-        SetMemberVerification::Verified(report) => Ok(report),
-        SetMemberVerification::Rejected { reason, .. } => Err(Error::Remote(reason)),
-    }
 }
 
 #[cfg(test)]

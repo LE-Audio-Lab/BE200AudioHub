@@ -35,8 +35,7 @@ pub use init::{
 };
 pub use scan::{ScanObservation, ScanSummary};
 pub use security::{LeBondManager, ProvisionalBond};
-pub use set_member_verifier::{require_verified, SetMemberVerification};
-pub use stored_security::BondResumeReport;
+pub use set_member_verifier::SetMemberVerification;
 
 pub const UPSTREAM_REVISION: &str =
     "bbac2a6803b8cab0920ab725a23aa408fc4fed85";

@@ -7,13 +7,6 @@ use crate::{AttachedController, BondStore};
 
 const WAIT_SLICE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BondResumeReport {
-    pub identity_address: String,
-    pub connection_handle: u16,
-    pub encrypted: bool,
-}
-
 impl AttachedController {
     /// Restore encryption on an established ACL using the persisted peer LTK.
     /// No SMP Pairing Request is sent and no persistent state is modified.
@@ -23,13 +16,9 @@ impl AttachedController {
         identity_address: &str,
         store: &BondStore,
         timeout: Duration,
-    ) -> TransportResult<BondResumeReport> {
+    ) -> TransportResult<()> {
         if self.device.is_encrypted_on_handle(connection_handle) {
-            return Ok(BondResumeReport {
-                identity_address: identity_address.to_owned(),
-                connection_handle,
-                encrypted: true,
-            });
+            return Ok(());
         }
 
         let keys = store
@@ -85,11 +74,7 @@ impl AttachedController {
                     "[R2/SECURITY] stored-LTK encryption confirmed: handle=0x{:04X}",
                     connection_handle
                 );
-                return Ok(BondResumeReport {
-                    identity_address: identity_address.to_owned(),
-                    connection_handle,
-                    encrypted: true,
-                });
+                return Ok(());
             }
             if !self.device.is_connected_on_handle(connection_handle) {
                 return Err(Error::Remote(format!(
