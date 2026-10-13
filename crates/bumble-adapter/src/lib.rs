@@ -5,17 +5,20 @@
 //! BE200AudioHub domain types.
 
 mod bond;
+mod bond_manager;
 mod connect;
 mod connection_manager;
 mod csis;
 mod init;
 mod pairing;
 mod scan;
+mod set_member_verifier;
 mod usb_fixed;
 
 pub use bond::{
     BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
 };
+pub use bond_manager::{LeBondManager, ProvisionalBond};
 pub use connect::LeAclReport;
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
@@ -25,6 +28,7 @@ pub use init::{
 };
 pub use pairing::{BondResumeReport, PairPersistReport};
 pub use scan::{ScanObservation, ScanSummary};
+pub use set_member_verifier::{require_verified, SetMemberVerification};
 
 pub const UPSTREAM_REVISION: &str =
     "bbac2a6803b8cab0920ab725a23aa408fc4fed85";
