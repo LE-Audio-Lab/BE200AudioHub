@@ -640,7 +640,7 @@ unsafe fn dump_vm_properties(service:*mut c_void,index:u32,handle:u64)->Result<i
             if lower.contains("qa_bluetooth"){bluetooth_score+=50;}
             if lower.contains("bluetooth"){bluetooth_score+=10;}
             let ro=if p.metadata_bits & META_IS_PROPERTY_READ_ONLY !=0 {"RO"} else {"RW?"};
-            let handle_flag=if p.metadata_bits & META_IS_VALUE_HANDLE !=0 {"H"} else {"-"};
+            let handle_flag=if metadata_has_value_handle(p.metadata_bits) {"H"} else {"-"};
             let coll=if p.metadata_bits & META_IS_VALUE_COLLECTION !=0 {"C"} else {"-"};
             vm_log(&format!("  prop idx={} name={:?} value={:?} value_type={:?} declaring={:?} meta=0x{:x} [{ro} {handle_flag}{coll}]",
                 p.index,name,value,value_type,declaring,p.metadata_bits));
@@ -752,8 +752,13 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
                 vm_log(&format!("  runtime_class={:?} iids=[{}]",class_name,
                     iids.iter().map(guid_text).collect::<Vec<_>>().join(",")));
             }
-            let score=dump_vm_properties(service,e.index,handle).unwrap_or(0);
-            if best.map_or(true,|(_,_,old)|score>old){best=Some((e.index,handle,score));}
+            let collection_text=format!("{value_type}\n{value}").to_ascii_lowercase();
+            let mut score=0i32;
+            if collection_text.contains("microsoft.quickaction.bluetooth"){score+=100;}
+            if collection_text.contains("qa_bluetooth"){score+=50;}
+            if collection_text.contains("bluetooth"){score+=10;}
+            score+=dump_vm_properties(service,e.index,handle).unwrap_or(0);
+            if score>0 && best.map_or(true,|(_,_,old)|score>old){best=Some((e.index,handle,score));}
         }
     }
     for e in std::slice::from_raw_parts_mut(elements,requested as usize) {
@@ -765,7 +770,7 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     if let Some((index,handle,score))=best {
         log(&format!("[N3] VM snapshot complete; best Bluetooth candidate item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
     } else {
-        log("[N3] VM snapshot complete but no handle-backed item parsed. See qs-vm-dump.log");
+        log("[N3] VM snapshot complete; handles were inspected but no positive Bluetooth identity match was found. See qs-vm-dump.log");
     }
     Ok(())
 }
