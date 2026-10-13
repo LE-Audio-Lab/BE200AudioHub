@@ -105,6 +105,11 @@ impl ResponseGate {
                             ))
                         || (self.expected_state == AseState::ENABLING
                             && status.state == AseState::QOS_CONFIGURED)
+                        || (self.expected_state == AseState::QOS_CONFIGURED
+                            && matches!(
+                                status.state,
+                                AseState::ENABLING | AseState::STREAMING | AseState::DISABLING
+                            ))
                     {
                         // A pre-command snapshot or a delayed notification from
                         // the prior state is not proof of this command's success.
@@ -828,6 +833,17 @@ mod tests {
         gate.accept(state(AseState::CODEC_CONFIGURED)).unwrap();
         assert!(!gate.complete());
         gate.accept(response(AseOpcode::ConfigQos, AseResponseCode::SUCCESS)).unwrap();
+        assert!(!gate.complete());
+        gate.accept(state(AseState::QOS_CONFIGURED)).unwrap();
+        assert!(gate.complete());
+    }
+
+    #[test]
+    fn disable_gate_accepts_delayed_enabling_and_streaming_snapshots() {
+        let mut gate = ResponseGate::new(AseOpcode::Disable, 1, AseState::QOS_CONFIGURED);
+        gate.accept(state(AseState::ENABLING)).unwrap();
+        gate.accept(state(AseState::STREAMING)).unwrap();
+        gate.accept(response(AseOpcode::Disable, AseResponseCode::SUCCESS)).unwrap();
         assert!(!gate.complete());
         gate.accept(state(AseState::QOS_CONFIGURED)).unwrap();
         assert!(gate.complete());
