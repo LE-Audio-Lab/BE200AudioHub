@@ -6,7 +6,7 @@
 
 mod bond;
 mod bond_commit;
-mod bond_manager_v2;
+mod bond_manager_v3;
 mod connect;
 mod connection_manager;
 mod csis;
@@ -21,7 +21,7 @@ pub use bond::{
     BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity,
 };
 pub use bond_commit::{commit_verified_set_member, CommittedBondReport};
-pub use bond_manager_v2::{LeBondManager, ProvisionalBond};
+pub use bond_manager_v3::{LeBondManager, ProvisionalBond};
 pub use connect::LeAclReport;
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
