@@ -248,6 +248,31 @@ pub fn plan_first_sound_qos(
     confirmed: &CodecConfiguredSetSnapshot,
     controller: IsoControllerCapabilities,
 ) -> Result<StereoQosPlan, String> {
+    if !confirmed.all_released_to_idle {
+        return Err("R5.1 offline plan requires two Codec Configured results released to Idle".into());
+    }
+    plan_qos_common(codec, confirmed, controller)
+}
+
+/// R5.2-A uses the same pure planner while the two ASEs are still
+/// Codec Configured. A released R5.1 snapshot cannot be used to claim that
+/// live ASE sessions remain configured.
+pub fn plan_live_codec_configured_qos(
+    codec: &CodecConfigurationPlan,
+    confirmed: &CodecConfiguredSetSnapshot,
+    controller: IsoControllerCapabilities,
+) -> Result<StereoQosPlan, String> {
+    if confirmed.all_released_to_idle {
+        return Err("R5.2-A requires live, not-yet-released Codec Configured ASEs".into());
+    }
+    plan_qos_common(codec, confirmed, controller)
+}
+
+fn plan_qos_common(
+    codec: &CodecConfigurationPlan,
+    confirmed: &CodecConfiguredSetSnapshot,
+    controller: IsoControllerCapabilities,
+) -> Result<StereoQosPlan, String> {
     if codec.stream.topology != StreamTopology::StereoDualMonoAse
         || codec.left.side != StereoSide::Left
         || codec.right.side != StereoSide::Right
@@ -259,8 +284,8 @@ pub fn plan_first_sound_qos(
     {
         return Err("R5.1 requires two distinct bonded members and ACL handles".into());
     }
-    if !confirmed.all_released_to_idle || confirmed.members.len() != 2 {
-        return Err("R5.1 requires two confirmed, released Codec Configured results".into());
+    if confirmed.members.len() != 2 {
+        return Err("QoS plan requires two confirmed Codec Configured results".into());
     }
 
     let left = confirmed.members.iter()
@@ -482,6 +507,17 @@ mod tests {
         let (codec, mut confirmed) = fixture();
         confirmed.all_released_to_idle = false;
         assert!(plan_first_sound_qos(&codec, &confirmed, capabilities()).is_err());
+    }
+
+    #[test]
+    fn live_planner_requires_unreleased_codec_sessions() {
+        let (codec, mut configured) = fixture();
+        assert!(plan_live_codec_configured_qos(&codec, &configured, capabilities()).is_err());
+        configured.all_released_to_idle = false;
+        let live = plan_live_codec_configured_qos(&codec, &configured, capabilities()).unwrap();
+        assert_eq!(live.left.ascs.cis_id, LEFT_CIS_ID);
+        assert_eq!(live.right.ascs.cis_id, RIGHT_CIS_ID);
+        assert!(plan_first_sound_qos(&codec, &configured, capabilities()).is_err());
     }
 
     #[test]
