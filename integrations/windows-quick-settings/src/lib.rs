@@ -55,7 +55,7 @@ const IID_ROUTED_EVENT_HANDLER: Guid = Guid { d1:0xa856e674,d2:0xb0b6,d3:0x4bc3,
 
 type Hwnd = *mut c_void;
 type SubclassProc = unsafe extern "system" fn(Hwnd,u32,usize,isize,usize,usize)->isize;
-const WM_BE200_QS_INSERT: u32 = 0x8000 + 0x4B2;
+const WM_BE200_QS_PROBE: u32 = 0x8000 + 0x4B2;
 const QS_SUBCLASS_ID: usize = 0xBE20_0200;
 const EXPECTED_NATIVE_TILES: u32 = 11;
 
@@ -76,9 +76,15 @@ extern "system" {
     fn DefSubclassProc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize)->isize;
 }
 #[link(name="oleaut32")]
-extern "system" { fn SysStringLen(bstr: *const u16) -> u32; }
+extern "system" {
+    fn SysStringLen(bstr: *const u16) -> u32;
+    fn SysFreeString(bstr: *mut u16);
+}
 #[link(name="ole32")]
-extern "system" { fn CoTaskMemAlloc(size: usize) -> *mut c_void; }
+extern "system" {
+    fn CoTaskMemAlloc(size: usize) -> *mut c_void;
+    fn CoTaskMemFree(ptr: *mut c_void);
+}
 #[link(name="runtimeobject")]
 extern "system" {
     fn WindowsCreateString(value: *const u16, length: u32, result: *mut *mut c_void) -> i32;
@@ -245,12 +251,16 @@ static EVENT_VTBL: EventHandlerVtbl = EventHandlerVtbl {
 static SERVICE_PTR: AtomicUsize = AtomicUsize::new(0);
 static DIAGNOSTICS_PTR: AtomicUsize = AtomicUsize::new(0);
 static INSERT_BUSY: AtomicBool = AtomicBool::new(false);
-static INSERT_SCHEDULED: AtomicBool = AtomicBool::new(false);
-static PENDING_HOST: AtomicU64 = AtomicU64::new(0);
+static PROBE_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static PENDING_GRID: AtomicU64 = AtomicU64::new(0);
 static SUBCLASS_HWND: AtomicUsize = AtomicUsize::new(0);
+static PROBED_GRIDS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static INSERTED_HOSTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 fn inserted_hosts() -> &'static Mutex<HashSet<u64>> {
     INSERTED_HOSTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+fn probed_grids() -> &'static Mutex<HashSet<u64>> {
+    PROBED_GRIDS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// Create a complete GridViewItem from UWP XAML inside ShellHost itself.
@@ -414,44 +424,51 @@ fn try_insert_now(host:u64) {
 
 unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize,
                                              _id:usize,_ref_data:usize)->isize {
-    if msg==WM_BE200_QS_INSERT {
-        let host=PENDING_HOST.swap(0,Ordering::AcqRel);
-        if host!=0 {
-            log(&format!("[N2.2] deferred UI-thread insert dispatch host=0x{host:x}"));
-            try_insert_now(host);
+    if msg==WM_BE200_QS_PROBE {
+        let grid=PENDING_GRID.swap(0,Ordering::AcqRel);
+        if grid!=0 {
+            log(&format!("[N3] deferred UI-thread QuickActionViewModel probe grid=0x{grid:x}"));
+            match std::panic::catch_unwind(|| unsafe { probe_quick_action_items(grid) }) {
+                Ok(Ok(())) => {
+                    if let Ok(mut set)=probed_grids().lock(){ set.insert(grid); }
+                }
+                Ok(Err(S_FALSE)) => log("[N3] ItemsSource not fully ready; waiting for later callback"),
+                Ok(Err(hr)) => log(&format!("[N3] VM PROBE FAILED: HRESULT=0x{:08X}",hr as u32)),
+                Err(_) => log("[N3] panic trapped during read-only VM probe"),
+            }
         }
-        INSERT_SCHEDULED.store(false,Ordering::Release);
+        PROBE_SCHEDULED.store(false,Ordering::Release);
         return 0;
     }
     DefSubclassProc(hwnd,msg,wparam,lparam)
 }
 
-fn schedule_insert(host:u64) {
-    if inserted_hosts().lock().map(|set|set.contains(&host)).unwrap_or(true) { return; }
-    if INSERT_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
+fn schedule_vm_probe(grid:u64) {
+    if probed_grids().lock().map(|set|set.contains(&grid)).unwrap_or(true) { return; }
+    if PROBE_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
         return;
     }
     let ok=unsafe {
         let class=wide("ControlCenterWindow");
         let hwnd=FindWindowW(class.as_ptr(),null_mut());
         if hwnd.is_null() {
-            log("[N2.2] ControlCenterWindow not found while scheduling insert");
+            log("[N3] ControlCenterWindow not found while scheduling VM probe");
             false
         } else {
             let window_thread=GetWindowThreadProcessId(hwnd,null_mut());
             let current_thread=GetCurrentThreadId();
             if window_thread!=current_thread {
-                log(&format!("[N2.2] refusing cross-thread subclass: callback_tid={current_thread} window_tid={window_thread}"));
+                log(&format!("[N3] refusing cross-thread subclass: callback_tid={current_thread} window_tid={window_thread}"));
                 false
             } else {
                 let previous=SUBCLASS_HWND.load(Ordering::Acquire);
                 if previous != hwnd as usize {
                     if SetWindowSubclass(hwnd,qs_subclass_proc,QS_SUBCLASS_ID,0)==0 {
-                        log("[N2.2] SetWindowSubclass failed");
+                        log("[N3] SetWindowSubclass failed");
                         false
                     } else {
                         SUBCLASS_HWND.store(hwnd as usize,Ordering::Release);
-                        log(&format!("[N2.2] ControlCenterWindow subclass installed tid={current_thread}"));
+                        log(&format!("[N3] ControlCenterWindow subclass installed tid={current_thread}"));
                         true
                     }
                 } else { true }
@@ -459,20 +476,237 @@ fn schedule_insert(host:u64) {
         }
     };
     if !ok {
-        INSERT_SCHEDULED.store(false,Ordering::Release);
+        PROBE_SCHEDULED.store(false,Ordering::Release);
         return;
     }
-    PENDING_HOST.store(host,Ordering::Release);
+    PENDING_GRID.store(grid,Ordering::Release);
     let hwnd=SUBCLASS_HWND.load(Ordering::Acquire) as Hwnd;
-    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_INSERT,0,0)};
+    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_PROBE,0,0)};
     if posted==0 {
-        PENDING_HOST.store(0,Ordering::Release);
-        INSERT_SCHEDULED.store(false,Ordering::Release);
-        log("[N2.2] PostMessageW(deferred insert) failed");
+        PENDING_GRID.store(0,Ordering::Release);
+        PROBE_SCHEDULED.store(false,Ordering::Release);
+        log("[N3] PostMessageW(VM probe) failed");
     } else {
-        log(&format!("[N2.2] insert queued after current XAML mutation host=0x{host:x}"));
+        log(&format!("[N3] read-only VM probe queued grid=0x{grid:x}"));
     }
 }
+
+#[repr(C)]
+struct CollectionElementValue {
+    index: u32,
+    value_type: *mut u16,
+    value: *mut u16,
+    metadata_bits: i64,
+}
+
+#[repr(C)]
+struct PropertyChainSource {
+    handle: u64,
+    target_type: *mut u16,
+    name: *mut u16,
+    source: i32,
+    source_info: SourceInfo,
+}
+
+#[repr(C)]
+struct PropertyChainValue {
+    index: u32,
+    ty: *mut u16,
+    declaring_type: *mut u16,
+    value_type: *mut u16,
+    item_type: *mut u16,
+    value: *mut u16,
+    overridden: i32,
+    metadata_bits: i64,
+    property_name: *mut u16,
+    property_chain_index: u32,
+}
+
+const META_IS_VALUE_HANDLE: i64 = 0x1;
+const META_IS_PROPERTY_READ_ONLY: i64 = 0x2;
+const META_IS_VALUE_COLLECTION: i64 = 0x4;
+
+fn vm_log(message:&str) {
+    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("BE200AudioHub").join("logs");
+    if create_dir_all(&base).is_ok() {
+        if let Ok(mut file)=OpenOptions::new().create(true).append(true)
+            .open(base.join("qs-vm-dump.log")) {
+            let _=writeln!(file,"[pid={}] {message}",std::process::id());
+        }
+    }
+}
+
+fn parse_instance_handle(value:&str)->Option<u64> {
+    let text=value.trim();
+    if let Some(pos)=text.find("0x") {
+        let digits:String=text[pos+2..].chars().take_while(|c|c.is_ascii_hexdigit()).collect();
+        if !digits.is_empty() { return u64::from_str_radix(&digits,16).ok(); }
+    }
+    let digits:String=text.chars().skip_while(|c|!c.is_ascii_digit())
+        .take_while(|c|c.is_ascii_digit()).collect();
+    if digits.is_empty(){None}else{digits.parse().ok()}
+}
+
+fn guid_text(g:&Guid)->String {
+    format!("{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g.d1,g.d2,g.d3,g.d4[0],g.d4[1],g.d4[2],g.d4[3],g.d4[4],g.d4[5],g.d4[6],g.d4[7])
+}
+
+unsafe fn runtime_class_and_iids(handle:u64)->Result<(String,Vec<Guid>),i32> {
+    let diagnostics=DIAGNOSTICS_PTR.load(Ordering::Acquire) as *mut c_void;
+    if diagnostics.is_null(){return Err(E_FAIL);}
+    let from_handle:unsafe extern "system" fn(*mut c_void,u64,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(diagnostics,6));
+    let mut inspectable=null_mut();
+    let hr=from_handle(diagnostics,handle,&mut inspectable);
+    if hr<0||inspectable.is_null(){return Err(if hr<0{hr}else{E_FAIL});}
+    let inspectable=ComPtr(inspectable);
+
+    let get_class:unsafe extern "system" fn(*mut c_void,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(inspectable.as_raw(),4));
+    let mut raw_name=null_mut();
+    let hr=get_class(inspectable.as_raw(),&mut raw_name);
+    let class_name=if hr>=0 && !raw_name.is_null() {
+        let h=HString(raw_name);
+        let mut len=0u32;
+        let ptr=WindowsGetStringRawBuffer(h.0,&mut len);
+        if ptr.is_null(){String::new()}else{String::from_utf16_lossy(std::slice::from_raw_parts(ptr,len as usize))}
+    } else { String::new() };
+
+    let get_iids:unsafe extern "system" fn(*mut c_void,*mut u32,*mut *mut Guid)->i32=
+        std::mem::transmute(slot(inspectable.as_raw(),3));
+    let mut count=0u32;
+    let mut ptr=null_mut();
+    let hr_iids=get_iids(inspectable.as_raw(),&mut count,&mut ptr);
+    let iids=if hr_iids>=0 && !ptr.is_null() {
+        let out=std::slice::from_raw_parts(ptr,count as usize).to_vec();
+        CoTaskMemFree(ptr.cast());
+        out
+    } else { Vec::new() };
+    Ok((class_name,iids))
+}
+
+unsafe fn free_source_array(ptr:*mut PropertyChainSource,count:u32) {
+    if ptr.is_null(){return;}
+    for item in std::slice::from_raw_parts_mut(ptr,count as usize) {
+        if !item.target_type.is_null(){SysFreeString(item.target_type);}
+        if !item.name.is_null(){SysFreeString(item.name);}
+        if !item.source_info.filename.is_null(){SysFreeString(item.source_info.filename as *mut u16);}
+        if !item.source_info.hash.is_null(){SysFreeString(item.source_info.hash as *mut u16);}
+    }
+    CoTaskMemFree(ptr.cast());
+}
+unsafe fn free_property_array(ptr:*mut PropertyChainValue,count:u32) {
+    if ptr.is_null(){return;}
+    for item in std::slice::from_raw_parts_mut(ptr,count as usize) {
+        for b in [item.ty,item.declaring_type,item.value_type,item.item_type,item.value,item.property_name] {
+            if !b.is_null(){SysFreeString(b);}
+        }
+    }
+    CoTaskMemFree(ptr.cast());
+}
+
+unsafe fn dump_vm_properties(service:*mut c_void,index:u32,handle:u64)->Result<i32,i32> {
+    let get_chain:unsafe extern "system" fn(*mut c_void,u64,*mut u32,*mut *mut PropertyChainSource,
+                                            *mut u32,*mut *mut PropertyChainValue)->i32=
+        std::mem::transmute(slot(service,7));
+    let mut source_count=0u32;
+    let mut sources=null_mut();
+    let mut property_count=0u32;
+    let mut properties=null_mut();
+    let hr=get_chain(service,handle,&mut source_count,&mut sources,&mut property_count,&mut properties);
+    if hr<0 {
+        vm_log(&format!("item[{index}] handle=0x{handle:x} GetPropertyValuesChain FAILED hr=0x{:08X}",hr as u32));
+        return Err(hr);
+    }
+
+    let mut bluetooth_score=0i32;
+    vm_log(&format!("---- item[{index}] handle=0x{handle:x} properties={property_count} ----"));
+    if !properties.is_null() {
+        for p in std::slice::from_raw_parts(properties,property_count as usize) {
+            let name=bstr_string(p.property_name);
+            let value=bstr_string(p.value);
+            let value_type=bstr_string(p.value_type);
+            let declaring=bstr_string(p.declaring_type);
+            let lower=format!("{name}\n{value}\n{value_type}\n{declaring}").to_ascii_lowercase();
+            if lower.contains("microsoft.quickaction.bluetooth"){bluetooth_score+=100;}
+            if lower.contains("qa_bluetooth"){bluetooth_score+=50;}
+            if lower.contains("bluetooth"){bluetooth_score+=10;}
+            let ro=if p.metadata_bits & META_IS_PROPERTY_READ_ONLY !=0 {"RO"} else {"RW?"};
+            let handle_flag=if p.metadata_bits & META_IS_VALUE_HANDLE !=0 {"H"} else {"-"};
+            let coll=if p.metadata_bits & META_IS_VALUE_COLLECTION !=0 {"C"} else {"-"};
+            vm_log(&format!("  prop idx={} name={:?} value={:?} value_type={:?} declaring={:?} meta=0x{:x} [{ro} {handle_flag}{coll}]",
+                p.index,name,value,value_type,declaring,p.metadata_bits));
+        }
+    }
+    free_source_array(sources,source_count);
+    free_property_array(properties,property_count);
+    Ok(bluetooth_score)
+}
+
+unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
+    let service=SERVICE_PTR.load(Ordering::Acquire) as *mut c_void;
+    if service.is_null(){return Err(E_FAIL);}
+    let get_index:unsafe extern "system" fn(*mut c_void,u64,*const u16,*mut u32)->i32=
+        std::mem::transmute(slot(service,15));
+    let get_prop:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u64)->i32=
+        std::mem::transmute(slot(service,16));
+    let get_count:unsafe extern "system" fn(*mut c_void,u64,*mut u32)->i32=
+        std::mem::transmute(slot(service,10));
+    let get_elements:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u32,*mut *mut CollectionElementValue)->i32=
+        std::mem::transmute(slot(service,11));
+
+    let mut property=0u32;
+    let hr=get_index(service,grid,wide("ItemsSource").as_ptr(),&mut property);
+    if hr<0 {log(&format!("[N3] GetPropertyIndex(ItemsSource) failed: 0x{:08X}",hr as u32));return Err(hr);}
+    let mut source=0u64;
+    let hr=get_prop(service,grid,property,&mut source);
+    if hr<0||source==0 {log(&format!("[N3] GetProperty(ItemsSource) failed: 0x{:08X}",hr as u32));return Err(if hr<0{hr}else{E_FAIL});}
+    let mut count=0u32;
+    let hr=get_count(service,source,&mut count);
+    if hr<0{return Err(hr);}
+    log(&format!("[N3] RootGridView.ItemsSource handle=0x{source:x} count={count}"));
+    if count<EXPECTED_NATIVE_TILES{return Err(S_FALSE);}
+
+    let mut requested=count;
+    let mut elements=null_mut();
+    let hr=get_elements(service,source,0,&mut requested,&mut elements);
+    if hr<0||elements.is_null(){return Err(if hr<0{hr}else{E_FAIL});}
+    vm_log(&format!("==== QuickActionViewModel snapshot pid={} grid=0x{grid:x} source=0x{source:x} count={requested} ====",
+        std::process::id()));
+
+    let mut best:Option<(u32,u64,i32)>=None;
+    for e in std::slice::from_raw_parts(elements,requested as usize) {
+        let value_type=bstr_string(e.value_type);
+        let value=bstr_string(e.value);
+        let handle=if e.metadata_bits & META_IS_VALUE_HANDLE !=0 {parse_instance_handle(&value)} else {None};
+        vm_log(&format!("item[{}] type={:?} value={:?} meta=0x{:x} parsed_handle={:?}",
+            e.index,value_type,value,e.metadata_bits,handle.map(|h|format!("0x{h:x}"))));
+        if let Some(handle)=handle {
+            if let Ok((class_name,iids))=runtime_class_and_iids(handle) {
+                vm_log(&format!("  runtime_class={:?} iids=[{}]",class_name,
+                    iids.iter().map(guid_text).collect::<Vec<_>>().join(",")));
+            }
+            let score=dump_vm_properties(service,e.index,handle).unwrap_or(0);
+            if best.map_or(true,|(_,_,old)|score>old){best=Some((e.index,handle,score));}
+        }
+    }
+    for e in std::slice::from_raw_parts_mut(elements,requested as usize) {
+        if !e.value_type.is_null(){SysFreeString(e.value_type);}
+        if !e.value.is_null(){SysFreeString(e.value);}
+    }
+    CoTaskMemFree(elements.cast());
+
+    if let Some((index,handle,score))=best {
+        log(&format!("[N3] VM snapshot complete; best Bluetooth candidate item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
+    } else {
+        log("[N3] VM snapshot complete but no handle-backed item parsed. See qs-vm-dump.log");
+    }
+    Ok(())
+}
+
 
 #[repr(C)]
 struct SourceInfo { filename: *const u16, line: u32, column: u32, position: u32, hash: *const u16 }
@@ -506,6 +740,19 @@ fn is_quick_settings_wrap(nodes: &HashMap<u64,Node>, mut handle:u64)->bool {
         handle=n.parent;
     }
     grid && toggles
+}
+
+fn quick_actions_grid_handle(nodes:&HashMap<u64,Node>,mut handle:u64)->Option<u64> {
+    let mut grid=None;
+    let mut toggles=false;
+    for _ in 0..40 {
+        let Some(n)=nodes.get(&handle) else { break; };
+        if n.name=="RootGridView" && n.ty.ends_with("GridView"){grid=Some(handle);}
+        if n.name=="TogglesGroup"{toggles=true;}
+        if n.parent==0||n.parent==handle{break;}
+        handle=n.parent;
+    }
+    if toggles{grid}else{None}
 }
 
 fn ancestor_summary(nodes: &HashMap<u64,Node>, mut handle:u64) -> String {
@@ -569,7 +816,7 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
                 element.handle,relation.parent));
         }
 
-        let mut candidate_hosts=Vec::new();
+        let mut candidate_grids=Vec::new();
         let mut missing_ancestor=None;
         if let Ok(mut nodes)=tree().lock() {
             if mutation==0 {
@@ -580,9 +827,10 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
                     for (&handle,node) in nodes.iter() {
                         if !node.ty.ends_with("ItemsWrapGrid") { continue; }
                         if is_quick_settings_wrap(&nodes,handle) {
-                            // Retries happen after actual GridViewItem realization.
                             if !is_item || relation.parent==handle {
-                                candidate_hosts.push(handle);
+                                if let Some(grid)=quick_actions_grid_handle(&nodes,handle) {
+                                    candidate_grids.push(grid);
+                                }
                             }
                         } else if is_wrap && handle==element.handle {
                             missing_ancestor=Some(ancestor_summary(&nodes,handle));
@@ -599,14 +847,16 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         if let Some(trace)=missing_ancestor {
             log(&format!("[N2/TRACE] ItemsWrapGrid exists, but target ancestors not yet matched: {trace}"));
         }
-        for host in candidate_hosts {
-            // Never hold the tree mutex while editing the XAML tree: AddChild
-            // invokes OnVisualTreeChange recursively from the same UI thread.
-            log(&format!("[N2/TRACE] target wrap matched, scheduling deferred insert host=0x{host:x}"));
-            schedule_insert(host);
+        candidate_grids.sort_unstable();
+        candidate_grids.dedup();
+        for grid in candidate_grids {
+            // N3 is deliberately read-only: inspect the ItemsSource VM vector
+            // on the next UI-loop turn; do not touch ItemsWrapGrid.Children.
+            log(&format!("[N3/TRACE] Quick Actions grid matched, scheduling VM snapshot grid=0x{grid:x}"));
+            schedule_vm_probe(grid);
         }
     });
-    if result.is_err(){log("[N2] callback panic trapped at COM boundary");}
+    if result.is_err(){log("[N3] callback panic trapped at COM boundary");}
     S_OK
 }
 unsafe extern "system" fn on_state_change(_: *mut Callback, _: u64, _: i32, _: *const u16)->i32 {
@@ -647,7 +897,7 @@ unsafe extern "system" fn site_release(this:*mut Site)->u32 {
 unsafe extern "system" fn site_set(this:*mut Site, input:*mut c_void)->i32 {
     if input.is_null() { return S_OK; }
     if WATCHER_STARTED.get().is_some() {
-        log("[N2] SetSite called again; existing Rust TAP is already active");
+        log("[N3] SetSite called again; existing Rust TAP is already active");
         return S_OK;
     }
     let mut service:*mut c_void=null_mut();
@@ -664,7 +914,7 @@ unsafe extern "system" fn site_set(this:*mut Site, input:*mut c_void)->i32 {
         com_release(service); com_release(diagnostics);
         return S_OK;
     }
-    // TAP is intentionally process-lifetime pinned in this unsafe N2 PoC.
+    // TAP is intentionally process-lifetime pinned in this read-only N3 probe.
     // The interface references remain valid across callback invocations.
     SERVICE_PTR.store(service as usize,Ordering::Release);
     DIAGNOSTICS_PTR.store(diagnostics as usize,Ordering::Release);
@@ -691,7 +941,7 @@ unsafe extern "system" fn site_set(this:*mut Site, input:*mut c_void)->i32 {
                     map.len(), map.values().filter(|n|n.ty.ends_with("ItemsWrapGrid")).count(),
                     map.values().filter(|n|n.name=="TogglesGroup" || n.name=="RootGridView").count()
                 )).unwrap_or((0,0,0));
-                log(&format!("[N2/TRACE] 1500ms snapshot: callbacks={callback_count} nodes={nodes} wraps={wraps} named_anchors={named}"));
+                log(&format!("[N3/TRACE] 1500ms snapshot: callbacks={callback_count} nodes={nodes} wraps={wraps} named_anchors={named}"));
             }
             // The process is intentionally pinned for this experimental session.
             // Callback and diagnostics COM refs live until ShellHost exits.
@@ -803,6 +1053,13 @@ mod tests {
         nodes.insert(3,Node{parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
         nodes.insert(2,Node{parent:99,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
         assert!(is_quick_settings_wrap(&nodes,4));
+    }
+
+    #[test]
+    fn parse_instance_handle_accepts_xamlom_formats() {
+        assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
+        assert_eq!(parse_instance_handle("12345"),Some(12345));
+        assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
     }
 
     #[test]
