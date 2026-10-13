@@ -62,6 +62,7 @@ const IID_IACTIVATIONFACTORY: Guid = Guid { d1:0x00000035,d2:0x0000,d3:0x0000,
 type Hwnd = *mut c_void;
 type SubclassProc = unsafe extern "system" fn(Hwnd,u32,usize,isize,usize,usize)->isize;
 const WM_BE200_QS_PROBE: u32 = 0x8000 + 0x4B2;
+const WM_BE200_QS_DUPLICATE_VM: u32 = 0x8000 + 0x4B3;
 const QS_SUBCLASS_ID: usize = 0xBE20_0200;
 const EXPECTED_NATIVE_TILES: u32 = 11;
 
@@ -262,6 +263,11 @@ static DIAGNOSTICS_PTR: AtomicUsize = AtomicUsize::new(0);
 static INSERT_BUSY: AtomicBool = AtomicBool::new(false);
 static PROBE_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static PENDING_GRID: AtomicU64 = AtomicU64::new(0);
+static DUPLICATE_NATIVE_VM_MODE: AtomicBool = AtomicBool::new(false);
+static DUPLICATE_VM_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static DUPLICATE_VM_DONE: AtomicBool = AtomicBool::new(false);
+static PENDING_SOURCE: AtomicU64 = AtomicU64::new(0);
+static PENDING_VM: AtomicU64 = AtomicU64::new(0);
 static SUBCLASS_HWND: AtomicUsize = AtomicUsize::new(0);
 static PROBED_GRIDS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static INSERTED_HOSTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
@@ -433,6 +439,38 @@ fn try_insert_now(host:u64) {
 
 unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize,
                                              _id:usize,_ref_data:usize)->isize {
+    if msg==WM_BE200_QS_DUPLICATE_VM {
+        let source=PENDING_SOURCE.swap(0,Ordering::AcqRel);
+        let vm=PENDING_VM.swap(0,Ordering::AcqRel);
+        if source!=0 && vm!=0 {
+            let service=SERVICE_PTR.load(Ordering::Acquire) as *mut c_void;
+            if !service.is_null() {
+                let get_count:unsafe extern "system" fn(*mut c_void,u64,*mut u32)->i32=
+                    std::mem::transmute(slot(service,10));
+                let add_child:unsafe extern "system" fn(*mut c_void,u64,u64,u32)->i32=
+                    std::mem::transmute(slot(service,12));
+                let mut before=0u32;
+                let hr_count=get_count(service,source,&mut before);
+                if hr_count<0 {
+                    log(&format!("[N4] duplicate VM count failed: 0x{:08X}",hr_count as u32));
+                } else {
+                    let index=2u32.min(before);
+                    let hr=add_child(service,source,vm,index);
+                    if hr>=0 {
+                        let mut after=0u32;
+                        let hr_after=get_count(service,source,&mut after);
+                        DUPLICATE_VM_DONE.store(true,Ordering::Release);
+                        log(&format!("[N4] DATASOURCE INSERT OK source=0x{source:x} vm=0x{vm:x} index={index} count_before={before} count_after={} count_hr=0x{:08X}",
+                            if hr_after>=0{after}else{0},hr_after as u32));
+                    } else {
+                        log(&format!("[N4] DATASOURCE INSERT FAILED source=0x{source:x} vm=0x{vm:x} index={index} hr=0x{:08X}",hr as u32));
+                    }
+                }
+            }
+        }
+        DUPLICATE_VM_SCHEDULED.store(false,Ordering::Release);
+        return 0;
+    }
     if msg==WM_BE200_QS_PROBE {
         let grid=PENDING_GRID.swap(0,Ordering::AcqRel);
         if grid!=0 {
@@ -497,6 +535,34 @@ fn schedule_vm_probe(grid:u64) {
         log("[N3] PostMessageW(VM probe) failed");
     } else {
         log(&format!("[N3] read-only VM probe queued grid=0x{grid:x}"));
+    }
+}
+
+
+fn schedule_duplicate_native_vm(source:u64,vm:u64) {
+    if !DUPLICATE_NATIVE_VM_MODE.load(Ordering::Acquire) ||
+       DUPLICATE_VM_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    if DUPLICATE_VM_SCHEDULED.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
+        return;
+    }
+    let hwnd=SUBCLASS_HWND.load(Ordering::Acquire) as Hwnd;
+    if hwnd.is_null() {
+        DUPLICATE_VM_SCHEDULED.store(false,Ordering::Release);
+        log("[N4] duplicate VM scheduling failed: ControlCenterWindow subclass is unavailable");
+        return;
+    }
+    PENDING_SOURCE.store(source,Ordering::Release);
+    PENDING_VM.store(vm,Ordering::Release);
+    let posted=unsafe{PostMessageW(hwnd,WM_BE200_QS_DUPLICATE_VM,0,0)};
+    if posted==0 {
+        PENDING_SOURCE.store(0,Ordering::Release);
+        PENDING_VM.store(0,Ordering::Release);
+        DUPLICATE_VM_SCHEDULED.store(false,Ordering::Release);
+        log("[N4] PostMessageW(duplicate native VM) failed");
+    } else {
+        log(&format!("[N4] queued data-source duplicate source=0x{source:x} bluetooth_vm=0x{vm:x}"));
     }
 }
 
@@ -1179,6 +1245,7 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
         // its advertised ICustomPropertyProvider to keep the UI-thread probe bounded.
         probe_custom_property_provider(index,handle);
         log(&format!("[N3] VM snapshot complete; visually-proven Bluetooth item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
+        schedule_duplicate_native_vm(source,handle);
     } else {
         log("[N3.2] VM snapshot complete but no visual AutomationId proved the Bluetooth item. See qs-vm-dump.log");
     }
@@ -1346,6 +1413,23 @@ static CALLBACK_VTBL: CallbackVtbl = CallbackVtbl {
     on_element_state_changed: on_state_change,
 };
 
+
+unsafe fn configure_mode_from_initialization_data(diagnostics:*mut c_void) {
+    let get_data:unsafe extern "system" fn(*mut c_void,*mut *mut u16)->i32=
+        std::mem::transmute(slot(diagnostics,10));
+    let mut raw=null_mut();
+    let hr=get_data(diagnostics,&mut raw);
+    if hr<0 {
+        log(&format!("[N4] GetInitializationData failed: 0x{:08X}; defaulting to probe-only",hr as u32));
+        return;
+    }
+    let mode=if raw.is_null(){String::new()}else{bstr_string(raw)};
+    if !raw.is_null(){SysFreeString(raw);}
+    let duplicate=mode.eq_ignore_ascii_case("duplicate-native-vm");
+    DUPLICATE_NATIVE_VM_MODE.store(duplicate,Ordering::Release);
+    log(&format!("[N4] initialization mode={mode:?} duplicate_native_vm={duplicate}"));
+}
+
 #[repr(C)]
 struct Site { vtable: *const SiteVtbl, count: AtomicU32, site: AtomicUsize }
 #[repr(C)]
@@ -1396,6 +1480,7 @@ unsafe extern "system" fn site_set(this:*mut Site, input:*mut c_void)->i32 {
     // The interface references remain valid across callback invocations.
     SERVICE_PTR.store(service as usize,Ordering::Release);
     DIAGNOSTICS_PTR.store(diagnostics as usize,Ordering::Release);
+    configure_mode_from_initialization_data(diagnostics);
     let old=(*this).site.swap(input as usize,Ordering::AcqRel);
     let add:unsafe extern "system" fn(*mut c_void)->u32 = std::mem::transmute(slot(input,1));
     add(input);
@@ -1541,6 +1626,12 @@ mod tests {
         assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
         assert_eq!(parse_instance_handle("12345"),Some(12345));
         assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
+    }
+
+    #[test]
+    fn n4_duplicate_mode_is_explicit_and_off_by_default() {
+        assert!(!DUPLICATE_NATIVE_VM_MODE.load(Ordering::Relaxed));
+        assert_ne!(WM_BE200_QS_PROBE,WM_BE200_QS_DUPLICATE_VM);
     }
 
     #[test]
