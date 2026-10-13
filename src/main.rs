@@ -40,6 +40,7 @@ fn usage() -> &'static str {
        be200hub r4 config-codec --seconds <1..30> --name <DEVICE_NAME> --side <left|right|both> --confirm-ascs-write\n\
        be200hub r5 qos-plan --seconds <1..30> --name <DEVICE_NAME> --confirm-ascs-write\n\
        be200hub r5 config-qos --seconds <1..30> --name <DEVICE_NAME> --confirm-cig-qos-write\n\
+       be200hub r5 establish-cis --seconds <1..30> --name <DEVICE_NAME> --confirm-cis-create\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -148,7 +149,27 @@ fn parse_r5_config_qos_invocation(args: &[String]) -> Result<Option<(u16, &str)>
     }
 }
 
+/// R5.2-B intentionally creates two CIS links and must not reuse the
+/// R5.2-A consent flag. Exact seven-token parser, pre-bootstrap validation.
+fn parse_r5_establish_cis_invocation(args: &[String]) -> Result<Option<(u16, &str)>> {
+    match args {
+        [r5, command, seconds_flag, seconds, name_flag, name, confirm]
+            if r5 == "r5"
+                && command == "establish-cis"
+                && seconds_flag == "--seconds"
+                && name_flag == "--name"
+                && confirm == "--confirm-cis-create" =>
+        {
+            Ok(Some((audio_set::parse_seconds(seconds)?, name.as_str())))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn run(args: &[String]) -> Result<()> {
+    if let Some((seconds, name)) = parse_r5_establish_cis_invocation(args)? {
+        return run_operational(|| audio_set::establish_cis(seconds, name));
+    }
     if let Some((seconds, name)) = parse_r5_config_qos_invocation(args)? {
         return run_operational(|| audio_set::config_qos(seconds, name));
     }
@@ -380,6 +401,24 @@ mod r4_cli_tests {
         args[7] = "left".to_owned();
         args[3] = "0".to_owned();
         assert!(parse_r4_invocation(&args).is_err());
+    }
+
+    #[test]
+    fn r5_cis_create_requires_unique_consent_and_exact_seven_tokens() {
+        let mut command = args(&[
+            "r5", "establish-cis", "--seconds", "8",
+            "--name", "Galaxy Buds3 Pro (2F23)", "--confirm-cis-create"
+        ]);
+        assert_eq!(parse_r5_establish_cis_invocation(&command).unwrap(),
+            Some((8, "Galaxy Buds3 Pro (2F23)")));
+        command[6] = "--confirm-cig-qos-write".into();
+        assert_eq!(parse_r5_establish_cis_invocation(&command).unwrap(), None);
+        command[6] = "--confirm-cis-create".into();
+        command.push("extra".into());
+        assert_eq!(parse_r5_establish_cis_invocation(&command).unwrap(), None);
+        command.pop();
+        command[3] = "31".into();
+        assert!(parse_r5_establish_cis_invocation(&command).is_err());
     }
 
     #[test]
