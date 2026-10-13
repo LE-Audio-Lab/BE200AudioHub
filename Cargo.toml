@@ -15,7 +15,9 @@ members = [
     "crates/device-policy",
     "crates/iso-scheduler",
     "crates/recovery-supervisor",
+    "integrations/windows-quick-settings",
 ]
+default-members = [".", "integrations/windows-quick-settings"]
 resolver = "2"
 
 [[bin]]
