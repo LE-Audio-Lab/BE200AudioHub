@@ -22,10 +22,10 @@ const OBSERVED_IDLE_TRAILER: [u8; 3] = [0x01, 0x00, 0x00];
 /// parser. An ASE in Idle has no standard state-specific parameters. AOSP's
 /// state-machine path ignores trailing Idle data, while Bumble-RS rejects it.
 /// Constrain that tolerance to the exact five-byte value seen on hardware.
-pub(crate) fn parse_ase_status_compat(value: &[u8]) -> TransportResult<AseStatus> {
+pub(crate) fn parse_ase_status_compat(value: &[u8]) -> bumble_profiles::Result<AseStatus> {
     match AseStatus::from_bytes(value) {
         Ok(status) => Ok(status),
-        Err(error)
+        Err(_)
             if value.len() == 5
                 && value[0] != 0
                 && value[1] == 0x00
