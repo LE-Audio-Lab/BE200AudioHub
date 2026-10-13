@@ -23,6 +23,7 @@ name = "be200hub"
 path = "src/main.rs"
 
 [dependencies]
+bap-client = { path = "crates/bap-client" }
 bumble-adapter = { path = "crates/bumble-adapter" }
 log = { version = "0.4", features = ["std"] }
 rusb = { version = "0.9", features = ["vendored"] }
