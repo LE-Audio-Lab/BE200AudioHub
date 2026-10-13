@@ -1,4 +1,4 @@
-# BE200 Quick Settings: Rust native N2 experiment
+# BE200 Quick Settings: Rust-native N3 clone-path experiment
 
 Branch: `experiment/win11-quick-settings` (separate from active CIS/R5 development).
 
@@ -53,6 +53,39 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 7. Click it; `[CLICK] disconnect_b3p (UI ONLY; no backend)`
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
+
+## N3: clone-path VM probe
+
+N2 direct `ItemsWrapGrid.Children` mutation is now **disabled**. Two HIL runs on
+Windows 11 build 26200 proved that `AddChild` can return S_OK yet still corrupt
+the GridView's ItemContainerGenerator/layout state and freeze Control Center.
+
+N3 moves one layer up to the data source. The captured Quick Settings tree shows:
+
+- `RootGridView.ItemsSource = IObservableVector<ControlCenter.QuickActionViewModel>`
+- size 11
+- the Bluetooth visual reports `Microsoft.QuickAction.Bluetooth` and position 2.
+
+The current N3 build is **read-only**. It locates the Quick Actions RootGridView,
+reads its ItemsSource through XamlOM, enumerates the 11 collection elements, parses
+their InstanceHandles, then dumps each ViewModel's runtime class, implemented IID
+list, and `GetPropertyValuesChain` output. No UI or collection mutation occurs.
+
+Output:
+- normal TAP trace: `%LOCALAPPDATA%\BE200AudioHub\logs\qs-tap.log`
+- full VM dump: `%LOCALAPPDATA%\BE200AudioHub\logs\qs-vm-dump.log`
+
+Expected summary:
+```text
+[N3] RootGridView.ItemsSource handle=... count=11
+[N3] VM snapshot complete; best Bluetooth candidate item[...] handle=... score=...
+```
+
+The next write stage will only proceed after the Bluetooth VM's writable property
+surface and constructor/activation path are known. The intended clone strategy is:
+create an equivalent `ControlCenter.QuickActionViewModel`, copy safe visual/state
+properties from Bluetooth, replace identity/command, and insert the VM into the
+ItemsSource vector so Windows owns container generation, pagination and layout.
 
 ## N2 HIL result: synchronous ItemsHost mutation freezes ShellHost
 
