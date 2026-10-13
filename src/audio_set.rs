@@ -3,9 +3,9 @@ use crate::{
     usb,
 };
 use bap_client::{
-    configure_and_release, plan_first_sound, plan_first_sound_qos, AudioSetSnapshot,
-    CodecConfigScope, CodecConfigurationPlan, CodecConfiguredSetSnapshot, ConnectedAudioMember,
-    StereoQosPlan,
+    configure_and_release, configure_qos_and_release, plan_first_sound,
+    plan_first_sound_qos, AudioSetSnapshot, CodecConfigScope, CodecConfigurationPlan,
+    CodecConfiguredSetSnapshot, ConnectedAudioMember, QosConfiguredSetSnapshot, StereoQosPlan,
 };
 use bumble_adapter::{
     BondMemberSummary, BondedPeerIdentity, LeAclReport, ScanObservation,
@@ -59,6 +59,7 @@ enum AudioSetAction {
     CodecPlan,
     ConfigCodec(CodecConfigScope),
     QosPlan,
+    ConfigQos,
 }
 
 pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
@@ -90,6 +91,12 @@ pub fn qos_plan(seconds: u16, wanted_name: &str) -> Result<()> {
     inspect_impl(seconds, wanted_name, AudioSetAction::QosPlan)
 }
 
+/// R5.2-A: real HCI Set CIG + dual ASCS Config QoS; no CIS establishment.
+/// Every ASE returns to Idle and the unestablished CIG is removed.
+pub fn config_qos(seconds: u16, wanted_name: &str) -> Result<()> {
+    inspect_impl(seconds, wanted_name, AudioSetAction::ConfigQos)
+}
+
 fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Result<()> {
     if wanted_name.trim().is_empty() {
         return Err(AppError::Usage(
@@ -104,11 +111,15 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
             AudioSetAction::CodecPlan => "R4.1 read-only codec planning",
             AudioSetAction::ConfigCodec(_) => "R4.2 ASCS Config Codec + Release transaction",
             AudioSetAction::QosPlan => "R5.1 QoS/CIG planner (R4.2 codec-write probe + dry run)",
+            AudioSetAction::ConfigQos => "R5.2-A HCI CIG allocation + dual ASCS Config QoS transaction",
         }
     );
     println!("Target name: {wanted_name:?}");
     println!("Path: one scan -> resolve all members -> identity/FAL dual bonded ACL -> PACS/ASCS/CAS discovery.");
-    if matches!(action, AudioSetAction::ConfigCodec(_) | AudioSetAction::QosPlan) {
+    if matches!(action, AudioSetAction::ConfigQos) {
+        println!("Safety: HCI Set/Remove CIG + ASCS Config Codec/Config QoS/Release writes are explicitly enabled.");
+        println!("No SMP, bond mutation, ASCS Enable, HCI Create CIS or ISO traffic. Both ASEs return Idle and CIG is removed.");
+    } else if matches!(action, AudioSetAction::ConfigCodec(_) | AudioSetAction::QosPlan) {
         println!("Safety: ASCS Config Codec/Release writes are ENABLED by explicit CLI confirmation.");
         println!("No SMP, Bond mutation, HCI Set CIG, ASCS Config QoS, CIS or ISO activity; every ASE returns Idle.");
     } else {
@@ -122,9 +133,9 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
     // Cached HCI Local Features + Supported Commands + LE Buffer Size V2.
     // This does not submit any new HCI commands.
     let controller_iso = attached.iso_controller_capabilities();
-    if matches!(action, AudioSetAction::QosPlan) {
+    if matches!(action, AudioSetAction::QosPlan | AudioSetAction::ConfigQos) {
         println!(
-            "[R5.1/ISO] controller capability snapshot: CIS_Central={} 2M={} SetCig={} CreateCis={} RemoveCig={} SetupIsoPath={} ISO={}B x {}",
+            "[R5/ISO] controller capability snapshot: CIS_Central={} 2M={} SetCig={} CreateCis={} RemoveCig={} SetupIsoPath={} ISO={}B x {}",
             controller_iso.cis_central, controller_iso.le_2m_phy,
             controller_iso.set_cig_parameters, controller_iso.create_cis,
             controller_iso.remove_cig, controller_iso.setup_iso_data_path,
@@ -189,7 +200,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         )))?;
 
     let mut active = Vec::<ActiveMember>::new();
-    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>, Option<CodecConfiguredSetSnapshot>, Option<StereoQosPlan>)> {
+    let operation = (|| -> Result<(AudioSetSnapshot, Option<CodecConfigurationPlan>, Option<CodecConfiguredSetSnapshot>, Option<StereoQosPlan>, Option<QosConfiguredSetSnapshot>)> {
         for resolved_member in resolved {
             let rank = resolved_member.member.rank.expect("rank checked");
             let privacy_peer = find_privacy_peer(&privacy_peers, &resolved_member.member)?;
@@ -318,7 +329,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
                 AppError::Protocol(format!("R4.1 codec planning failed: {error}"))
             })?)
         };
-        if matches!(action, AudioSetAction::QosPlan) {
+        if matches!(action, AudioSetAction::QosPlan | AudioSetAction::ConfigQos) {
             let max_sdu = plan.as_ref().expect("non-inspect action has codec plan")
                 .stream.octets_per_codec_frame;
             // Refuse unsupported controllers BEFORE writing Config Codec.
@@ -346,7 +357,14 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
             }
             _ => None,
         };
-        Ok((snapshot, plan, configured, qos))
+        let qos_configured = match (action, plan.as_ref()) {
+            (AudioSetAction::ConfigQos, Some(codec)) => {
+                Some(configure_qos_and_release(&mut attached, codec, controller_iso)
+                    .map_err(|error| AppError::Protocol(format!("R5.2-A QoS transaction failed: {error}")))?)
+            }
+            _ => None,
+        };
+        Ok((snapshot, plan, configured, qos, qos_configured))
     })();
 
     let disconnect_cleanup = disconnect_all(&mut attached, &active);
@@ -357,7 +375,7 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         )));
     let cleanup = combine_cleanup(disconnect_cleanup, privacy_cleanup);
 
-    let (snapshot, plan, configured, qos) = match operation {
+    let (snapshot, plan, configured, qos, qos_configured) = match operation {
         Ok(value) => value,
         Err(error) => {
             if let Err(cleanup_error) = cleanup {
@@ -396,7 +414,10 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
     println!("Persistent-state fingerprint: UNCHANGED");
     if let Some(plan) = plan {
         print_codec_plan(&plan);
-        if let Some(configured) = configured {
+        if let Some(qos_configured) = qos_configured {
+            print_qos_configured(&qos_configured);
+            println!("R5.2-A CONFIG QOS PASS: both ASEs CodecConfigured -> QoSConfigured with CP+notify+readback; both released Idle, CIG removed, ACLs disconnected, no CIS established, bond unchanged.");
+        } else if let Some(configured) = configured {
             print_codec_configured(&configured);
             if let Some(qos) = qos {
                 print_qos_plan(&qos)?;
@@ -647,6 +668,30 @@ fn print_snapshot(snapshot: &AudioSetSnapshot) {
             None => println!("    CAS: absent"),
         }
     }
+}
+
+fn print_qos_configured(snapshot: &QosConfiguredSetSnapshot) {
+    println!();
+    println!(
+        "QosConfiguredSetSnapshot: members={} CIG={} removed={} released_idle={}",
+        snapshot.members.len(), snapshot.allocation.cig_id,
+        snapshot.cig_removed, snapshot.released_to_idle
+    );
+    for member in &snapshot.members {
+        let qos = &member.actual;
+        let handle = snapshot.allocation.cis.iter()
+            .find(|cis| cis.cis_id == qos.cis_id)
+            .map(|cis| format!("0x{:04X}", cis.connection_handle))
+            .unwrap_or_else(|| "unmapped".to_owned());
+        println!(
+            "  {} ASE={} CIG={} CIS={} allocated_handle={} interval={}us PHY={} SDU={} RTN={} latency={}ms presentation={}us",
+            member.side.as_str(), member.ase_id, qos.cig_id, qos.cis_id,
+            handle, qos.sdu_interval, qos.phy, qos.max_sdu,
+            qos.retransmission_number, qos.max_transport_latency,
+            qos.presentation_delay
+        );
+    }
+    println!("  Allocated handles are invalid after successful Remove CIG; no CIS was established.");
 }
 
 fn print_qos_plan(plan: &StereoQosPlan) -> Result<()> {
