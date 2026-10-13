@@ -23,7 +23,7 @@ const CLASS_E_NOAGGREGATION: i32 = 0x80040110u32 as i32;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct Guid { d1: u32, d2: u16, d3: u16, d4: [u8; 8] }
+pub struct Guid { d1: u32, d2: u16, d3: u16, d4: [u8; 8] }
 
 const CLSID_TAP: Guid = Guid { d1: 0xf18c96a3, d2: 0x281a, d3: 0x4dd0,
     d4: [0x9c,0x81,0xb0,0x20,0x40,0xb8,0x9e,0x3c] };
@@ -409,7 +409,10 @@ fn tree() -> &'static Mutex<HashMap<u64,Node>> { TREE.get_or_init(|| Mutex::new(
 fn is_quick_settings_wrap(nodes: &HashMap<u64,Node>, mut handle:u64)->bool {
     let (mut grid,mut toggles)=(false,false);
     for _ in 0..40 {
-        let Some(n)=nodes.get(&handle) else { return false; };
+        // Initial XAML callbacks may report the target subtree before its
+        // outer page/root ancestors. Missing a node above BOTH required
+        // anchors must not invalidate a proven ancestor chain.
+        let Some(n)=nodes.get(&handle) else { break; };
         if n.name == "RootGridView" && n.ty.ends_with("GridView") { grid=true; }
         if n.name == "TogglesGroup" { toggles=true; }
         if n.parent==0 || n.parent==handle { break; }
@@ -699,6 +702,11 @@ mod tests {
         assert!(!is_quick_settings_wrap(&nodes,4));
         nodes.insert(2,Node{parent:1,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
         assert!(is_quick_settings_wrap(&nodes,4));
+
+        // If the intermediate group disappears, finding RootGridView alone
+        // must not be enough to match the Quick Actions host.
+        nodes.remove(&2);
+        assert!(!is_quick_settings_wrap(&nodes,4));
     }
 
     #[test]
