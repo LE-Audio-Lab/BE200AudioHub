@@ -1899,7 +1899,11 @@ mod tests {
     #[test]
     fn n4_duplicate_mode_is_explicit_and_off_by_default() {
         assert!(!DUPLICATE_NATIVE_VM_MODE.load(Ordering::Relaxed));
+        assert!(!CUSTOM_TILE_MODE.load(Ordering::Relaxed));
         assert_ne!(WM_BE200_QS_PROBE,WM_BE200_QS_DUPLICATE_VM);
+        assert_ne!(WM_BE200_QS_DUPLICATE_VM,WM_BE200_QS_CUSTOMIZE_CARRIER);
+        assert_ne!(WM_BE200_QS_CUSTOMIZE_CARRIER,WM_BE200_QS_WIRE_BUTTON);
+        assert_eq!(CARRIER_INDEX,2);
     }
 
     #[test]
@@ -1936,6 +1940,10 @@ mod tests {
     fn markup_contains_only_ui_and_named_button() {
         assert!(TILE_XAML.contains("x:Name=\"BE200QuickSettingsClick\""));
         assert!(TILE_XAML.contains("断开 B3P"));
+        assert!(CARRIER_TEMPLATE_XAML.contains("BE200QuickSettingsN41Button"));
+        assert!(CARRIER_TEMPLATE_XAML.contains("BE200.QuickAction.DisconnectB3P"));
+        assert!(CARRIER_TEMPLATE_XAML.contains("断开 B3P"));
         assert!(!TILE_XAML.contains("WinUSB"));
+        assert!(!CARRIER_TEMPLATE_XAML.contains("WinUSB"));
     }
 }
