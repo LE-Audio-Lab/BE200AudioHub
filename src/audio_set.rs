@@ -320,7 +320,24 @@ fn inspect_impl(seconds: u16, wanted_name: &str, action: AudioSetAction) -> Resu
         Ok(value) => value,
         Err(error) => {
             if let Err(cleanup_error) = cleanup {
-                eprintln!("R3 cleanup also failed: {cleanup_error}");
+                eprintln!("R3/R4 ACL/privacy cleanup also failed: {cleanup_error}");
+            }
+            // R4.2 is allowed to mutate transient ASE state, never bond
+            // material. Audit that invariant on the failure path as well.
+            match fingerprint_store(&store) {
+                Ok(after) if after == before => {
+                    eprintln!("Persistent-state fingerprint: UNCHANGED (failure path)");
+                }
+                Ok(_) => {
+                    return Err(AppError::Protocol(format!(
+                        "{error}; WARNING: persistent pairing/set/identity fingerprint CHANGED"
+                    )));
+                }
+                Err(fingerprint_error) => {
+                    return Err(AppError::Protocol(format!(
+                        "{error}; persistent-state verification failed: {fingerprint_error}"
+                    )));
+                }
             }
             return Err(error);
         }
