@@ -52,7 +52,7 @@ fn read_ase_with_retry(
             }
             Err(error) => {
                 let captured = &value[..value.len().min(MAX_LOGGED_BYTES)];
-                eprintln!(
+                println!(
                     "[R4/ASE-READ] malformed status: ACL=0x{acl_handle:04X} value=0x{value_handle:04X} attempt={attempt}/{MAX_ATTEMPTS} len={} raw={captured:02X?} error={error}",
                     value.len()
                 );
