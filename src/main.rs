@@ -10,6 +10,7 @@ mod error;
 mod logging;
 mod r2_attach;
 mod r2_pairing_refactor;
+mod r2_pairing_v2;
 mod usb;
 
 use error::{AppError, Result};
@@ -31,6 +32,8 @@ fn usage() -> &'static str {
        be200hub r2 swift-pair-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 set-member-connect-probe --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r2 pairing-v2-reset --confirm\n\
+       be200hub r2 pairing-v2-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 bond-onboard --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 bond-verify --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
@@ -112,6 +115,14 @@ fn run(args: &[String]) -> Result<()> {
                 r2_pairing_refactor::parse_seconds(seconds)?,
                 name,
             )
+        },
+        [a, b, flag] if a == "r2" && b == "pairing-v2-reset"
+            && flag == "--confirm" => {
+            r2_pairing_v2::archive_reset(true)
+        },
+        [a, b, c, seconds, d, name] if a == "r2" && b == "pairing-v2-onboard"
+            && c == "--seconds" && d == "--name" => {
+            r2_pairing_v2::onboard(r2_pairing_v2::parse_seconds(seconds)?, name)
         },
         [a, b, c, seconds, d, name] if a == "r2" && b == "bond-onboard"
             && c == "--seconds" && d == "--name" => {
