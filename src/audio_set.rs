@@ -158,32 +158,37 @@ pub fn inspect(seconds: u16, wanted_name: &str) -> Result<()> {
             };
             println!("  ACL: PASS handle=0x{:04X}", acl.connection_handle);
 
-            attached
-                .resume_bonded_encryption(
-                    acl.connection_handle,
-                    &resolved_member.member.identity_address,
-                    &store,
-                    ENCRYPTION_TIMEOUT,
-                )
-                .map_err(|error| AppError::Protocol(format!(
-                    "R3 stored-LTK encryption failed for {}: {error}",
-                    resolved_member.member.identity_address
-                )))?;
-            println!("  stored-LTK encryption: PASS");
-
-            let state = attached.le_acl_state(acl.connection_handle);
-            if !state.connected || !state.encrypted {
-                return Err(AppError::Protocol(format!(
-                    "R3 member {} did not remain connected+encrypted after security restore",
-                    resolved_member.member.identity_address
-                )));
-            }
-
+            let connection_handle = acl.connection_handle;
+            let identity_address = resolved_member.member.identity_address.clone();
+            // Register the ACL immediately after it is established. A failed or
+            // timed-out stored-LTK recovery must not leak a connected handle.
             active.push(ActiveMember {
                 member: resolved_member.member,
                 observation: resolved_member.observation,
                 acl,
             });
+
+            attached
+                .resume_bonded_encryption(
+                    connection_handle,
+                    &identity_address,
+                    &store,
+                    ENCRYPTION_TIMEOUT,
+                )
+                .map_err(|error| AppError::Protocol(format!(
+                    "R3 stored-LTK encryption failed for {}: {error}",
+                    identity_address
+                )))?;
+            println!("  stored-LTK encryption: PASS");
+
+            let state = attached.le_acl_state(connection_handle);
+            if !state.connected || !state.encrypted {
+                return Err(AppError::Protocol(format!(
+                    "R3 member {} did not remain connected+encrypted after security restore",
+                    identity_address
+                )));
+            }
+
         }
 
         assert_distinct_live_handles(&attached, &active)?;
