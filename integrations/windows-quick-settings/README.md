@@ -54,6 +54,33 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N2 HIL result: synchronous ItemsHost mutation freezes ShellHost
+
+Observed on Windows 11 build 26200:
+
+- Quick Actions target was correctly identified.
+- Native `Panel.Children` realized from 0 to 6 while callbacks were still firing.
+- At count 6, the TAP created the synthetic GridViewItem, registered Click,
+  and `IVisualTreeService::AddChild(..., index=2)` returned success.
+- Immediately after `[N2] INSERT OK`, opening the panel froze/crashed the
+  Control Center.
+
+Interpretation: the direct target is correct, but mutation happened inside
+`OnVisualTreeChange` while the GridView ItemContainerGenerator/layout pass
+was still realizing native children. The success HRESULT did not mean the
+ItemsControl's internal generator state remained valid.
+
+**N2.2 mitigation** keeps the requested direct ItemsWrapGrid insertion but:
+1. waits for the captured build's 11 native Quick Action children,
+2. installs a subclass on the same `ControlCenterWindow` UI thread,
+3. posts a private window message,
+4. performs `AddChild` only after the current XAML mutation callback unwinds.
+
+If N2.2 still freezes after `INSERT OK`, direct mutation of an OS-owned
+ItemsHost is considered structurally unsafe and the next experiment must
+move one level up (or modify the data source) rather than repeatedly corrupt
+ShellHost.
+
 ## N2.2: rebuild when ShellHost locks the old TAP DLL
 
 Once Windows has loaded `be200_qs_tap.dll`, Cargo cannot overwrite that
