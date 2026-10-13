@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
-use std::ptr::{null, null_mut};
+use std::ptr::null_mut;
 use std::sync::{atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering}, Mutex, OnceLock};
 
 const S_OK: i32 = 0;
@@ -35,6 +35,8 @@ const IID_IVISUALTREESERVICE3: Guid = Guid { d1:0x0e79c6e0,d2:0x85a0,d3:0x4be8,
     d4:[0xb4,0x1a,0x65,0x5c,0xf1,0xfd,0x19,0xbd] };
 const IID_IVISUALTREESERVICECALLBACK: Guid = Guid { d1:0xaa7a8931,d2:0x80e4,d3:0x4fec,
     d4:[0x8f,0x3b,0x55,0x3f,0x87,0xb4,0x96,0x6e] };
+const IID_IVISUALTREESERVICECALLBACK2: Guid = Guid { d1:0xbad9eb88,d2:0xae77,d3:0x4397,
+    d4:[0xb9,0x48,0x5f,0xa2,0xdb,0x0a,0x19,0xea] };
 const IID_IXAMLDIAGNOSTICS: Guid = Guid { d1:0x18c9e2b6,d2:0x3f43,d3:0x4116,
     d4:[0x9f,0x2b,0xff,0x93,0x5d,0x77,0x70,0xd2] };
 const IID_IXAMLREADERSTATICS: Guid = Guid { d1:0x9891c6bd,d2:0x534f,d3:0x4955,
@@ -61,13 +63,19 @@ extern "system" { fn CoTaskMemAlloc(size: usize) -> *mut c_void; }
 extern "system" {
     fn WindowsCreateString(value: *const u16, length: u32, result: *mut *mut c_void) -> i32;
     fn WindowsDeleteString(value: *mut c_void) -> i32;
+    fn WindowsGetStringRawBuffer(value: *mut c_void, length: *mut u32) -> *const u16;
     fn RoGetActivationFactory(name: *mut c_void, iid: *const Guid, result: *mut *mut c_void) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 
 fn log(message: &str) {
-    let output = format!("[BE200-QS/TAP] {message}");
+    // Include PID and clock time: this is an append-only log across ShellHost lifetimes.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let output = format!("[BE200-QS/TAP] [pid={}] [unix_ms={}] {message}",
+        std::process::id(), now.as_millis());
     unsafe { OutputDebugStringW(wide(&output).as_ptr()); }
     let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -112,6 +120,35 @@ impl HString {
     }
 }
 impl Drop for HString { fn drop(&mut self) { unsafe { WindowsDeleteString(self.0); } } }
+
+// The UWPSpy export uses FrameworkElement.Name. XamlOM VisualElement.Name
+// may be blank on some element types / snapshots; do not rely on it alone.
+// Only query these lightweight names for ContentControl/GridView candidates.
+unsafe fn framework_element_name(handle: u64) -> Result<String, i32> {
+    let diagnostics = DIAGNOSTICS_PTR.load(Ordering::Acquire) as *mut c_void;
+    if diagnostics.is_null() { return Err(E_FAIL); }
+    let from_handle: unsafe extern "system" fn(*mut c_void, u64, *mut *mut c_void) -> i32 =
+        std::mem::transmute(slot(diagnostics, 6)); // IXamlDiagnostics.GetIInspectableFromHandle
+    let mut element = null_mut();
+    let hr = from_handle(diagnostics, handle, &mut element);
+    if hr < 0 { return Err(hr); }
+    if element.is_null() { return Err(E_FAIL); }
+    let element = ComPtr(element);
+    let mut framework = null_mut();
+    let hr = query_interface(element.as_raw(), &IID_IFRAMEWORKELEMENT, &mut framework);
+    if hr < 0 { return Err(hr); }
+    let framework = ComPtr(framework);
+    let get_name: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32 =
+        std::mem::transmute(slot(framework.as_raw(), 33)); // IFrameworkElement.get_Name
+    let mut raw_name = null_mut();
+    let hr = get_name(framework.as_raw(), &mut raw_name);
+    if hr < 0 { return Err(hr); }
+    let name = HString(raw_name);
+    let mut length = 0u32;
+    let buffer = WindowsGetStringRawBuffer(name.0, &mut length);
+    if buffer.is_null() || length == 0 { return Ok(String::new()); }
+    Ok(String::from_utf16_lossy(std::slice::from_raw_parts(buffer, length as usize)))
+}
 
 // Deliberately no bluetooth command in this markup or event callback.
 const TILE_XAML: &str = r##"
@@ -366,6 +403,7 @@ unsafe fn bstr_string(value: *const u16) -> String {
 struct Node { parent: u64, ty: String, name: String }
 static TREE: OnceLock<Mutex<HashMap<u64, Node>>> = OnceLock::new();
 static WATCHER_STARTED: OnceLock<()> = OnceLock::new();
+static CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 fn tree() -> &'static Mutex<HashMap<u64,Node>> { TREE.get_or_init(|| Mutex::new(HashMap::new())) }
 
 fn is_quick_settings_wrap(nodes: &HashMap<u64,Node>, mut handle:u64)->bool {
@@ -380,6 +418,20 @@ fn is_quick_settings_wrap(nodes: &HashMap<u64,Node>, mut handle:u64)->bool {
     grid && toggles
 }
 
+fn ancestor_summary(nodes: &HashMap<u64,Node>, mut handle:u64) -> String {
+    let mut levels = Vec::new();
+    for _ in 0..24 {
+        let Some(n)=nodes.get(&handle) else {
+            levels.push(format!("0x{handle:x}:<MISSING>"));
+            break;
+        };
+        levels.push(format!("{}#{}@0x{handle:x}", n.ty, n.name));
+        if n.parent==0 || n.parent==handle { break; }
+        handle=n.parent;
+    }
+    levels.join(" <- ")
+}
+
 #[repr(C)]
 struct Callback { vtable: *const CallbackVtbl, count: AtomicU32 }
 #[repr(C)]
@@ -388,11 +440,13 @@ struct CallbackVtbl {
     add_ref: unsafe extern "system" fn(*mut Callback)->u32,
     release: unsafe extern "system" fn(*mut Callback)->u32,
     on_visual_tree_change: unsafe extern "system" fn(*mut Callback,ParentChildRelation,VisualElement,i32)->i32,
+    on_element_state_changed: unsafe extern "system" fn(*mut Callback,u64,i32,*const u16)->i32,
 }
 unsafe extern "system" fn cb_query(this:*mut Callback, iid:*const Guid, out:*mut *mut c_void)->i32 {
     if iid.is_null() || out.is_null() { return E_POINTER; }
     *out = null_mut();
-    if *iid == IID_IUNKNOWN || *iid == IID_IVISUALTREESERVICECALLBACK {
+    if *iid == IID_IUNKNOWN || *iid == IID_IVISUALTREESERVICECALLBACK ||
+       *iid == IID_IVISUALTREESERVICECALLBACK2 {
         *out = this.cast(); cb_add_ref(this); S_OK
     } else { E_NOINTERFACE }
 }
@@ -403,44 +457,75 @@ unsafe extern "system" fn cb_release(this:*mut Callback)->u32 {
     let prev=(*this).count.fetch_sub(1,Ordering::AcqRel);
     if prev==1 { drop(Box::from_raw(this)); 0 } else { prev-1 }
 }
+// Debug counters are deliberately bounded; do not dump the entire XAML tree
+// from inside ShellHost on every callback.
 unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRelation,
                                     element:VisualElement,mutation:i32)->i32 {
+    let sequence=CALLBACK_COUNT.fetch_add(1,Ordering::Relaxed)+1;
     let result=std::panic::catch_unwind(|| {
+        if sequence==1 { log("[N2/TRACE] First OnVisualTreeChange callback received"); }
         let ty=unsafe{bstr_string(element.ty)};
-        let name=unsafe{bstr_string(element.name)};
-        let mut candidate=None;
+        let mut name=unsafe{bstr_string(element.name)};
+        if mutation==0 && name.is_empty() && (ty.ends_with("GridView") || ty.ends_with("ContentControl")) {
+            if let Ok(runtime_name) = unsafe { framework_element_name(element.handle) } {
+                if !runtime_name.is_empty() { name=runtime_name; }
+            }
+        }
+        let is_wrap=ty.ends_with("ItemsWrapGrid");
+        let is_item=ty.ends_with("GridViewItem");
+        let is_named_anchor=name=="TogglesGroup" || name=="RootGridView";
+        if sequence<=8 || sequence%256==0 || is_wrap || is_named_anchor {
+            log(&format!("[N2/TRACE] event={sequence} mutation={mutation} handle=0x{:x} parent=0x{:x} type={ty} name={name}",
+                element.handle,relation.parent));
+        }
+
+        let mut candidate_hosts=Vec::new();
+        let mut missing_ancestor=None;
         if let Ok(mut nodes)=tree().lock() {
             if mutation==0 {
                 nodes.insert(element.handle,Node {parent:relation.parent,ty:ty.clone(),name});
-                if ty.ends_with("ItemsWrapGrid") && is_quick_settings_wrap(&nodes,relation.parent) {
-                    candidate=Some(element.handle);
-                } else if ty.ends_with("GridViewItem") {
-                    if let Some(parent)=nodes.get(&relation.parent) {
-                        if parent.ty.ends_with("ItemsWrapGrid") &&
-                           is_quick_settings_wrap(&nodes,parent.parent) {
-                            candidate=Some(relation.parent);
+                // The initial callbacks are not guaranteed parent-first: once a
+                // missing ancestor arrives, retry every known Quick Actions wrap.
+                if is_wrap || is_item || is_named_anchor {
+                    for (&handle,node) in nodes.iter() {
+                        if !node.ty.ends_with("ItemsWrapGrid") { continue; }
+                        if is_quick_settings_wrap(&nodes,handle) {
+                            // Retries happen after actual GridViewItem realization.
+                            if !is_item || relation.parent==handle {
+                                candidate_hosts.push(handle);
+                            }
+                        } else if is_wrap && handle==element.handle {
+                            missing_ancestor=Some(ancestor_summary(&nodes,handle));
                         }
                     }
                 }
             } else if mutation==1 {
-                if ty.ends_with("ItemsWrapGrid") {
-                    if let Ok(mut set)=inserted_hosts().lock() {set.remove(&element.handle);}
+                if is_wrap {
+                    if let Ok(mut set)=inserted_hosts().lock(){set.remove(&element.handle);}
                 }
                 nodes.remove(&element.handle);
             }
         }
-        if let Some(host)=candidate {
-            // Never hold the tree mutex while editing XAML. AddChild recurses
-            // into OnVisualTreeChange and would otherwise deadlock ShellHost.
+        if let Some(trace)=missing_ancestor {
+            log(&format!("[N2/TRACE] ItemsWrapGrid exists, but target ancestors not yet matched: {trace}"));
+        }
+        for host in candidate_hosts {
+            // Never hold the tree mutex while editing the XAML tree: AddChild
+            // invokes OnVisualTreeChange recursively from the same UI thread.
+            log(&format!("[N2/TRACE] target wrap matched, attempting insert host=0x{host:x}"));
             try_insert(host);
         }
     });
     if result.is_err(){log("[N2] callback panic trapped at COM boundary");}
     S_OK
 }
+unsafe extern "system" fn on_state_change(_: *mut Callback, _: u64, _: i32, _: *const u16)->i32 {
+    S_OK
+}
 static CALLBACK_VTBL: CallbackVtbl = CallbackVtbl {
     query_interface: cb_query, add_ref: cb_add_ref, release: cb_release,
     on_visual_tree_change: on_change,
+    on_element_state_changed: on_state_change,
 };
 
 #[repr(C)]
@@ -507,7 +592,17 @@ unsafe extern "system" fn site_set(this:*mut Site, input:*mut c_void)->i32 {
             let advise: unsafe extern "system" fn(*mut c_void,*mut Callback)->i32=
                 std::mem::transmute(slot(service,3));
             let hr=advise(service,cb);
-            log(&format!("AdviseVisualTreeChange HRESULT=0x{:08X}",hr as u32));
+            log(&format!("AdviseVisualTreeChange HRESULT=0x{:08X}, callbacks_so_far={}",
+                hr as u32, CALLBACK_COUNT.load(Ordering::Relaxed)));
+            if hr>=0 {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let callback_count=CALLBACK_COUNT.load(Ordering::Relaxed);
+                let (nodes,wraps,named)=tree().lock().map(|map| (
+                    map.len(), map.values().filter(|n|n.ty.ends_with("ItemsWrapGrid")).count(),
+                    map.values().filter(|n|n.name=="TogglesGroup" || n.name=="RootGridView").count()
+                )).unwrap_or((0,0,0));
+                log(&format!("[N2/TRACE] 1500ms snapshot: callbacks={callback_count} nodes={nodes} wraps={wraps} named_anchors={named}"));
+            }
             // The process is intentionally pinned for this experimental session.
             // Callback and diagnostics COM refs live until ShellHost exits.
         });
@@ -593,6 +688,17 @@ mod tests {
         nodes.insert(4,Node{parent:1,ty:"ContentControl".into(),name:"SlidersGroup".into()});
         nodes.insert(5,Node{parent:4,ty:"GridView".into(),name:"RootGridView".into()});
         assert!(!is_quick_settings_wrap(&nodes,5));
+    }
+
+    #[test]
+    fn late_ancestors_allow_wrap_matching() {
+        let mut nodes=HashMap::new();
+        nodes.insert(4,Node{parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
+        assert!(!is_quick_settings_wrap(&nodes,4));
+        nodes.insert(3,Node{parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
+        assert!(!is_quick_settings_wrap(&nodes,4));
+        nodes.insert(2,Node{parent:1,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
+        assert!(is_quick_settings_wrap(&nodes,4));
     }
 
     #[test]
