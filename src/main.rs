@@ -23,7 +23,7 @@ use std::env;
 fn usage() -> &'static str {
     "BE200AudioHub v0.1\n\
      Usage:\n\
-       be200hub ui quick-settings inject [--tap <DLL_PATH>]\n\\
+       be200hub ui quick-settings inject [--tap <DLL_PATH>]\n\
        be200hub doctor\n\
        be200hub usb list [--target-only]\n\
        be200hub usb inspect [VID:PID]\n\
