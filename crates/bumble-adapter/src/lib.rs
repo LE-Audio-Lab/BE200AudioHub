@@ -18,6 +18,7 @@ mod connection_manager;
 mod csis;
 mod gatt_session;
 mod init;
+mod iso_capabilities;
 mod privacy;
 mod scan;
 mod security;
@@ -33,6 +34,7 @@ pub use commit::{
 pub use connection_manager::LeConnectionManager;
 pub use csis::{rsi_matches_sirk, CsisMemberReport};
 pub use gatt_session::{AttValueEvent, LeAclState};
+pub use iso_capabilities::IsoControllerCapabilities;
 pub use init::{
     attach_be200_existing_operational, attach_be200_existing_operational_raw_trace,
     initialize_existing_operational, AttachReport, AttachedController,
