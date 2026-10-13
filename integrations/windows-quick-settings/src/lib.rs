@@ -524,6 +524,31 @@ fn try_insert_now(host:u64) {
 
 unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam:isize,
                                              _id:usize,_ref_data:usize)->isize {
+    if msg==WM_BE200_QS_CUSTOMIZE_CARRIER {
+        let container=PENDING_CONTAINER.swap(0,Ordering::AcqRel);
+        if container!=0 {
+            match std::panic::catch_unwind(|| unsafe { apply_carrier_template(container) }) {
+                Ok(Ok(()))=>{},
+                Ok(Err(S_FALSE))=>log(&format!("[N4.1] carrier candidate rejected; waiting for correct index-{CARRIER_INDEX} Bluetooth container")),
+                Ok(Err(hr))=>log(&format!("[N4.1] carrier customization FAILED: 0x{:08X}",hr as u32)),
+                Err(_)=>log("[N4.1] panic trapped during carrier customization"),
+            }
+        }
+        CUSTOMIZE_SCHEDULED.store(false,Ordering::Release);
+        return 0;
+    }
+    if msg==WM_BE200_QS_WIRE_BUTTON {
+        let button=PENDING_BUTTON.swap(0,Ordering::AcqRel);
+        if button!=0 {
+            match std::panic::catch_unwind(|| unsafe { wire_button_click_handle(button) }) {
+                Ok(Ok(()))=>{},
+                Ok(Err(hr))=>log(&format!("[N4.1] custom button wiring FAILED: 0x{:08X}",hr as u32)),
+                Err(_)=>log("[N4.1] panic trapped during custom button wiring"),
+            }
+        }
+        WIRE_BUTTON_SCHEDULED.store(false,Ordering::Release);
+        return 0;
+    }
     if msg==WM_BE200_QS_DUPLICATE_VM {
         let source=PENDING_SOURCE.swap(0,Ordering::AcqRel);
         let vm=PENDING_VM.swap(0,Ordering::AcqRel);
@@ -539,7 +564,11 @@ unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam
                 if hr_count<0 {
                     log(&format!("[N4] duplicate VM count failed: 0x{:08X}",hr_count as u32));
                 } else {
-                    let index=2u32.min(before);
+                    let index=CARRIER_INDEX.min(before);
+                    BLUETOOTH_VM_HANDLE.store(vm,Ordering::Release);
+                    if CUSTOM_TILE_MODE.load(Ordering::Acquire) {
+                        CARRIER_ARMED.store(true,Ordering::Release);
+                    }
                     let hr=add_child(service,source,vm,index);
                     if hr>=0 {
                         let mut after=0u32;
@@ -547,7 +576,15 @@ unsafe extern "system" fn qs_subclass_proc(hwnd:Hwnd,msg:u32,wparam:usize,lparam
                         DUPLICATE_VM_DONE.store(true,Ordering::Release);
                         log(&format!("[N4] DATASOURCE INSERT OK source=0x{source:x} vm=0x{vm:x} index={index} count_before={before} count_after={} count_hr=0x{:08X}",
                             if hr_after>=0{after}else{0},hr_after as u32));
+                        if CUSTOM_TILE_MODE.load(Ordering::Acquire) {
+                            if let Some(container)=find_quick_actions_container(index) {
+                                schedule_customize_carrier(container);
+                            } else {
+                                log(&format!("[N4.1] index-{index} carrier not yet realized; waiting for visual-tree callback"));
+                            }
+                        }
                     } else {
+                        CARRIER_ARMED.store(false,Ordering::Release);
                         log(&format!("[N4] DATASOURCE INSERT FAILED source=0x{source:x} vm=0x{vm:x} index={index} hr=0x{:08X}",hr as u32));
                     }
                 }
@@ -688,7 +725,7 @@ fn schedule_customize_carrier(container:u64) {
 }
 
 fn schedule_wire_custom_button(button:u64) {
-    if !CUSTOM_TILE_MODE.load(Ordering::Acquire) || !CUSTOMIZE_DONE.load(Ordering::Acquire) {
+    if !CUSTOM_TILE_MODE.load(Ordering::Acquire) {
         return;
     }
     if wired_buttons().lock().map(|set|set.contains(&button)).unwrap_or(true){return;}
@@ -1556,7 +1593,8 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         if sequence==1 { log("[N2/TRACE] First OnVisualTreeChange callback received"); }
         let ty=unsafe{bstr_string(element.ty)};
         let mut name=unsafe{bstr_string(element.name)};
-        if mutation==0 && name.is_empty() && (ty.ends_with("GridView") || ty.ends_with("ContentControl")) {
+        if mutation==0 && name.is_empty() &&
+           (ty.ends_with("GridView") || ty.ends_with("ContentControl") || ty.ends_with("Button")) {
             if let Ok(runtime_name) = unsafe { framework_element_name(element.handle) } {
                 if !runtime_name.is_empty() { name=runtime_name; }
             }
@@ -1570,10 +1608,22 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         }
 
         let mut candidate_grids=Vec::new();
+        let mut carrier_candidate=None;
+        let mut custom_button_candidate=None;
         let mut missing_ancestor=None;
         if let Ok(mut nodes)=tree().lock() {
             if mutation==0 {
-                nodes.insert(element.handle,Node {parent:relation.parent,index:relation.index,ty:ty.clone(),name});
+                nodes.insert(element.handle,Node {parent:relation.parent,index:relation.index,ty:ty.clone(),name:name.clone()});
+                if CUSTOM_TILE_MODE.load(Ordering::Acquire) &&
+                   CARRIER_ARMED.load(Ordering::Acquire) &&
+                   is_item && relation.index==CARRIER_INDEX &&
+                   is_quick_settings_wrap(&nodes,relation.parent) {
+                    carrier_candidate=Some(element.handle);
+                }
+                if CUSTOM_TILE_MODE.load(Ordering::Acquire) &&
+                   name=="BE200QuickSettingsN41Button" {
+                    custom_button_candidate=Some(element.handle);
+                }
                 // The initial callbacks are not guaranteed parent-first: once a
                 // missing ancestor arrives, retry every known Quick Actions wrap.
                 if is_wrap || is_item || is_named_anchor {
@@ -1599,6 +1649,14 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         }
         if let Some(trace)=missing_ancestor {
             log(&format!("[N2/TRACE] ItemsWrapGrid exists, but target ancestors not yet matched: {trace}"));
+        }
+        if let Some(container)=carrier_candidate {
+            log(&format!("[N4.1] realized index-{CARRIER_INDEX} carrier candidate handle=0x{container:x}"));
+            schedule_customize_carrier(container);
+        }
+        if let Some(button)=custom_button_candidate {
+            log(&format!("[N4.1] custom template button realized handle=0x{button:x}"));
+            schedule_wire_custom_button(button);
         }
         candidate_grids.sort_unstable();
         candidate_grids.dedup();
@@ -1633,9 +1691,11 @@ unsafe fn configure_mode_from_initialization_data(diagnostics:*mut c_void) {
     }
     let mode=if raw.is_null(){String::new()}else{bstr_string(raw)};
     if !raw.is_null(){SysFreeString(raw);}
-    let duplicate=mode.eq_ignore_ascii_case("duplicate-native-vm");
+    let custom=mode.eq_ignore_ascii_case("custom-tile");
+    let duplicate=mode.eq_ignore_ascii_case("duplicate-native-vm") || custom;
+    CUSTOM_TILE_MODE.store(custom,Ordering::Release);
     DUPLICATE_NATIVE_VM_MODE.store(duplicate,Ordering::Release);
-    log(&format!("[N4] initialization mode={mode:?} duplicate_native_vm={duplicate}"));
+    log(&format!("[N4] initialization mode={mode:?} duplicate_native_vm={duplicate} custom_tile={custom}"));
 }
 
 #[repr(C)]
