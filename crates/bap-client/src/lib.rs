@@ -5,11 +5,13 @@
 
 mod codec_plan;
 mod codec_config;
+mod cis_session;
 mod qos_plan;
 mod discovery;
 mod ase_read;
 mod snapshot;
 
+pub use cis_session::{establish_dual_cis_and_release, DualCisProbeSnapshot, EnabledMember};
 pub use codec_config::{
     configure_and_release, configure_qos_and_release,
     CodecConfigScope, CodecConfiguredMember, CodecConfiguredSetSnapshot,
