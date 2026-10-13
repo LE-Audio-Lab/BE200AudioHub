@@ -54,6 +54,22 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N3.1: inherited ItemsSource lookup on Build 26200
+
+A HIL trace reached the deferred UI-thread VM probe but
+`GetPropertyIndex(grid, "ItemsSource")` returned `0x80070057 (E_INVALIDARG)`.
+That proves callback discovery and UI-thread dispatch are working; the failure is
+the XamlOM property-name lookup itself.
+
+N3.1 now tries owner-qualified forms
+(`ItemsControl.ItemsSource` and
+`Windows.UI.Xaml.Controls.ItemsControl.ItemsSource`) and, if those are also
+rejected, discovers the exact property index through
+`GetPropertyValuesChain`. The same fallback is used for realized
+`GridViewItem.Content` handles.
+
+The probe remains read-only.
+
 ## N3: clone-path VM probe
 
 N2 direct `ItemsWrapGrid.Children` mutation is now **disabled**. Two HIL runs on
