@@ -86,7 +86,16 @@ impl ResponseGate {
                 if status.ase_id == self.ase_id {
                     if status.state == self.expected_state {
                         self.final_status = Some(status);
-                    } else if status.state != AseState::RELEASING {
+                    } else if status.state == AseState::RELEASING
+                        || (self.expected_state == AseState::CODEC_CONFIGURED
+                            && status.state == AseState::IDLE)
+                        || (self.expected_state == AseState::IDLE
+                            && status.state == AseState::CODEC_CONFIGURED)
+                    {
+                        // A pre-command snapshot or a delayed notification from
+                        // the prior state is not proof of this command's success.
+                        // Keep waiting for BOTH CP success and the target state.
+                    } else {
                         return Err(format!(
                             "ASE {} unexpectedly entered state 0x{:02X} while awaiting 0x{:02X}",
                             self.ase_id, status.state.0, self.expected_state.0
@@ -264,6 +273,17 @@ fn perform_operation(
 ) -> Result<AseStatus, String> {
     let opcode = operation.opcode();
     let handle = prepared.sink.acl_handle;
+    // A second ear may have generated notifications while this ACL was idle.
+    // Drain before submitting a new CP opcode so stale events cannot satisfy
+    // (or accidentally reject) the new operation's response gate.
+    let stale = controller.drain_att_value_events(&[handle])
+        .map_err(|error| format!("ASCS pre-command event drain failed: {error}"))?;
+    if !stale.is_empty() {
+        println!(
+            "[R4.2/EVENT] {} discarded {} pre-command ATT value event(s)",
+            prepared.sink.side.as_str(), stale.len()
+        );
+    }
     // Subscriptions survive the temporary GattClient: CCCDs are peer-side.
     // These writes are the only ASCS mutation boundary in this module.
     let ((), initial_events) = controller.with_encrypted_gatt_events(
