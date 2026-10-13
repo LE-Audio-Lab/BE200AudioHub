@@ -54,6 +54,31 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N3.2: VM ABI + visual identity probe
+
+The N3.1 HIL run resolved `RootGridView.ItemsSource` through
+`ItemsControl.ItemsSource` and enumerated **12**
+`ControlCenter.QuickActionViewModel` objects. Each collection element exposed a
+real XamlOM instance handle (`MetadataBit::IsValueHandle`), so the realized
+container fallback is no longer required for the full vector.
+
+`GetPropertyValuesChain` returns `0x80070490 (ERROR_NOT_FOUND)` for the VM
+objects themselves. They are plain WinRT bindable objects rather than XAML
+DependencyObjects. Their advertised interfaces include the standard WUX
+`INotifyPropertyChanged` and `ICustomPropertyProvider`.
+
+N3.2 therefore remains read-only and changes the probe strategy:
+
+1. map each realized `PaginatedToggleButton#ToggleButton` back to its
+   `GridViewItem` index and read `AutomationProperties.AutomationId`;
+2. use `Microsoft.QuickAction.Bluetooth` to prove the Bluetooth VM index;
+3. query only that VM through `ICustomPropertyProvider`, including property
+   type/read/write/value summaries for a bounded candidate set;
+4. probe whether `ControlCenter.QuickActionViewModel` exposes a normal
+   `IActivationFactory`.
+
+This stage still performs **no ItemsSource mutation and no B3P/backend action**.
+
 ## N3.1: inherited ItemsSource lookup on Build 26200
 
 A HIL trace reached the deferred UI-thread VM probe but
