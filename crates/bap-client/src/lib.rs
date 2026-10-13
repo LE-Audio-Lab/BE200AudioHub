@@ -6,6 +6,7 @@
 mod codec_plan;
 mod codec_config;
 mod discovery;
+mod ase_read;
 mod snapshot;
 
 pub use codec_config::{
