@@ -54,6 +54,36 @@ A nonnegative HRESULT from the launcher **only indicates that Windows accepted t
 
 If a stage fails, preserve its HRESULT, Windows event logs and the TAP log. Do **not** immediately retry in a crashing ShellHost process.
 
+## N4.1.1: click ABI fix and pixel/interaction alignment
+
+The first N4.1 HIL render succeeded, but clicking the custom button crashed
+ShellHost. Root cause was an ABI bug in the Rust delegate implementation:
+`Windows.UI.Xaml.RoutedEventHandler` derives directly from `IUnknown`, so its
+vtable is `QueryInterface/AddRef/Release/Invoke`. The earlier PoC incorrectly
+inserted the three `IInspectable` methods before `Invoke`; XAML therefore
+called the wrong slot on Click. Commit `d41489edf2c5` fixes that layout.
+
+Pixel comparison against the Build 26200 Quick Settings capture also found that
+the custom content was shifted down exactly 8 px. The native item/template
+geometry is:
+
+- GridViewItem/content root: 96x88
+- primary action row: 96x48
+- title action row: 96x24
+- unused bottom slack: 16 px
+
+The first custom template used a 96x72 root. XAML centered that 72 px child in
+the native 88 px content slot, producing the observed +8 px button and label
+offset. The title was also a passive TextBlock, while native Quick Actions use a
+second 96x24 Button for the title row.
+
+The current template therefore uses a 96x88 top-aligned root, a 96x48 primary
+Button, and a 96x24 title Button. Both buttons route to the same UI-only handler.
+Opaque hard-coded fill/stroke colors were removed so the shell's normal Button
+theme resources can drive pointer/pressed/focus states. This remains a visual
+approximation of `ControlCenter.PaginatedToggleButton`; exact native style
+cloning is deferred until the corrected interaction path is HIL-tested.
+
 ## N4.1: generated carrier ContentTemplate override
 
 N4 HIL proved that inserting the already-existing Bluetooth
