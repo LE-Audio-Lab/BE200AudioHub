@@ -51,6 +51,12 @@ const IID_IINSPECTABLE: Guid = Guid { d1:0xaf86e2e0,d2:0xb12d,d3:0x4c6a,
     d4:[0x9c,0x5a,0xd7,0xaa,0x65,0x10,0x1e,0x90] };
 const IID_ROUTED_EVENT_HANDLER: Guid = Guid { d1:0xa856e674,d2:0xb0b6,d3:0x4bc3,
     d4:[0xbb,0xa8,0x1b,0xa0,0x6e,0x40,0xd4,0xb5] };
+const IID_ICUSTOMPROPERTYPROVIDER: Guid = Guid { d1:0x7c925755,d2:0x3e48,d3:0x42b4,
+    d4:[0x86,0x77,0x76,0x37,0x22,0x67,0x03,0x3f] };
+const IID_IPROPERTYVALUE: Guid = Guid { d1:0x4bd682dd,d2:0x7554,d3:0x40e9,
+    d4:[0x9a,0x9b,0x82,0x65,0x4e,0xde,0x7e,0x62] };
+const IID_IACTIVATIONFACTORY: Guid = Guid { d1:0x00000035,d2:0x0000,d3:0x0000,
+    d4:[0xc0,0x00,0x00,0x00,0x00,0x00,0x00,0x46] };
 
 
 type Hwnd = *mut c_void;
@@ -593,6 +599,211 @@ unsafe fn runtime_class_and_iids(handle:u64)->Result<(String,Vec<Guid>),i32> {
     Ok((class_name,iids))
 }
 
+
+#[repr(C)]
+struct TypeName {
+    name: *mut c_void,
+    kind: i32,
+}
+
+unsafe fn take_hstring(raw:*mut c_void)->String {
+    if raw.is_null(){return String::new();}
+    let h=HString(raw);
+    let mut len=0u32;
+    let ptr=WindowsGetStringRawBuffer(h.0,&mut len);
+    if ptr.is_null(){String::new()}else{String::from_utf16_lossy(std::slice::from_raw_parts(ptr,len as usize))}
+}
+
+unsafe fn inspectable_from_handle(handle:u64)->Result<ComPtr,i32> {
+    let diagnostics=DIAGNOSTICS_PTR.load(Ordering::Acquire) as *mut c_void;
+    if diagnostics.is_null(){return Err(E_FAIL);}
+    let from_handle:unsafe extern "system" fn(*mut c_void,u64,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(diagnostics,6));
+    let mut inspectable=null_mut();
+    let hr=from_handle(diagnostics,handle,&mut inspectable);
+    if hr<0||inspectable.is_null(){Err(if hr<0{hr}else{E_FAIL})}else{Ok(ComPtr(inspectable))}
+}
+
+unsafe fn inspectable_runtime_class(ptr:*mut c_void)->String {
+    if ptr.is_null(){return String::new();}
+    let get_class:unsafe extern "system" fn(*mut c_void,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(ptr,4));
+    let mut raw=null_mut();
+    let hr=get_class(ptr,&mut raw);
+    if hr<0||raw.is_null(){String::new()}else{take_hstring(raw)}
+}
+
+unsafe fn boxed_value_summary(value:*mut c_void)->String {
+    if value.is_null(){return "<null>".into();}
+    let mut property_value=null_mut();
+    let hr=query_interface(value,&IID_IPROPERTYVALUE,&mut property_value);
+    if hr<0||property_value.is_null() {
+        return format!("inspectable(class={:?})",inspectable_runtime_class(value));
+    }
+    let property_value=ComPtr(property_value);
+    let get_type:unsafe extern "system" fn(*mut c_void,*mut i32)->i32=
+        std::mem::transmute(slot(property_value.as_raw(),6));
+    let mut ty=0i32;
+    let hr=get_type(property_value.as_raw(),&mut ty);
+    if hr<0{return format!("IPropertyValue(type HRESULT=0x{:08X})",hr as u32);}
+    match ty {
+        1=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u8)->i32=std::mem::transmute(slot(property_value.as_raw(),8));
+            let mut v=0u8; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("UInt8({v})")}else{format!("UInt8(hr=0x{:08X})",hr as u32)}
+        }
+        2=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut i16)->i32=std::mem::transmute(slot(property_value.as_raw(),9));
+            let mut v=0i16; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Int16({v})")}else{format!("Int16(hr=0x{:08X})",hr as u32)}
+        }
+        3=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u16)->i32=std::mem::transmute(slot(property_value.as_raw(),10));
+            let mut v=0u16; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("UInt16({v})")}else{format!("UInt16(hr=0x{:08X})",hr as u32)}
+        }
+        4=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut i32)->i32=std::mem::transmute(slot(property_value.as_raw(),11));
+            let mut v=0i32; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Int32({v})")}else{format!("Int32(hr=0x{:08X})",hr as u32)}
+        }
+        5=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u32)->i32=std::mem::transmute(slot(property_value.as_raw(),12));
+            let mut v=0u32; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("UInt32({v})")}else{format!("UInt32(hr=0x{:08X})",hr as u32)}
+        }
+        6=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut i64)->i32=std::mem::transmute(slot(property_value.as_raw(),13));
+            let mut v=0i64; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Int64({v})")}else{format!("Int64(hr=0x{:08X})",hr as u32)}
+        }
+        7=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u64)->i32=std::mem::transmute(slot(property_value.as_raw(),14));
+            let mut v=0u64; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("UInt64({v})")}else{format!("UInt64(hr=0x{:08X})",hr as u32)}
+        }
+        8=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut f32)->i32=std::mem::transmute(slot(property_value.as_raw(),15));
+            let mut v=0f32; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Single({v})")}else{format!("Single(hr=0x{:08X})",hr as u32)}
+        }
+        9=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut f64)->i32=std::mem::transmute(slot(property_value.as_raw(),16));
+            let mut v=0f64; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Double({v})")}else{format!("Double(hr=0x{:08X})",hr as u32)}
+        }
+        10=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u16)->i32=std::mem::transmute(slot(property_value.as_raw(),17));
+            let mut v=0u16; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Char16({:?})",char::from_u32(v as u32))}else{format!("Char16(hr=0x{:08X})",hr as u32)}
+        }
+        11=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut u8)->i32=std::mem::transmute(slot(property_value.as_raw(),18));
+            let mut v=0u8; let hr=f(property_value.as_raw(),&mut v);
+            if hr>=0{format!("Boolean({})",v!=0)}else{format!("Boolean(hr=0x{:08X})",hr as u32)}
+        }
+        12=>{
+            let f:unsafe extern "system" fn(*mut c_void,*mut *mut c_void)->i32=std::mem::transmute(slot(property_value.as_raw(),19));
+            let mut raw=null_mut(); let hr=f(property_value.as_raw(),&mut raw);
+            if hr>=0{format!("String({:?})",take_hstring(raw))}else{format!("String(hr=0x{:08X})",hr as u32)}
+        }
+        _=>format!("IPropertyValue(type={ty})"),
+    }
+}
+
+unsafe fn probe_custom_property_provider(index:u32,handle:u64) {
+    let inspectable=match inspectable_from_handle(handle) {
+        Ok(x)=>x,
+        Err(hr)=>{vm_log(&format!("item[{index}] IInspectable lookup failed hr=0x{:08X}",hr as u32));return;}
+    };
+    let mut provider=null_mut();
+    let hr=query_interface(inspectable.as_raw(),&IID_ICUSTOMPROPERTYPROVIDER,&mut provider);
+    if hr<0||provider.is_null() {
+        vm_log(&format!("item[{index}] ICustomPropertyProvider unavailable hr=0x{:08X}",hr as u32));
+        return;
+    }
+    let provider=ComPtr(provider);
+
+    let get_string:unsafe extern "system" fn(*mut c_void,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(provider.as_raw(),8));
+    let mut repr=null_mut();
+    let hr_repr=get_string(provider.as_raw(),&mut repr);
+    let repr_text=if hr_repr>=0{take_hstring(repr)}else{format!("<hr=0x{:08X}>",hr_repr as u32)};
+
+    let get_type:unsafe extern "system" fn(*mut c_void,*mut TypeName)->i32=
+        std::mem::transmute(slot(provider.as_raw(),9));
+    let mut type_name=TypeName{name:null_mut(),kind:0};
+    let hr_type=get_type(provider.as_raw(),&mut type_name);
+    let type_text=if hr_type>=0{take_hstring(type_name.name)}else{format!("<hr=0x{:08X}>",hr_type as u32)};
+    vm_log(&format!("item[{index}] ICustomPropertyProvider repr={repr_text:?} type={type_text:?} kind={}",type_name.kind));
+
+    const CANDIDATES:&[&str]=&[
+        "Name","DisplayName","Title","Label","Text","Description","Subtitle","Status",
+        "AutomationName","AutomationId","QuickActionId","QuickActionID","Id","Identifier",
+        "Icon","IconSource","FallbackIconSource","Glyph","IconGlyph","IconId","IconName",
+        "State","ToggleState","IsEnabled","IsChecked","IsOn","IsActive","IsAvailable",
+        "IsVisible","Visibility","IsSplitButton","HasSecondaryAction","CanShowDetails",
+        "PrimaryAction","SecondaryAction","Action","Command","ToggleCommand","SettingsCommand",
+        "QuickAction","QuickActionName","QuickActionType","Source","Uri","SettingsUri","LaunchUri",
+        "ToolTip","Tooltip","PositionInSet","SizeOfSet"
+    ];
+    let get_property:unsafe extern "system" fn(*mut c_void,*mut c_void,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(provider.as_raw(),6));
+
+    for candidate in CANDIDATES {
+        let name=match HString::new(candidate){Ok(x)=>x,Err(_)=>continue};
+        let mut prop=null_mut();
+        let hr=get_property(provider.as_raw(),name.0,&mut prop);
+        if hr<0||prop.is_null(){continue;}
+        let prop=ComPtr(prop);
+
+        let get_prop_name:unsafe extern "system" fn(*mut c_void,*mut *mut c_void)->i32=
+            std::mem::transmute(slot(prop.as_raw(),7));
+        let mut raw_name=null_mut();
+        let hr_name=get_prop_name(prop.as_raw(),&mut raw_name);
+        let prop_name=if hr_name>=0{take_hstring(raw_name)}else{candidate.to_string()};
+
+        let get_prop_type:unsafe extern "system" fn(*mut c_void,*mut TypeName)->i32=
+            std::mem::transmute(slot(prop.as_raw(),6));
+        let mut prop_type=TypeName{name:null_mut(),kind:0};
+        let hr_pt=get_prop_type(prop.as_raw(),&mut prop_type);
+        let prop_type_text=if hr_pt>=0{take_hstring(prop_type.name)}else{format!("<hr=0x{:08X}>",hr_pt as u32)};
+
+        let can_write_fn:unsafe extern "system" fn(*mut c_void,*mut u8)->i32=
+            std::mem::transmute(slot(prop.as_raw(),12));
+        let can_read_fn:unsafe extern "system" fn(*mut c_void,*mut u8)->i32=
+            std::mem::transmute(slot(prop.as_raw(),13));
+        let mut can_write=0u8; let _=can_write_fn(prop.as_raw(),&mut can_write);
+        let mut can_read=0u8; let _=can_read_fn(prop.as_raw(),&mut can_read);
+
+        let get_value:unsafe extern "system" fn(*mut c_void,*mut c_void,*mut *mut c_void)->i32=
+            std::mem::transmute(slot(prop.as_raw(),8));
+        let mut value=null_mut();
+        let hr_value=get_value(prop.as_raw(),inspectable.as_raw(),&mut value);
+        let value_summary=if hr_value>=0&&!value.is_null() {
+            let value=ComPtr(value);
+            boxed_value_summary(value.as_raw())
+        } else if hr_value>=0 {"<null>".into()} else {format!("<hr=0x{:08X}>",hr_value as u32)};
+
+        vm_log(&format!("  custom-prop candidate={candidate:?} name={prop_name:?} type={prop_type_text:?} kind={} can_read={} can_write={} value={value_summary}",
+            prop_type.kind,can_read!=0,can_write!=0));
+    }
+}
+
+unsafe fn probe_activation_factory() {
+    let class=match HString::new("ControlCenter.QuickActionViewModel"){Ok(x)=>x,Err(hr)=>{
+        vm_log(&format!("[N3.2] QuickActionViewModel HSTRING failed hr=0x{:08X}",hr as u32));return;
+    }};
+    let mut factory=null_mut();
+    let hr=RoGetActivationFactory(class.0,&IID_IACTIVATIONFACTORY,&mut factory);
+    if hr>=0&&!factory.is_null() {
+        vm_log("[N3.2] RoGetActivationFactory(ControlCenter.QuickActionViewModel): SUCCESS (class exposes IActivationFactory)");
+        com_release(factory);
+    } else {
+        vm_log(&format!("[N3.2] RoGetActivationFactory(ControlCenter.QuickActionViewModel) failed hr=0x{:08X}",hr as u32));
+    }
+}
+
 unsafe fn free_source_array(ptr:*mut PropertyChainSource,count:u32) {
     if ptr.is_null(){return;}
     for item in std::slice::from_raw_parts_mut(ptr,count as usize) {
@@ -754,6 +965,72 @@ unsafe fn property_handle(service:*mut c_void, object:u64, property_name:&str)->
     }
 }
 
+
+unsafe fn xaml_property_text(service:*mut c_void, object:u64, wanted:&str)->Option<String> {
+    let get_chain:unsafe extern "system" fn(*mut c_void,u64,*mut u32,*mut *mut PropertyChainSource,
+                                            *mut u32,*mut *mut PropertyChainValue)->i32=
+        std::mem::transmute(slot(service,7));
+    let mut source_count=0u32;
+    let mut sources=null_mut();
+    let mut property_count=0u32;
+    let mut properties=null_mut();
+    let hr=get_chain(service,object,&mut source_count,&mut sources,&mut property_count,&mut properties);
+    if hr<0{return None;}
+    let mut result=None;
+    if !properties.is_null() {
+        for p in std::slice::from_raw_parts(properties,property_count as usize) {
+            let name=bstr_string(p.property_name);
+            if name.eq_ignore_ascii_case(wanted) ||
+               name.rsplit('.').next().map_or(false,|tail|tail.eq_ignore_ascii_case(wanted)) {
+                result=Some(bstr_string(p.value));
+                break;
+            }
+        }
+    }
+    free_source_array(sources,source_count);
+    free_property_array(properties,property_count);
+    result
+}
+
+unsafe fn visual_quick_action_identities(service:*mut c_void,grid:u64)->HashMap<u32,String> {
+    let buttons:Vec<(u32,u64)>=tree().lock().map(|nodes| {
+        let mut out=Vec::new();
+        for (&handle,node) in nodes.iter() {
+            if !node.ty.ends_with("PaginatedToggleButton") || node.name!="ToggleButton" {continue;}
+            let mut ancestor=handle;
+            let mut item=None;
+            for _ in 0..32 {
+                let Some(n)=nodes.get(&ancestor) else{break;};
+                if n.ty.ends_with("GridViewItem") {
+                    item=Some((n.index,ancestor));
+                    break;
+                }
+                if n.parent==0||n.parent==ancestor{break;}
+                ancestor=n.parent;
+            }
+            if let Some((index,item_handle))=item {
+                if quick_actions_grid_handle(&nodes,item_handle)==Some(grid) {
+                    out.push((index,handle));
+                }
+            }
+        }
+        out.sort_unstable_by_key(|(index,_)|*index);
+        out
+    }).unwrap_or_default();
+
+    let mut map=HashMap::new();
+    for (index,button) in buttons {
+        let automation_id=xaml_property_text(service,button,"AutomationId")
+            .or_else(||xaml_property_text(service,button,"AutomationProperties.AutomationId"))
+            .unwrap_or_default();
+        let automation_name=xaml_property_text(service,button,"AutomationProperties.Name")
+            .unwrap_or_default();
+        vm_log(&format!("visual item[{index}] button=0x{button:x} AutomationId={automation_id:?} AutomationName={automation_name:?}"));
+        if !automation_id.is_empty(){map.insert(index,automation_id);}
+    }
+    map
+}
+
 // GetCollectionElements can return only an evaluated string for a handle-backed
 // object on some XamlOM surfaces. The realized GridViewItem.Content property is
 // an independent, read-only route to the exact QuickActionViewModel handle.
@@ -809,7 +1086,9 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     let hr=get_count(service,source,&mut count);
     if hr<0{return Err(hr);}
     log(&format!("[N3] RootGridView.ItemsSource handle=0x{source:x} count={count}"));
-    if count<EXPECTED_NATIVE_TILES{return Err(S_FALSE);}
+    if count==0{return Err(S_FALSE);}
+    probe_activation_factory();
+    let visual_identities=visual_quick_action_identities(service,grid);
     let realized_vm_handles=realized_vm_handles_for_grid(service,grid);
     log(&format!("[N3] realized container Content handles available={}",realized_vm_handles.len()));
 
@@ -839,11 +1118,18 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
                     iids.iter().map(guid_text).collect::<Vec<_>>().join(",")));
             }
             let collection_text=format!("{value_type}\n{value}").to_ascii_lowercase();
+            let visual_id=visual_identities.get(&e.index).cloned().unwrap_or_default();
             let mut score=0i32;
+            if visual_id.eq_ignore_ascii_case("Microsoft.QuickAction.Bluetooth"){score+=1000;}
             if collection_text.contains("microsoft.quickaction.bluetooth"){score+=100;}
             if collection_text.contains("qa_bluetooth"){score+=50;}
             if collection_text.contains("bluetooth"){score+=10;}
-            score+=dump_vm_properties(service,e.index,handle).unwrap_or(0);
+
+            // QuickActionViewModel is a plain WinRT bindable object here.
+            // XamlOM GetPropertyValuesChain returned ERROR_NOT_FOUND for VM
+            // handles in HIL; query the advertised ICustomPropertyProvider
+            // interface instead.
+            probe_custom_property_provider(e.index,handle);
             if score>0 && best.map_or(true,|(_,_,old)|score>old){best=Some((e.index,handle,score));}
         }
     }
@@ -856,7 +1142,7 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     if let Some((index,handle,score))=best {
         log(&format!("[N3] VM snapshot complete; best Bluetooth candidate item[{index}] handle=0x{handle:x} score={score}. Full dump: qs-vm-dump.log"));
     } else {
-        log("[N3] VM snapshot complete; handles were inspected but no positive Bluetooth identity match was found. See qs-vm-dump.log");
+        log("[N3.2] VM snapshot complete but no visual AutomationId proved the Bluetooth item. See qs-vm-dump.log");
     }
     Ok(())
 }
@@ -1217,6 +1503,13 @@ mod tests {
         assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
         assert_eq!(parse_instance_handle("12345"),Some(12345));
         assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
+    }
+
+    #[test]
+    fn n32_known_winrt_iids_match_public_abi() {
+        assert_eq!(guid_text(&IID_ICUSTOMPROPERTYPROVIDER),"7c925755-3e48-42b4-8677-76372267033f");
+        assert_eq!(guid_text(&IID_IPROPERTYVALUE),"4bd682dd-7554-40e9-9a9b-82654ede7e62");
+        assert_eq!(guid_text(&IID_IACTIVATIONFACTORY),"00000035-0000-0000-c000-000000000046");
     }
 
     #[test]
