@@ -63,6 +63,9 @@ type Hwnd = *mut c_void;
 type SubclassProc = unsafe extern "system" fn(Hwnd,u32,usize,isize,usize,usize)->isize;
 const WM_BE200_QS_PROBE: u32 = 0x8000 + 0x4B2;
 const WM_BE200_QS_DUPLICATE_VM: u32 = 0x8000 + 0x4B3;
+const WM_BE200_QS_CUSTOMIZE_CARRIER: u32 = 0x8000 + 0x4B4;
+const WM_BE200_QS_WIRE_BUTTON: u32 = 0x8000 + 0x4B5;
+const CARRIER_INDEX: u32 = 2;
 const QS_SUBCLASS_ID: usize = 0xBE20_0200;
 const EXPECTED_NATIVE_TILES: u32 = 11;
 
@@ -206,6 +209,30 @@ const TILE_XAML: &str = r##"
 </GridViewItem>
 "##;
 
+const CARRIER_TEMPLATE_XAML: &str = r##"
+<DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid Width="96" Height="72">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="48"/>
+      <RowDefinition Height="24"/>
+    </Grid.RowDefinitions>
+    <Button x:Name="BE200QuickSettingsN41Button"
+        Grid.Row="0" Width="96" Height="48"
+        Padding="0" CornerRadius="4" BorderThickness="1"
+        Background="#FF3D3D3D" BorderBrush="#FF515151"
+        AutomationProperties.AutomationId="BE200.QuickAction.DisconnectB3P"
+        AutomationProperties.Name="断开 B3P（仅前端测试）">
+      <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE711;" FontSize="17"/>
+    </Button>
+    <TextBlock Grid.Row="1" Text="断开 B3P" FontSize="12"
+        Height="16" Margin="0,8,0,0"
+        HorizontalAlignment="Stretch" VerticalAlignment="Top"
+        TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+  </Grid>
+</DataTemplate>
+"##;
+
 #[repr(C)]
 struct EventHandler { vtable: *const EventHandlerVtbl, count: AtomicU32 }
 #[repr(C)]
@@ -264,18 +291,30 @@ static INSERT_BUSY: AtomicBool = AtomicBool::new(false);
 static PROBE_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static PENDING_GRID: AtomicU64 = AtomicU64::new(0);
 static DUPLICATE_NATIVE_VM_MODE: AtomicBool = AtomicBool::new(false);
+static CUSTOM_TILE_MODE: AtomicBool = AtomicBool::new(false);
 static DUPLICATE_VM_SCHEDULED: AtomicBool = AtomicBool::new(false);
 static DUPLICATE_VM_DONE: AtomicBool = AtomicBool::new(false);
+static CARRIER_ARMED: AtomicBool = AtomicBool::new(false);
+static CUSTOMIZE_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static CUSTOMIZE_DONE: AtomicBool = AtomicBool::new(false);
+static WIRE_BUTTON_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static BLUETOOTH_VM_HANDLE: AtomicU64 = AtomicU64::new(0);
 static PENDING_SOURCE: AtomicU64 = AtomicU64::new(0);
 static PENDING_VM: AtomicU64 = AtomicU64::new(0);
+static PENDING_CONTAINER: AtomicU64 = AtomicU64::new(0);
+static PENDING_BUTTON: AtomicU64 = AtomicU64::new(0);
 static SUBCLASS_HWND: AtomicUsize = AtomicUsize::new(0);
 static PROBED_GRIDS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 static INSERTED_HOSTS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+static WIRED_BUTTONS: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
 fn inserted_hosts() -> &'static Mutex<HashSet<u64>> {
     INSERTED_HOSTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 fn probed_grids() -> &'static Mutex<HashSet<u64>> {
     PROBED_GRIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+fn wired_buttons() -> &'static Mutex<HashSet<u64>> {
+    WIRED_BUTTONS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// Create a complete GridViewItem from UWP XAML inside ShellHost itself.
