@@ -105,71 +105,87 @@ impl AttachedController {
             .map(|member| store.bonded_peer_identity(member))
             .collect::<TransportResult<Vec<_>>>()?;
 
-        self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
-            address_resolution_enable: 0,
-        })?;
-        self.successful_privacy_command(Command::LeClearResolvingList)?;
+        // Keep the entire controller-list transaction behind one rollback
+        // boundary. Errors after the first mutation must not leave a partially
+        // installed resolving list or address resolution enabled.
+        let configure = (|| -> TransportResult<()> {
+            self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
+                address_resolution_enable: 0,
+            })?;
+            self.successful_privacy_command(Command::LeClearResolvingList)?;
 
-        let response = self
-            .host
-            .send_command(Command::LeReadResolvingListSize, COMMAND_TIMEOUT)?;
-        if response.status() != Some(0) {
-            return Err(Error::Remote(format!(
-                "LE Read Resolving List Size failed with status {:?}",
-                response.status()
-            )));
-        }
-        let capacity = match response.return_parameters() {
-            Some(ReturnParameters::LeReadResolvingListSize {
-                resolving_list_size,
-                ..
-            }) => *resolving_list_size,
-            other => {
+            let response = self
+                .host
+                .send_command(Command::LeReadResolvingListSize, COMMAND_TIMEOUT)?;
+            if response.status() != Some(0) {
                 return Err(Error::Remote(format!(
-                    "LE Read Resolving List Size returned unexpected parameters: {other:?}"
-                )))
+                    "LE Read Resolving List Size failed with status {:?}",
+                    response.status()
+                )));
             }
-        };
-        if usize::from(capacity) < peers.len() {
-            return Err(Error::Remote(format!(
-                "controller resolving-list capacity {} is smaller than bonded set size {}",
+            let capacity = match response.return_parameters() {
+                Some(ReturnParameters::LeReadResolvingListSize {
+                    resolving_list_size,
+                    ..
+                }) => *resolving_list_size,
+                other => {
+                    return Err(Error::Remote(format!(
+                        "LE Read Resolving List Size returned unexpected parameters: {other:?}"
+                    )))
+                }
+            };
+            if usize::from(capacity) < peers.len() {
+                return Err(Error::Remote(format!(
+                    "controller resolving-list capacity {} is smaller than bonded set size {}",
+                    capacity,
+                    peers.len()
+                )));
+            }
+
+            println!(
+                "[R3/PRIVACY] configure controller resolving list: capacity={} members={}",
                 capacity,
                 peers.len()
-            )));
-        }
-
-        println!(
-            "[R3/PRIVACY] configure controller resolving list: capacity={} members={}",
-            capacity,
-            peers.len()
-        );
-        for peer in &peers {
-            let identity = Address::parse(
-                &peer.identity_address,
-                AddressType(peer.address_type),
-            )
-            .map_err(|error| Error::InvalidSpec(format!(
-                "invalid bonded identity address {}: {error}",
-                peer.identity_address
-            )))?;
-            self.successful_privacy_command(Command::LeAddDeviceToResolvingList {
-                peer_identity_address_type: peer.address_type,
-                peer_identity_address: identity,
-                peer_irk: peer.peer_irk,
-                local_irk,
-            })?;
-            println!(
-                "[R3/PRIVACY] resolving-list add: identity={} type={} PASS",
-                peer.identity_address, peer.address_type
             );
+            for peer in &peers {
+                let identity = Address::parse(
+                    &peer.identity_address,
+                    AddressType(peer.address_type),
+                )
+                .map_err(|error| Error::InvalidSpec(format!(
+                    "invalid bonded identity address {}: {error}",
+                    peer.identity_address
+                )))?;
+                self.successful_privacy_command(Command::LeAddDeviceToResolvingList {
+                    peer_identity_address_type: peer.address_type,
+                    peer_identity_address: identity,
+                    peer_irk: peer.peer_irk,
+                    local_irk,
+                })?;
+                println!(
+                    "[R3/PRIVACY] resolving-list add: identity={} type={} PASS",
+                    peer.identity_address, peer.address_type
+                );
+            }
+
+            self.successful_privacy_command(Command::LeSetResolvablePrivateAddressTimeout {
+                rpa_timeout: DEFAULT_RPA_TIMEOUT_SECONDS,
+            })?;
+            self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
+                address_resolution_enable: 1,
+            })?;
+            Ok(())
+        })();
+
+        if let Err(error) = configure {
+            return match self.clear_bonded_identity_resolution() {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(Error::Remote(format!(
+                    "{error}; controller privacy rollback also failed: {cleanup_error}"
+                ))),
+            };
         }
 
-        self.successful_privacy_command(Command::LeSetResolvablePrivateAddressTimeout {
-            rpa_timeout: DEFAULT_RPA_TIMEOUT_SECONDS,
-        })?;
-        self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
-            address_resolution_enable: 1,
-        })?;
         println!(
             "[R3/PRIVACY] controller address resolution ENABLED; FAL may use stable identity addresses"
         );
@@ -177,12 +193,27 @@ impl AttachedController {
     }
 
     pub fn clear_bonded_identity_resolution(&mut self) -> TransportResult<()> {
-        self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
+        // Attempt both commands even if disable fails, but never claim success
+        // unless both HCI commands were acknowledged successfully.
+        let disable = self.successful_privacy_command(Command::LeSetAddressResolutionEnable {
             address_resolution_enable: 0,
-        })?;
-        self.successful_privacy_command(Command::LeClearResolvingList)?;
-        println!("[R3/PRIVACY] controller resolving list cleared");
-        Ok(())
+        });
+        let clear = self.successful_privacy_command(Command::LeClearResolvingList);
+        match (disable, clear) {
+            (Ok(()), Ok(())) => {
+                println!("[R3/PRIVACY] controller resolving list cleared");
+                Ok(())
+            }
+            (Err(error), Ok(())) => Err(Error::Remote(format!(
+                "controller address-resolution disable failed: {error}"
+            ))),
+            (Ok(()), Err(error)) => Err(Error::Remote(format!(
+                "controller resolving-list clear failed: {error}"
+            ))),
+            (Err(disable_error), Err(clear_error)) => Err(Error::Remote(format!(
+                "controller privacy cleanup failed: disable={disable_error}; clear={clear_error}"
+            ))),
+        }
     }
 
     fn successful_privacy_command(&mut self, command: Command) -> TransportResult<()> {
