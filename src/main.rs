@@ -36,6 +36,7 @@ fn usage() -> &'static str {
        be200hub r2 pair onboard --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r2 pair verify --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub r3 audio-set inspect --seconds <1..30> --name <DEVICE_NAME>\n\
+       be200hub r4 codec-plan --seconds <1..30> --name <DEVICE_NAME>\n\
        be200hub firmware inspect <SFI_PATH> [DDC_PATH]\n\
        be200hub firmware plan --sfi <PATH> --ddc <PATH>\n\
        be200hub firmware preflight --sfi <PATH> --ddc <PATH>\n\
@@ -164,6 +165,16 @@ fn run(args: &[String]) -> Result<()> {
         {
             let seconds = audio_set::parse_seconds(seconds)?;
             run_operational(|| audio_set::inspect(seconds, name))
+        }
+
+        [a, b, c, d, seconds, e, name]
+            if a == "r4"
+                && b == "codec-plan"
+                && c == "--seconds"
+                && d == "--name" =>
+        {
+            let seconds = audio_set::parse_seconds(seconds)?;
+            run_operational(|| audio_set::codec_plan(seconds, name))
         }
 
         [a, b, c, sfi] if a == "firmware" && b == "inspect" && c == "--sfi" => {
