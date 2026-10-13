@@ -376,7 +376,7 @@ mod tests {
             octets_per_codec_frame: Some(100),
             codec_frames_per_sdu: Some(1),
         };
-        let sink = |side, id, acl, rank| PlannedSink {
+        let sink = |side: StereoSide, id: &str, acl: u16, rank: u8| PlannedSink {
             side,
             identity_address: id.into(),
             rank,
