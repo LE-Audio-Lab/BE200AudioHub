@@ -14,15 +14,27 @@ pub struct CsisMemberReport {
 }
 
 impl AttachedController {
-    /// Read CSIS identity metadata from an already encrypted LE ACL.
-    ///
-    /// The SIRK may itself be encrypted over GATT; Bumble decrypts it with the
-    /// bond LTK supplied from the persistent store.
+    /// Read CSIS metadata using an already committed peer bond.
     pub fn read_csis_member(
         &mut self,
         connection_handle: u16,
         identity_address: &str,
         store: &BondStore,
+        timeout: Duration,
+    ) -> TransportResult<CsisMemberReport> {
+        let ltk = store.encryption_key_for_identity(identity_address)?;
+        self.read_csis_member_with_ltk(connection_handle, ltk, timeout)
+    }
+
+    /// Read CSIS metadata using the LTK from a provisional bond transaction.
+    ///
+    /// This is the verifier path used before the peer keys exist in the
+    /// persistent BondStore. The ACL must already be encrypted by the SMP
+    /// transaction that produced this LTK.
+    pub fn read_csis_member_with_ltk(
+        &mut self,
+        connection_handle: u16,
+        ltk: [u8; 16],
         timeout: Duration,
     ) -> TransportResult<CsisMemberReport> {
         if !self.device.is_connected_on_handle(connection_handle) {
@@ -36,7 +48,6 @@ impl AttachedController {
             )));
         }
 
-        let ltk = store.encryption_key_for_identity(identity_address)?;
         let mut transport =
             ExternalAttTransport::new(&mut self.host, &mut self.device, connection_handle, timeout)?;
         let mut client = GattClient::new();
