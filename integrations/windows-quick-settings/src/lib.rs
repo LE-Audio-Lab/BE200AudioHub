@@ -212,23 +212,40 @@ const TILE_XAML: &str = r##"
 const CARRIER_TEMPLATE_XAML: &str = r##"
 <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-  <Grid Width="96" Height="72">
+  <!-- Native Build 26200 geometry: 96x88 root, 48 px primary row,
+       24 px title-action row, 16 px bottom slack. -->
+  <Grid Width="96" Height="88" VerticalAlignment="Top">
     <Grid.RowDefinitions>
       <RowDefinition Height="48"/>
       <RowDefinition Height="24"/>
     </Grid.RowDefinitions>
+
     <Button x:Name="BE200QuickSettingsN41Button"
         Grid.Row="0" Width="96" Height="48"
-        Padding="0" CornerRadius="4" BorderThickness="1"
-        Background="#FF3D3D3D" BorderBrush="#FF515151"
+        Padding="0" FocusVisualMargin="-3"
+        HorizontalContentAlignment="Center"
+        VerticalContentAlignment="Center"
+        UseSystemFocusVisuals="True"
         AutomationProperties.AutomationId="BE200.QuickAction.DisconnectB3P"
         AutomationProperties.Name="断开 B3P（仅前端测试）">
       <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE711;" FontSize="17"/>
     </Button>
-    <TextBlock Grid.Row="1" Text="断开 B3P" FontSize="12"
-        Height="16" Margin="0,8,0,0"
-        HorizontalAlignment="Stretch" VerticalAlignment="Top"
-        TextAlignment="Center" TextTrimming="CharacterEllipsis"/>
+
+    <Button x:Name="BE200QuickSettingsN41LabelButton"
+        Grid.Row="1" Width="96" Height="24"
+        Padding="0" IsTabStop="False" IsTextScaleFactorEnabled="False"
+        Background="Transparent" BorderThickness="0"
+        HorizontalContentAlignment="Stretch"
+        VerticalContentAlignment="Stretch"
+        AutomationProperties.AutomationId="BE200.QuickAction.DisconnectB3P.Label"
+        AutomationProperties.Name="断开 B3P">
+      <StackPanel Margin="0,8,0,0">
+        <TextBlock Text="断开 B3P" FontSize="12"
+            Height="16" HorizontalAlignment="Stretch"
+            TextAlignment="Center" TextTrimming="CharacterEllipsis"
+            MaxLines="2"/>
+      </StackPanel>
+    </Button>
   </Grid>
 </DataTemplate>
 "##;
@@ -1601,7 +1618,8 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
                     carrier_candidate=Some(element.handle);
                 }
                 if CUSTOM_TILE_MODE.load(Ordering::Acquire) &&
-                   name=="BE200QuickSettingsN41Button" {
+                   (name=="BE200QuickSettingsN41Button" ||
+                    name=="BE200QuickSettingsN41LabelButton") {
                     custom_button_candidate=Some(element.handle);
                 }
                 // The initial callbacks are not guaranteed parent-first: once a
@@ -1926,6 +1944,8 @@ mod tests {
         assert!(TILE_XAML.contains("x:Name=\"BE200QuickSettingsClick\""));
         assert!(TILE_XAML.contains("断开 B3P"));
         assert!(CARRIER_TEMPLATE_XAML.contains("BE200QuickSettingsN41Button"));
+        assert!(CARRIER_TEMPLATE_XAML.contains("BE200QuickSettingsN41LabelButton"));
+        assert!(CARRIER_TEMPLATE_XAML.contains("Width=\"96\" Height=\"88\""));
         assert!(CARRIER_TEMPLATE_XAML.contains("BE200.QuickAction.DisconnectB3P"));
         assert!(CARRIER_TEMPLATE_XAML.contains("断开 B3P"));
         assert!(!TILE_XAML.contains("WinUSB"));
