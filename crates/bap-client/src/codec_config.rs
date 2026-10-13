@@ -58,8 +58,8 @@ pub struct CodecConfiguredSetSnapshot {
     pub all_released_to_idle: bool,
 }
 
-struct PreparedSink<'a> {
-    sink: &'a PlannedSink,
+pub(crate) struct PreparedSink<'a> {
+    pub(crate) sink: &'a PlannedSink,
     proxy: AudioStreamControlServiceProxy,
 }
 
@@ -98,6 +98,12 @@ impl ResponseGate {
                         || (self.expected_state == AseState::QOS_CONFIGURED
                             && status.state == AseState::CODEC_CONFIGURED)
                         || (self.expected_state == AseState::IDLE
+                            && matches!(
+                                status.state,
+                                AseState::QOS_CONFIGURED | AseState::ENABLING
+                                    | AseState::STREAMING | AseState::DISABLING
+                            ))
+                        || (self.expected_state == AseState::ENABLING
                             && status.state == AseState::QOS_CONFIGURED)
                     {
                         // A pre-command snapshot or a delayed notification from
@@ -190,7 +196,7 @@ fn observe_events(
     Ok(())
 }
 
-fn read_sink_status(
+pub(crate) fn read_sink_status(
     controller: &mut AttachedController,
     prepared: &PreparedSink<'_>,
 ) -> Result<AseStatus, String> {
@@ -211,7 +217,7 @@ fn read_sink_status(
     ))
 }
 
-fn prepare_sink<'a>(
+pub(crate) fn prepare_sink<'a>(
     controller: &mut AttachedController,
     sink: &'a PlannedSink,
 ) -> Result<PreparedSink<'a>, String> {
@@ -282,7 +288,7 @@ fn prepare_sink<'a>(
     Ok(prepared)
 }
 
-fn perform_operation(
+pub(crate) fn perform_operation(
     controller: &mut AttachedController,
     prepared: &PreparedSink<'_>,
     operation: AseOperation,
@@ -347,7 +353,7 @@ fn perform_operation(
     Ok(final_status)
 }
 
-fn configure_sink(
+pub(crate) fn configure_sink(
     controller: &mut AttachedController,
     prepared: &PreparedSink<'_>,
 ) -> Result<CodecConfiguredMember, String> {
@@ -468,7 +474,7 @@ fn verify_qos_status(
     })
 }
 
-fn configure_qos_sink(
+pub(crate) fn configure_qos_sink(
     controller: &mut AttachedController,
     prepared: &PreparedSink<'_>,
     qos: &StereoQosPlan,
@@ -592,7 +598,7 @@ pub fn configure_qos_and_release(
     })
 }
 
-fn release_if_needed(
+pub(crate) fn release_if_needed(
     controller: &mut AttachedController,
     prepared: &PreparedSink<'_>,
 ) -> Result<(), String> {
