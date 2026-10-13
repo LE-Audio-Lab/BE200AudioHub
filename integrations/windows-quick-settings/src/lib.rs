@@ -525,6 +525,11 @@ struct PropertyChainValue {
 const META_IS_VALUE_HANDLE: i64 = 0x1;
 const META_IS_PROPERTY_READ_ONLY: i64 = 0x2;
 const META_IS_VALUE_COLLECTION: i64 = 0x4;
+const META_IS_VALUE_HANDLE_AND_EVALUATED_VALUE: i64 = 0x40;
+
+fn metadata_has_value_handle(bits:i64)->bool {
+    bits & (META_IS_VALUE_HANDLE | META_IS_VALUE_HANDLE_AND_EVALUATED_VALUE) != 0
+}
 
 fn vm_log(message:&str) {
     let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -646,6 +651,56 @@ unsafe fn dump_vm_properties(service:*mut c_void,index:u32,handle:u64)->Result<i
     Ok(bluetooth_score)
 }
 
+unsafe fn property_handle(service:*mut c_void, object:u64, property_name:&str)->Result<u64,i32> {
+    let get_index:unsafe extern "system" fn(*mut c_void,u64,*const u16,*mut u32)->i32=
+        std::mem::transmute(slot(service,15));
+    let get_prop:unsafe extern "system" fn(*mut c_void,u64,u32,*mut u64)->i32=
+        std::mem::transmute(slot(service,16));
+    let mut property=0u32;
+    let hr=get_index(service,object,wide(property_name).as_ptr(),&mut property);
+    if hr<0{return Err(hr);}
+    let mut value=0u64;
+    let hr=get_prop(service,object,property,&mut value);
+    if hr<0||value==0{return Err(if hr<0{hr}else{E_FAIL});}
+    Ok(value)
+}
+
+// GetCollectionElements can return only an evaluated string for a handle-backed
+// object on some XamlOM surfaces. The realized GridViewItem.Content property is
+// an independent, read-only route to the exact QuickActionViewModel handle.
+unsafe fn realized_vm_handles_for_grid(service:*mut c_void, grid:u64)->HashMap<u32,u64> {
+    let containers:Vec<(u32,u64)>=tree().lock().map(|nodes| {
+        let mut wraps=HashSet::new();
+        for (&handle,node) in nodes.iter() {
+            if node.ty.ends_with("ItemsWrapGrid") &&
+               quick_actions_grid_handle(&nodes,handle)==Some(grid) {
+                wraps.insert(handle);
+            }
+        }
+        let mut out:Vec<(u32,u64)>=nodes.iter()
+            .filter_map(|(&handle,node)| {
+                if wraps.contains(&node.parent) && node.ty.ends_with("GridViewItem") {
+                    Some((node.index,handle))
+                } else { None }
+            })
+            .collect();
+        out.sort_unstable_by_key(|(index,_)|*index);
+        out
+    }).unwrap_or_default();
+
+    let mut result=HashMap::new();
+    for (index,container) in containers {
+        match property_handle(service,container,"Content") {
+            Ok(handle)=>{
+                vm_log(&format!("item[{index}] realized GridViewItem.Content fallback: container=0x{container:x} vm=0x{handle:x}"));
+                result.insert(index,handle);
+            }
+            Err(hr)=>vm_log(&format!("item[{index}] GridViewItem.Content fallback unavailable: container=0x{container:x} hr=0x{:08X}",hr as u32)),
+        }
+    }
+    result
+}
+
 unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     let service=SERVICE_PTR.load(Ordering::Acquire) as *mut c_void;
     if service.is_null(){return Err(E_FAIL);}
@@ -669,6 +724,8 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     if hr<0{return Err(hr);}
     log(&format!("[N3] RootGridView.ItemsSource handle=0x{source:x} count={count}"));
     if count<EXPECTED_NATIVE_TILES{return Err(S_FALSE);}
+    let realized_vm_handles=realized_vm_handles_for_grid(service,grid);
+    log(&format!("[N3] realized container Content handles available={}",realized_vm_handles.len()));
 
     let mut requested=count;
     let mut elements=null_mut();
@@ -681,8 +738,14 @@ unsafe fn probe_quick_action_items(grid:u64)->Result<(),i32> {
     for e in std::slice::from_raw_parts(elements,requested as usize) {
         let value_type=bstr_string(e.value_type);
         let value=bstr_string(e.value);
-        let handle=if e.metadata_bits & META_IS_VALUE_HANDLE !=0 {parse_instance_handle(&value)} else {None};
-        vm_log(&format!("item[{}] type={:?} value={:?} meta=0x{:x} parsed_handle={:?}",
+        let parsed_handle=if metadata_has_value_handle(e.metadata_bits) {
+            parse_instance_handle(&value)
+        } else { None };
+        let fallback_handle=realized_vm_handles.get(&e.index).copied();
+        let handle=parsed_handle.or(fallback_handle);
+        let handle_source=if parsed_handle.is_some() {"collection"}
+            else if fallback_handle.is_some() {"GridViewItem.Content"} else {"none"};
+        vm_log(&format!("item[{}] type={:?} value={:?} meta=0x{:x} handle={:?} source={handle_source}",
             e.index,value_type,value,e.metadata_bits,handle.map(|h|format!("0x{h:x}"))));
         if let Some(handle)=handle {
             if let Ok((class_name,iids))=runtime_class_and_iids(handle) {
@@ -721,7 +784,7 @@ unsafe fn bstr_string(value: *const u16) -> String {
 }
 
 #[derive(Clone)]
-struct Node { parent: u64, ty: String, name: String }
+struct Node { parent: u64, index: u32, ty: String, name: String }
 static TREE: OnceLock<Mutex<HashMap<u64, Node>>> = OnceLock::new();
 static WATCHER_STARTED: OnceLock<()> = OnceLock::new();
 static CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -820,7 +883,7 @@ unsafe extern "system" fn on_change(_this:*mut Callback, relation:ParentChildRel
         let mut missing_ancestor=None;
         if let Ok(mut nodes)=tree().lock() {
             if mutation==0 {
-                nodes.insert(element.handle,Node {parent:relation.parent,ty:ty.clone(),name});
+                nodes.insert(element.handle,Node {parent:relation.parent,index:relation.index,ty:ty.clone(),name});
                 // The initial callbacks are not guaranteed parent-first: once a
                 // missing ancestor arrives, retry every known Quick Actions wrap.
                 if is_wrap || is_item || is_named_anchor {
@@ -1024,23 +1087,23 @@ mod tests {
     #[test]
     fn only_quick_actions_wrap_matches_not_slider_grid() {
         let mut nodes=HashMap::new();
-        nodes.insert(1,Node{parent:0,ty:"ControlCenter.ControlCenterPage".into(),name:String::new()});
-        nodes.insert(2,Node{parent:1,ty:"ContentControl".into(),name:"TogglesGroup".into()});
-        nodes.insert(3,Node{parent:2,ty:"GridView".into(),name:"RootGridView".into()});
+        nodes.insert(1,Node{index:0,parent:0,ty:"ControlCenter.ControlCenterPage".into(),name:String::new()});
+        nodes.insert(2,Node{index:0,parent:1,ty:"ContentControl".into(),name:"TogglesGroup".into()});
+        nodes.insert(3,Node{index:0,parent:2,ty:"GridView".into(),name:"RootGridView".into()});
         assert!(is_quick_settings_wrap(&nodes,3));
-        nodes.insert(4,Node{parent:1,ty:"ContentControl".into(),name:"SlidersGroup".into()});
-        nodes.insert(5,Node{parent:4,ty:"GridView".into(),name:"RootGridView".into()});
+        nodes.insert(4,Node{index:0,parent:1,ty:"ContentControl".into(),name:"SlidersGroup".into()});
+        nodes.insert(5,Node{index:0,parent:4,ty:"GridView".into(),name:"RootGridView".into()});
         assert!(!is_quick_settings_wrap(&nodes,5));
     }
 
     #[test]
     fn late_ancestors_allow_wrap_matching() {
         let mut nodes=HashMap::new();
-        nodes.insert(4,Node{parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
+        nodes.insert(4,Node{index:0,parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
         assert!(!is_quick_settings_wrap(&nodes,4));
-        nodes.insert(3,Node{parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
+        nodes.insert(3,Node{index:0,parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
         assert!(!is_quick_settings_wrap(&nodes,4));
-        nodes.insert(2,Node{parent:1,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
+        nodes.insert(2,Node{index:0,parent:1,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
         assert!(is_quick_settings_wrap(&nodes,4));
 
         // If the intermediate group disappears, finding RootGridView alone
@@ -1052,9 +1115,9 @@ mod tests {
     #[test]
     fn missing_outer_ancestor_does_not_invalidate_proven_anchor_chain() {
         let mut nodes=HashMap::new();
-        nodes.insert(4,Node{parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
-        nodes.insert(3,Node{parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
-        nodes.insert(2,Node{parent:99,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
+        nodes.insert(4,Node{index:0,parent:3,ty:"Windows.UI.Xaml.Controls.ItemsWrapGrid".into(),name:String::new()});
+        nodes.insert(3,Node{index:0,parent:2,ty:"Windows.UI.Xaml.Controls.GridView".into(),name:"RootGridView".into()});
+        nodes.insert(2,Node{index:0,parent:99,ty:"Windows.UI.Xaml.Controls.ContentControl".into(),name:"TogglesGroup".into()});
         assert!(is_quick_settings_wrap(&nodes,4));
     }
 
@@ -1063,6 +1126,21 @@ mod tests {
         assert_eq!(parse_instance_handle("0x1d3b6bfd9d8"),Some(0x1d3b6bfd9d8));
         assert_eq!(parse_instance_handle("12345"),Some(12345));
         assert_eq!(parse_instance_handle("handle=0xABC; evaluated=foo"),Some(0xabc));
+    }
+
+    #[test]
+    fn metadata_handle_detection_accepts_handle_and_evaluated_value() {
+        assert!(metadata_has_value_handle(META_IS_VALUE_HANDLE));
+        assert!(metadata_has_value_handle(META_IS_VALUE_HANDLE_AND_EVALUATED_VALUE));
+        assert!(metadata_has_value_handle(META_IS_VALUE_HANDLE_AND_EVALUATED_VALUE | META_IS_PROPERTY_READ_ONLY));
+        assert!(!metadata_has_value_handle(META_IS_VALUE_COLLECTION));
+    }
+
+    #[test]
+    fn node_keeps_xaml_child_index_for_container_vm_fallback() {
+        let node=Node{index:7,parent:11,ty:"Windows.UI.Xaml.Controls.GridViewItem".into(),name:String::new()};
+        assert_eq!(node.index,7);
+        assert_eq!(node.parent,11);
     }
 
     #[test]
