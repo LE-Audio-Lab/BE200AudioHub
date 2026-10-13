@@ -21,7 +21,9 @@ pub struct IsoControllerCapabilities {
 
 impl IsoControllerCapabilities {
     /// Capability gate for the first-sound, one-HCI-ISO-packet-per-SDU path.
-    /// Larger SDUs could be fragmented in a future transport implementation.
+    /// An ISO first/complete packet (without HCI timestamp) has a 4-byte SDU
+    /// information header inside its HCI ISO_Data field; see pinned Bumble-RS
+    /// IsoDataPacket::to_bytes(). Fragmentation is not implemented yet.
     pub fn validate_for_unfragmented_cis(&self, max_sdu: u16) -> Result<(), String> {
         if !self.cis_central {
             return Err("controller does not advertise LE CIS Central".into());
@@ -38,10 +40,12 @@ impl IsoControllerCapabilities {
         if self.iso_packet_count == 0 || self.iso_data_packet_length == 0 {
             return Err("controller reports no HCI ISO data buffers".into());
         }
-        if max_sdu > self.iso_data_packet_length {
+        const FIRST_PACKET_SDU_INFO_BYTES: u16 = 4;
+        let needed = max_sdu.saturating_add(FIRST_PACKET_SDU_INFO_BYTES);
+        if needed > self.iso_data_packet_length {
             return Err(format!(
-                "R5 first-sound unfragmented SDU {} exceeds controller HCI ISO packet capacity {}; packet fragmentation is not implemented",
-                max_sdu, self.iso_data_packet_length
+                "R5 first-sound unfragmented SDU {}B needs {}B ISO_Data capacity (4B SDU header); controller reports {}B; fragmentation is not implemented",
+                max_sdu, needed, self.iso_data_packet_length
             ));
         }
         Ok(())
@@ -104,5 +108,8 @@ mod tests {
     #[test]
     fn refuses_unimplemented_fragmentation() {
         assert!(baseline().validate_for_unfragmented_cis(249).is_err());
+        let mut cap = baseline();
+        cap.iso_data_packet_length = 102;
+        assert!(cap.validate_for_unfragmented_cis(100).is_err());
     }
 }
