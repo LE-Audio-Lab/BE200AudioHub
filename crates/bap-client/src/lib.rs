@@ -3,9 +3,13 @@
 //! Protocol primitives come from Bumble-RS. This crate owns orchestration and
 //! normalized product snapshots only.
 
+mod codec_plan;
 mod discovery;
 mod snapshot;
 
+pub use codec_plan::{
+    plan_first_sound, plan_stereo_lc3, CodecConfigurationPlan, PlannedSink, StereoSide,
+};
 pub use discovery::discover_audio_member;
 pub use snapshot::{
     AseSnapshot, AscsSnapshot, AudioMemberSnapshot, AudioSetSnapshot, CapSnapshot,
