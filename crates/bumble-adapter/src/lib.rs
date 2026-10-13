@@ -17,6 +17,7 @@ mod commit;
 mod connection_manager;
 mod csis;
 mod gatt_session;
+mod cig_control;
 mod init;
 mod iso_capabilities;
 mod privacy;
@@ -27,6 +28,7 @@ mod stored_security;
 mod usb_fixed;
 
 pub use acl_session::LeAclReport;
+pub use cig_control::{CigAllocation, CigSetupFailure, CisHandleAllocation};
 pub use bond::{BondMemberSummary, BondSetSummary, BondStore, ControllerIdentity};
 pub use commit::{
     commit_primary_bond, commit_verified_set_member, CommittedBondReport,
