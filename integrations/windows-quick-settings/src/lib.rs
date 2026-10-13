@@ -337,6 +337,28 @@ unsafe fn make_xaml_tile() -> Result<ComPtr,i32> {
 
 /// Find the Button by x:Name and attach its Windows.UI.Xaml.RoutedEventHandler.
 /// All references/tokens are intentionally retained through ShellHost lifetime in this PoC.
+unsafe fn make_carrier_data_template() -> Result<ComPtr,i32> {
+    let class=HString::new("Windows.UI.Xaml.Markup.XamlReader")?;
+    let mut factory=null_mut();
+    let hr=RoGetActivationFactory(class.0,&IID_IXAMLREADERSTATICS,&mut factory);
+    if hr<0 {
+        log(&format!("[N4.1] RoGetActivationFactory(XamlReader) failed: 0x{:08X}",hr as u32));
+        return Err(hr);
+    }
+    let factory=ComPtr(factory);
+    let xaml=HString::new(CARRIER_TEMPLATE_XAML)?;
+    let load:unsafe extern "system" fn(*mut c_void,*mut c_void,*mut *mut c_void)->i32=
+        std::mem::transmute(slot(factory.as_raw(),6));
+    let mut template=null_mut();
+    let hr=load(factory.as_raw(),xaml.0,&mut template);
+    if hr<0 {
+        log(&format!("[N4.1] XamlReader.Load(DataTemplate) failed: 0x{:08X}",hr as u32));
+        return Err(hr);
+    }
+    log("[N4.1] XamlReader.Load created carrier DataTemplate");
+    Ok(ComPtr(template))
+}
+
 unsafe fn wire_ui_only_click(root: *mut c_void) -> Result<(),i32> {
     let mut framework=null_mut();
     let hr=query_interface(root,&IID_IFRAMEWORKELEMENT,&mut framework);
@@ -361,6 +383,30 @@ unsafe fn wire_ui_only_click(root: *mut c_void) -> Result<(),i32> {
     ev_release(callback); // After AddClick the Windows event source owns its own reference.
     if hr<0 { log(&format!("[N2] Button.Click registration failed: 0x{:08X}",hr as u32)); return Err(hr); }
     log(&format!("[N2] Button.Click registered, token={} (UI ONLY)",token));
+    Ok(())
+}
+
+unsafe fn wire_button_click_handle(handle:u64)->Result<(),i32> {
+    if wired_buttons().lock().map(|set|set.contains(&handle)).unwrap_or(true) {
+        return Ok(());
+    }
+    let button=inspectable_from_handle(handle)?;
+    let mut base=null_mut();
+    let hr=query_interface(button.as_raw(),&IID_IBUTTONBASE,&mut base);
+    if hr<0{return Err(hr);}
+    let base=ComPtr(base);
+    let callback=Box::into_raw(Box::new(EventHandler{vtable:&EVENT_VTBL,count:AtomicU32::new(1)}));
+    let register:unsafe extern "system" fn(*mut c_void,*mut EventHandler,*mut i64)->i32=
+        std::mem::transmute(slot(base.as_raw(),14));
+    let mut token=0_i64;
+    let hr=register(base.as_raw(),callback,&mut token);
+    ev_release(callback);
+    if hr<0 {
+        log(&format!("[N4.1] custom Button.Click registration failed: 0x{:08X}",hr as u32));
+        return Err(hr);
+    }
+    if let Ok(mut set)=wired_buttons().lock(){set.insert(handle);}
+    log(&format!("[N4.1] custom Button.Click registered handle=0x{handle:x} token={token} (UI ONLY)"));
     Ok(())
 }
 
