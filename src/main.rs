@@ -167,11 +167,11 @@ fn run(args: &[String]) -> Result<()> {
             run_operational(|| audio_set::inspect(seconds, name))
         }
 
-        [a, b, c, d, seconds, e, name]
+        [a, b, seconds_flag, seconds, name_flag, name]
             if a == "r4"
                 && b == "codec-plan"
-                && c == "--seconds"
-                && d == "--name" =>
+                && seconds_flag == "--seconds"
+                && name_flag == "--name" =>
         {
             let seconds = audio_set::parse_seconds(seconds)?;
             run_operational(|| audio_set::codec_plan(seconds, name))
