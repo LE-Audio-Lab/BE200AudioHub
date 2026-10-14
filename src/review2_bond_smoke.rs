@@ -1006,92 +1006,23 @@ pub(crate) fn open_dual_encrypted_bond_session(
         format_address_le(plan.controller_identity_le);
     let stack = spawn_be200_hci_stack(HciStackConfig::default());
     let mut tracker = BondSmokeTracker::default();
-    let mut known_connections = Vec::new();
-    let mut members = Vec::new();
-
-    let primary = (|| -> Result<(), BondSmokeRunError> {
-        send_control(
-            stack.control().try_begin_operational_attach(),
-            "begin resetless attach",
-        )?;
-        wait_attach(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-
-        send_control(
-            stack.control().try_read_controller_identity(),
-            "read controller identity",
-        )?;
-        let identity = wait_controller_identity(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-        if !plan.identity_matches(identity) {
-            return Err(
-                BondSmokeRunError::ControllerIdentityMismatch {
-                    expected: plan.controller_identity_le,
-                    actual: identity.public_address_le,
-                },
-            );
+    let members = match establish_dual_encrypted_session(
+        &stack,
+        &mut tracker,
+        &plan,
+        config.connect_timeout,
+    ) {
+        Ok(members) => members,
+        Err(primary) => {
+            return Err(fail_open_session(
+                stack,
+                &mut tracker,
+                &config.bond_root,
+                &before,
+                primary,
+            ))
         }
-
-        send_control(
-            stack
-                .control()
-                .try_configure_controller_privacy(plan.privacy_config()),
-            "configure controller privacy",
-        )?;
-        wait_privacy_ready(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-
-        let first = run_member(
-            &stack,
-            &mut tracker,
-            &plan,
-            0,
-            config.connect_timeout,
-            &mut known_connections,
-        )?;
-        members.push(first);
-
-        let second = run_member(
-            &stack,
-            &mut tracker,
-            &plan,
-            1,
-            config.connect_timeout,
-            &mut known_connections,
-        )?;
-        members.push(second);
-
-        wait_dual_encrypted(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-            [
-                members[0].connection,
-                members[1].connection,
-            ],
-        )?;
-
-        Ok(())
-    })();
-
-    if let Err(primary) = primary {
-        return Err(fail_open_session(
-            stack,
-            &mut tracker,
-            &config.bond_root,
-            &before,
-            primary,
-        ));
-    }
+    };
 
     Ok(DualEncryptedBondSession {
         firmware,
