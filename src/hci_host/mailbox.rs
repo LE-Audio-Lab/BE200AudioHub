@@ -13,6 +13,7 @@ use crate::{
 use super::{
     connection::{
         DisconnectState, FalConnectRequest, FalConnectionState,
+        LeConnectionSetSnapshot,
     },
     engine::{
         ControllerCapabilities, OperationalAttachState, PassiveScanState,
@@ -44,6 +45,7 @@ pub enum HciReport {
     FalConnectionState(FalConnectionState),
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
+    ConnectionSet(LeConnectionSetSnapshot),
 }
 
 #[derive(Clone)]
