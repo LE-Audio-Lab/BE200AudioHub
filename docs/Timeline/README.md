@@ -1,8 +1,8 @@
-# BE200AudioHub — Engineering Timeline Archive
+# BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 从第一次 Windows BE200 Bring-up 到 **双耳 LE CIS 全生命周期 HIL PASS** 的历史资料归档。保存原始过程、失败、被推翻的假设和问题修复，而不是仅保存最后的成功结果。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 起继续记录 R5.3 Experiment 封板与 Review/Refactor 产品架构。旧 Round 原文不回写，新阶段只追加。
 
-**时间范围**：2026-10-11—2026-10-14（四个 Round）；**归档日期**：2026-10-14。当前有效开发分支：`r2/stack-integration-bootstrap`。由于仓库长期以 **`docs/` 小写**存放文档，本归档也使用 `docs/Timeline/`，避免 Windows 上同时创建大小写不同的 `Docs`/`docs`。
+**时间范围**：2026-10-11—持续更新；**活动分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
 ## 目录
 
@@ -15,6 +15,7 @@
 | [Round2.md](./Round2.md) | **Round2 原文**：Bumble-RS Host no-reset、扫描、首次真实 LE ACL、后续 R2.4 Pairing 的设计（当时未完成） |
 | [Round3.md](./Round3.md) | **Round3 原文**：真正完成 R2.4 两成员 SMP/Bond/CSIS、Stored LTK 验证、R3 双加密 ACL/PACS/ASCS/CAS、USB/SMP/Privacy Quirk |
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
+| [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
 
 ## 推荐阅读顺序
 
@@ -60,3 +61,18 @@
 3. **Bug/Fix 分离**：明确每次失败的原始现象、错误码、控制层级、根因证据、做过的错误尝试、最终修复、修复后的测试；不能把“清理 UNCONFIRMED”包装为 PASS。
 4. **能力层级严格区分**：Intel HCI 支持 ISO ≠ Set CIG ≠ CIS Established ≠ 可用 ISO Data Path ≠ 实际可听 First Sound。
 5. **防止多项目混合**：BE200AudioHub 是自己的 Windows Rust BLE/LE Audio Host；独立 `LE-Audio-Relay` 是基于 Windows 系统音频渲染的旧项目，不能以其数据面替代本项目的实验结果。
+
+
+## Review continuation
+
+Round1–4 的历史状态口径仍按原文理解；Round5 开始后的当前状态以 [Round5.md](./Round5.md) 与 [TIMELINE.md](./TIMELINE.md) 新增 Review 段为准。
+
+当前最短阅读顺序：
+
+**README → TIMELINE → Round5 → BUG_FIX_REGISTER → docs/reference-index/README.md**
+
+当前工程门槛：
+
+- Experiment R1–R5.3：sealed，真实 First Sound 已证明；
+- Review-1 Runtime + Async Transport：complete；
+- Review-2 HCI Host：WIP。
