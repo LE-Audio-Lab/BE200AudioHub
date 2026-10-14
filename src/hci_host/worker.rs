@@ -14,6 +14,7 @@ use super::{
     connection::{DisconnectState, FalConnectionState},
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
+    security::StoredEncryptionState,
 };
 
 const CONTROL_BUDGET_PER_TURN: usize = 4;
@@ -76,6 +77,8 @@ fn run_loop(
     let mut last_fal_connection_state =
         engine.fal_connection_state().clone();
     let mut last_disconnect_state = engine.disconnect_state().clone();
+    let mut last_stored_encryption_state =
+        engine.stored_encryption_state().clone();
 
     loop {
         match stop_rx.try_recv() {
@@ -102,6 +105,7 @@ fn run_loop(
                         &mut last_privacy_state,
                         &mut last_fal_connection_state,
                         &mut last_disconnect_state,
+                        &mut last_stored_encryption_state,
                         &report_tx,
                     ) {
                         return HciWorkerExit::Faulted(fault);
@@ -191,6 +195,7 @@ fn run_loop(
                     &mut last_privacy_state,
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
+                    &mut last_stored_encryption_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -218,6 +223,7 @@ fn run_loop(
                     &mut last_privacy_state,
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
+                    &mut last_stored_encryption_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -253,6 +259,9 @@ fn process_command(
         HciCommand::Disconnect { connection_handle } => {
             engine.begin_disconnect(connection_handle)
         }
+        HciCommand::BeginStoredEncryption(request) => {
+            engine.begin_stored_encryption(request)
+        }
     }
 }
 
@@ -263,6 +272,7 @@ fn publish_state_transitions(
     last_privacy_state: &mut ControllerPrivacyState,
     last_fal_connection_state: &mut FalConnectionState,
     last_disconnect_state: &mut DisconnectState,
+    last_stored_encryption_state: &mut StoredEncryptionState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
@@ -323,6 +333,17 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_disconnect_state = disconnect_state;
+    }
+
+    let stored_encryption_state =
+        *engine.stored_encryption_state();
+    if stored_encryption_state != *last_stored_encryption_state {
+        report_tx
+            .try_send(HciReport::StoredEncryptionState(
+                stored_encryption_state,
+            ))
+            .map_err(map_report_error)?;
+        *last_stored_encryption_state = stored_encryption_state;
     }
 
     Ok(())
