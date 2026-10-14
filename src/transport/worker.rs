@@ -123,7 +123,10 @@ where
 }
 
 fn run_loop<B: DeviceBackend>(
-    reactor: &mut TransportReactor<B>,
+    reactor: &mut TransportReactor<
+        B,
+        BoundedSender<ControllerPacket>,
+    >,
     tx_rx: &BoundedReceiver<HostPacket>,
     cancel: &CancellationToken,
 ) -> TransportWorkerExit {
