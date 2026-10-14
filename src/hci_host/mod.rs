@@ -1,3 +1,4 @@
+pub mod connection;
 pub mod engine;
 pub mod link;
 pub mod mailbox;
