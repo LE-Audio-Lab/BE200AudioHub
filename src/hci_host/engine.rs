@@ -166,6 +166,16 @@ impl HciEngine {
         &self.fal_connection_state
     }
 
+    pub fn connection_set_snapshot(&self) -> LeConnectionSetSnapshot {
+        LeConnectionSetSnapshot {
+            connections: self
+                .device
+                .le_connections()
+                .map(snapshot_le_connection)
+                .collect(),
+        }
+    }
+
     pub fn disconnect_state(&self) -> &DisconnectState {
         &self.disconnect_state
     }
@@ -837,22 +847,7 @@ impl HciEngine {
         let connection_event = match event {
             DeviceEvent::LeConnectionEstablished(info) => {
                 Some(ConnectionEvent::Established(
-                    LeConnectionSnapshot {
-                        connection_handle: info.connection_handle,
-                        role: info.role,
-                        peer_address_le: *info.peer_address.address_bytes(),
-                        peer_address_type:
-                            info.peer_address.address_type().0,
-                        connection_interval:
-                            info.parameters.connection_interval,
-                        peripheral_latency:
-                            info.parameters.peripheral_latency,
-                        supervision_timeout:
-                            info.parameters.supervision_timeout,
-                        encryption_enabled: info.encryption_enabled,
-                        encryption_key_size:
-                            info.encryption_key_size,
-                    },
+                    snapshot_le_connection(info),
                 ))
             }
             DeviceEvent::ConnectionFailed {
@@ -970,6 +965,22 @@ impl HciEngine {
 
     pub(crate) fn link_mut(&mut self) -> &mut QueueHostTransport {
         &mut self.link
+    }
+}
+
+fn snapshot_le_connection(
+    info: &bumble_host::LeConnectionInfo,
+) -> LeConnectionSnapshot {
+    LeConnectionSnapshot {
+        connection_handle: info.connection_handle,
+        role: info.role,
+        peer_address_le: *info.peer_address.address_bytes(),
+        peer_address_type: info.peer_address.address_type().0,
+        connection_interval: info.parameters.connection_interval,
+        peripheral_latency: info.parameters.peripheral_latency,
+        supervision_timeout: info.parameters.supervision_timeout,
+        encryption_enabled: info.encryption_enabled,
+        encryption_key_size: info.encryption_key_size,
     }
 }
 
@@ -1263,6 +1274,72 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn engine_projects_two_connection_local_acl_states() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        for event in [
+            vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ],
+            vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x01, 0x08,
+                0x00,
+                0x01,
+                7, 8, 9, 10, 11, 12,
+                0x20, 0x00,
+                0x00, 0x00,
+                0x30, 0x00,
+                0x00,
+            ],
+        ] {
+            engine.ingest(ControllerPacket::Event(event)).unwrap();
+            engine.poll_until_quiescent().unwrap();
+        }
+
+        let snapshot = engine.connection_set_snapshot();
+        assert_eq!(snapshot.connections.len(), 2);
+        assert_eq!(snapshot.connections[0].connection_handle, 0x0800);
+        assert_eq!(snapshot.connections[1].connection_handle, 0x0801);
+        assert_eq!(snapshot.connections[0].connection_interval, 24);
+        assert_eq!(snapshot.connections[1].connection_interval, 32);
+        assert_eq!(snapshot.connections[0].encryption_enabled, 0);
+        assert_eq!(snapshot.connections[1].encryption_enabled, 0);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x08, 0x04, 0x00, 0x01, 0x08, 0x01,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let snapshot = engine.connection_set_snapshot();
+        assert_eq!(snapshot.connections[0].encryption_enabled, 0);
+        assert_eq!(snapshot.connections[1].encryption_enabled, 1);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x08, 0x08,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let snapshot = engine.connection_set_snapshot();
+        assert_eq!(snapshot.connections.len(), 1);
+        assert_eq!(snapshot.connections[0].connection_handle, 0x0801);
+        assert_eq!(snapshot.connections[0].encryption_enabled, 1);
     }
 
     #[test]
