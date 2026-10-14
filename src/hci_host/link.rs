@@ -21,9 +21,22 @@ pub enum LinkFault {
     InvalidControllerPacket,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HciObservation {
+    CommandComplete {
+        opcode: u16,
+        status: Option<u8>,
+    },
+    CommandStatus {
+        opcode: u16,
+        status: u8,
+    },
+}
+
 pub struct QueueHostTransport {
     tx: TransportTx,
     inbound: VecDeque<HciPacket>,
+    observations: VecDeque<HciObservation>,
     fault: Option<LinkFault>,
 }
 
@@ -32,13 +45,19 @@ impl QueueHostTransport {
         Self {
             tx,
             inbound: VecDeque::new(),
+            observations: VecDeque::new(),
             fault: None,
         }
     }
 
     pub fn ingest(&mut self, packet: ControllerPacket) -> Result<(), LinkFault> {
         let (packet_type, bytes) = match packet {
-            ControllerPacket::Event(bytes) => (HCI_EVENT_PACKET, bytes),
+            ControllerPacket::Event(bytes) => {
+                if let Some(observation) = observe_native_event(&bytes) {
+                    self.observations.push_back(observation);
+                }
+                (HCI_EVENT_PACKET, bytes)
+            }
             ControllerPacket::Acl(bytes) => (HCI_ACL_DATA_PACKET, bytes),
             ControllerPacket::Iso(bytes) => (HCI_ISO_DATA_PACKET, bytes),
         };
@@ -55,6 +74,10 @@ impl QueueHostTransport {
 
     pub fn take_fault(&mut self) -> Option<LinkFault> {
         self.fault.take()
+    }
+
+    pub fn take_observations(&mut self) -> Vec<HciObservation> {
+        self.observations.drain(..).collect()
     }
 
     fn send_native(&mut self, packet_type: u8, bytes: Vec<u8>) -> bool {
@@ -85,6 +108,26 @@ impl QueueHostTransport {
                 false
             }
         }
+    }
+}
+
+fn observe_native_event(bytes: &[u8]) -> Option<HciObservation> {
+    match bytes.first().copied()? {
+        // HCI Command Complete:
+        // event, param_len, num_cmd_packets, opcode_le[2], return_parameters...
+        0x0e if bytes.len() >= 5 => Some(HciObservation::CommandComplete {
+            opcode: u16::from_le_bytes([bytes[3], bytes[4]]),
+            status: bytes.get(5).copied(),
+        }),
+
+        // HCI Command Status:
+        // event, param_len, status, num_cmd_packets, opcode_le[2]
+        0x0f if bytes.len() >= 6 => Some(HciObservation::CommandStatus {
+            opcode: u16::from_le_bytes([bytes[4], bytes[5]]),
+            status: bytes[2],
+        }),
+
+        _ => None,
     }
 }
 
@@ -153,6 +196,45 @@ mod tests {
         let events = link.drain_host_events(0);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], HciPacket::Event(_)));
+    }
+
+    #[test]
+    fn command_complete_is_journaled_without_stealing_device_event() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::CommandComplete {
+                opcode: 0x0c03,
+                status: Some(0),
+            }]
+        );
+        assert_eq!(link.drain_host_events(0).len(), 1);
+    }
+
+    #[test]
+    fn command_status_is_journaled() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x0f, 0x04, 0x0c, 0x01, 0x0d, 0x20,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::CommandStatus {
+                opcode: 0x200d,
+                status: 0x0c,
+            }]
+        );
     }
 
     #[test]
