@@ -546,6 +546,85 @@ mod tests {
     }
 
     #[test]
+    fn scan_summary_collects_extended_advertising_data_from_bumble() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_passive_extended_scan().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x41, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Scanning
+        );
+
+        let advertising_data = vec![
+            0x06, 0x09, b'B', b'u', b'd', b's', b'3',
+            0x07, 0x2e, 1, 2, 3, 4, 5, 6,
+        ];
+
+        let mut report = vec![
+            0x3e, // LE Meta Event
+            0x00, // parameter length, filled below
+            0x0d, // LE Extended Advertising Report
+            0x01, // num_reports
+            0x00, 0x00, // event_type: complete extended advertisement
+            0x00, // public device address
+            0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            0x01, // primary PHY: LE 1M
+            0x00, // secondary PHY: none
+            0x00, // SID
+            0x7f, // TX power unavailable
+            0xd8, // RSSI = -40 dBm
+            0x00, 0x00, // periodic interval
+            0xff, // direct address type: unavailable
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            advertising_data.len() as u8,
+        ];
+        report.extend_from_slice(&advertising_data);
+        report[1] = (report.len() - 2) as u8;
+
+        engine
+            .ingest(ControllerPacket::Event(report))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine.stop_passive_extended_scan().unwrap();
+        let _ = rx.try_recv().unwrap();
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let summary = engine.take_completed_scan().unwrap();
+        assert_eq!(summary.reports_seen, 1);
+        assert_eq!(summary.observations.len(), 1);
+
+        let observation = &summary.observations[0];
+        assert_eq!(observation.address, "11:22:33:44:55:66");
+        assert_eq!(observation.name.as_deref(), Some("Buds3"));
+        assert_eq!(observation.rsi, Some([1, 2, 3, 4, 5, 6]));
+        assert_eq!(observation.rssi, -40);
+        assert_eq!(observation.raw_data, advertising_data);
+    }
+
+    #[test]
     fn scan_command_failure_is_terminal_and_explicit() {
         let (mut engine, rx) = engine(16);
         make_minimal_attach_ready(&mut engine, &rx);
