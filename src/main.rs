@@ -1,5 +1,6 @@
 mod architecture;
 mod runtime;
+mod platform;
 mod transport;
 
 fn main() {
