@@ -320,3 +320,17 @@ Immediate design/implementation work is focused on:
 10. profiling before reconsidering physical-thread placement.
 
 The project is intentionally not carrying the Experiment/R5 synchronous architecture forward into the new root implementation.
+
+---
+
+## License
+
+BE200AudioHub source code is licensed under the **Apache License, Version 2.0**.
+
+See [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Third-party dependencies and
+distribution-specific license boundaries are listed in
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+
+Intel firmware images such as `.sfi` and `.ddc` files are third-party
+materials and are **not** covered by the BE200AudioHub Apache-2.0 license.
+
