@@ -6,7 +6,7 @@ use crate::transport::{
     worker::TransportTx,
 };
 
-use super::link::{LinkFault, QueueHostTransport};
+use super::link::{HciObservation, LinkFault, QueueHostTransport};
 
 const DEFAULT_POLL_BUDGET: usize = 64;
 
@@ -14,6 +14,7 @@ const DEFAULT_POLL_BUDGET: usize = 64;
 pub enum EngineFault {
     Link(LinkFault),
     PollBudgetExceeded,
+    InvalidState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +29,19 @@ pub enum OperationalAttachState {
 pub enum OperationalAttachFailure {
     SupportedCommandsStatus(u8),
     HostInitializationFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassiveScanState {
+    Idle,
+    Configuring,
+    Enabling,
+    Scanning,
+    Disabling,
+    Failed {
+        opcode: u16,
+        status: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +68,8 @@ pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
     attach_state: OperationalAttachState,
+    scan_state: PassiveScanState,
+    scan_pending_opcode: Option<u16>,
 }
 
 impl HciEngine {
@@ -62,6 +78,8 @@ impl HciEngine {
             device: Device::new(0),
             link: QueueHostTransport::new(tx),
             attach_state: OperationalAttachState::Idle,
+            scan_state: PassiveScanState::Idle,
+            scan_pending_opcode: None,
         }
     }
 
@@ -71,6 +89,53 @@ impl HciEngine {
 
     pub fn attach_state(&self) -> OperationalAttachState {
         self.attach_state
+    }
+
+    pub fn passive_scan_state(&self) -> PassiveScanState {
+        self.scan_state
+    }
+
+    pub fn begin_passive_extended_scan(&mut self) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.scan_state != PassiveScanState::Idle
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let command = Command::LeSetExtendedScanParameters {
+            own_address_type: 0,
+            scanning_filter_policy: 0,
+            scanning_phys: 0x01,
+            scan_types: vec![0],
+            scan_intervals: vec![0x0060],
+            scan_windows: vec![0x0030],
+        };
+        self.scan_pending_opcode = Some(command.op_code());
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+        self.scan_state = PassiveScanState::Configuring;
+        Ok(())
+    }
+
+    pub fn stop_passive_extended_scan(&mut self) -> Result<(), EngineFault> {
+        if self.scan_state == PassiveScanState::Idle {
+            return Ok(());
+        }
+        if self.scan_state != PassiveScanState::Scanning {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let command = Command::LeSetExtendedScanEnable {
+            enable: 0,
+            filter_duplicates: 0,
+            duration: 0,
+            period: 0,
+        };
+        self.scan_pending_opcode = Some(command.op_code());
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+        self.scan_state = PassiveScanState::Disabling;
+        Ok(())
     }
 
     pub fn capabilities(&self) -> Option<ControllerCapabilities> {
@@ -148,9 +213,9 @@ impl HciEngine {
             }
 
             if !self.device.poll(&mut self.link) {
-                if let Some(fault) = self.link.take_fault() {
-                    return Err(EngineFault::Link(fault));
-                }
+                self.check_link_fault()?;
+                self.process_observations()?;
+                self.check_link_fault()?;
                 self.refresh_attach_state();
                 return Ok(turns);
             }
@@ -159,6 +224,65 @@ impl HciEngine {
         }
 
         Err(EngineFault::PollBudgetExceeded)
+    }
+
+    fn check_link_fault(&mut self) -> Result<(), EngineFault> {
+        if let Some(fault) = self.link.take_fault() {
+            Err(EngineFault::Link(fault))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn process_observations(&mut self) -> Result<(), EngineFault> {
+        for observation in self.link.take_observations() {
+            let (opcode, status) = match observation {
+                HciObservation::CommandComplete { opcode, status } => {
+                    (opcode, status.unwrap_or(0xff))
+                }
+                HciObservation::CommandStatus { opcode, status } => {
+                    (opcode, status)
+                }
+            };
+
+            if self.scan_pending_opcode != Some(opcode) {
+                continue;
+            }
+
+            if status != 0 {
+                self.scan_pending_opcode = None;
+                self.scan_state =
+                    PassiveScanState::Failed { opcode, status };
+                continue;
+            }
+
+            match self.scan_state {
+                PassiveScanState::Configuring => {
+                    let command = Command::LeSetExtendedScanEnable {
+                        enable: 1,
+                        filter_duplicates: 1,
+                        duration: 0,
+                        period: 0,
+                    };
+                    self.scan_pending_opcode = Some(command.op_code());
+                    self.link.handle_command(0, command);
+                    self.check_link_fault()?;
+                    self.scan_state = PassiveScanState::Enabling;
+                }
+                PassiveScanState::Enabling => {
+                    self.scan_pending_opcode = None;
+                    self.scan_state = PassiveScanState::Scanning;
+                }
+                PassiveScanState::Disabling => {
+                    self.scan_pending_opcode = None;
+                    self.scan_state = PassiveScanState::Idle;
+                }
+                PassiveScanState::Idle
+                | PassiveScanState::Scanning
+                | PassiveScanState::Failed { .. } => {}
+            }
+        }
+        Ok(())
     }
 
     fn refresh_attach_state(&mut self) {
@@ -286,6 +410,123 @@ mod tests {
         assert_eq!(capabilities.hci_version, None);
         assert_eq!(capabilities.le_acl_pool, None);
         assert_eq!(capabilities.iso_pool, None);
+    }
+
+    fn make_minimal_attach_ready(
+        engine: &mut HciEngine,
+        rx: &crate::runtime::mailbox::BoundedReceiver<HostPacket>,
+    ) {
+        engine.begin_operational_attach().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        engine
+            .ingest(ControllerPacket::Event(supported))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let _ = rx.try_recv().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(engine.attach_state(), OperationalAttachState::Ready);
+    }
+
+    #[test]
+    fn passive_scan_is_a_nonblocking_command_transaction() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_passive_extended_scan().unwrap();
+        let parameters = rx.try_recv().unwrap();
+        assert!(matches!(parameters, HostPacket::Command(_)));
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Configuring
+        );
+
+        // LE Set Extended Scan Parameters complete, status 0.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x41, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let enable = rx.try_recv().unwrap();
+        assert!(matches!(enable, HostPacket::Command(_)));
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Enabling
+        );
+
+        // LE Set Extended Scan Enable complete, status 0.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Scanning
+        );
+
+        engine.stop_passive_extended_scan().unwrap();
+        let disable = rx.try_recv().unwrap();
+        assert!(matches!(disable, HostPacket::Command(_)));
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Disabling
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Idle
+        );
+    }
+
+    #[test]
+    fn scan_command_failure_is_terminal_and_explicit() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_passive_extended_scan().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x41, 0x20, 0x0c,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.passive_scan_state(),
+            PassiveScanState::Failed {
+                opcode: 0x2041,
+                status: 0x0c,
+            }
+        );
     }
 
     #[test]
