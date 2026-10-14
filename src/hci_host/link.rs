@@ -1,8 +1,12 @@
 use std::collections::VecDeque;
 
 use bumble_hci::{
-    codes::{HCI_ACL_DATA_PACKET, HCI_COMMAND_PACKET, HCI_EVENT_PACKET, HCI_ISO_DATA_PACKET},
-    AclDataPacket, Command, HciPacket, IsoDataPacket,
+    codes::{
+        HCI_ACL_DATA_PACKET, HCI_COMMAND_PACKET, HCI_EVENT_PACKET, HCI_ISO_DATA_PACKET,
+        HCI_LE_SET_EVENT_MASK_COMMAND, HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND,
+        HCI_SET_EVENT_MASK_COMMAND, HCI_SET_EVENT_MASK_PAGE_2_COMMAND,
+    },
+    AclDataPacket, Command, Event, HciPacket, IsoDataPacket, ReturnParameters,
 };
 use bumble_host::HostTransport;
 
@@ -68,7 +72,8 @@ impl QueueHostTransport {
 
         let parsed = HciPacket::from_bytes(&h4)
             .map_err(|_| LinkFault::InvalidControllerPacket)?;
-        self.inbound.push_back(parsed);
+        self.inbound
+            .push_back(normalize_status_only_command_complete(parsed));
         Ok(())
     }
 
@@ -108,6 +113,39 @@ impl QueueHostTransport {
                 false
             }
         }
+    }
+}
+
+fn normalize_status_only_command_complete(packet: HciPacket) -> HciPacket {
+    let HciPacket::Event(Event::CommandComplete {
+        num_hci_command_packets,
+        command_opcode,
+        return_parameters: ReturnParameters::Raw { data },
+    }) = packet
+    else {
+        return packet;
+    };
+
+    let status_only = matches!(
+        command_opcode,
+        HCI_SET_EVENT_MASK_COMMAND
+            | HCI_SET_EVENT_MASK_PAGE_2_COMMAND
+            | HCI_LE_SET_EVENT_MASK_COMMAND
+            | HCI_LE_WRITE_SUGGESTED_DEFAULT_DATA_LENGTH_COMMAND
+    );
+
+    if status_only && data.len() == 1 {
+        HciPacket::Event(Event::CommandComplete {
+            num_hci_command_packets,
+            command_opcode,
+            return_parameters: ReturnParameters::Status { status: data[0] },
+        })
+    } else {
+        HciPacket::Event(Event::CommandComplete {
+            num_hci_command_packets,
+            command_opcode,
+            return_parameters: ReturnParameters::Raw { data },
+        })
     }
 }
 
@@ -193,6 +231,46 @@ mod tests {
         let events = link.drain_host_events(0);
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], HciPacket::Event(_)));
+    }
+
+    #[test]
+    fn status_only_host_init_completion_is_normalized_for_bumble_device() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.drain_host_events(0),
+            vec![HciPacket::Event(Event::CommandComplete {
+                num_hci_command_packets: 1,
+                command_opcode: HCI_SET_EVENT_MASK_COMMAND,
+                return_parameters: ReturnParameters::Status { status: 0 },
+            })]
+        );
+    }
+
+    #[test]
+    fn unknown_raw_command_complete_is_not_reinterpreted_as_status() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x04, 0x01, 0xff, 0x3f, 0x7a,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.drain_host_events(0),
+            vec![HciPacket::Event(Event::CommandComplete {
+                num_hci_command_packets: 1,
+                command_opcode: 0x3fff,
+                return_parameters: ReturnParameters::Raw { data: vec![0x7a] },
+            })]
+        );
     }
 
     #[test]
