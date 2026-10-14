@@ -586,6 +586,15 @@ mod imp {
 #[cfg(windows)]
 pub use imp::WindowsBe200Backend;
 
+#[cfg(windows)]
+pub fn open_backend() -> Result<WindowsBe200Backend, BackendError> {
+    WindowsBe200Backend::open_default().map_err(|error| match error {
+        OpenError::NotFound => BackendError::DeviceGone,
+        OpenError::Usb(UsbError::NoDevice) => BackendError::DeviceGone,
+        _ => BackendError::Failed,
+    })
+}
+
 #[cfg(not(windows))]
 pub struct WindowsBe200Backend;
 
