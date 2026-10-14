@@ -473,6 +473,7 @@ mod tests {
                 "controller_identity": controller,
                 "sets": {
                     "Galaxy Buds3 Pro (2F23)": {
+                        "set_size": 2,
                         "members": [
                             {
                                 "identity_address": "E8:C9:13:EF:2F:23",
