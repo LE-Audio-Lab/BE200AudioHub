@@ -2686,6 +2686,33 @@ mod tests {
         ControllerPacket::Acl(h4[1..].to_vec())
     }
 
+    fn inbound_att_fragments(
+        connection_handle: u16,
+        pdu: bumble_att::AttPdu,
+        max_fragment_size: usize,
+    ) -> Vec<ControllerPacket> {
+        let att = pdu.to_bytes();
+        let mut l2cap = Vec::with_capacity(4 + att.len());
+        l2cap.extend_from_slice(&(att.len() as u16).to_le_bytes());
+        l2cap.extend_from_slice(&bumble_host::ATT_CID.to_le_bytes());
+        l2cap.extend_from_slice(&att);
+
+        bumble_hci::fragment_l2cap_pdu(
+            connection_handle,
+            0,
+            max_fragment_size,
+            &l2cap,
+            true,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|packet| {
+            let h4 = packet.to_bytes();
+            ControllerPacket::Acl(h4[1..].to_vec())
+        })
+        .collect()
+    }
+
     fn expect_outbound_att(
         packet: HostPacket,
         expected_handle: u16,
@@ -2788,6 +2815,54 @@ mod tests {
                 connection,
                 result: super::super::gatt::GattResult::Mtu { mtu: 185 },
             }] if *connection == token
+        ));
+    }
+
+    #[test]
+    fn gatt_response_reassembles_across_hci_acl_fragments() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let token = establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 150,
+                connection: token,
+                operation:
+                    super::super::gatt::GattOperation::ExchangeMtu {
+                        client_rx_mtu: 247,
+                    },
+            })
+            .unwrap();
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x02);
+
+        let fragments = inbound_att_fragments(
+            0x0800,
+            bumble_att::AttPdu::ExchangeMtuResponse {
+                server_rx_mtu: 185,
+            },
+            4,
+        );
+        assert!(fragments.len() > 1);
+
+        engine.ingest(fragments[0].clone()).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(engine.gatt_in_flight_count(), 1);
+        assert!(engine.take_gatt_reports().is_empty());
+
+        for fragment in fragments.into_iter().skip(1) {
+            engine.ingest(fragment).unwrap();
+            engine.poll_until_quiescent().unwrap();
+        }
+
+        assert_eq!(engine.gatt_mtu(token), Some(185));
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 150,
+                result: super::super::gatt::GattResult::Mtu { mtu: 185 },
+                ..
+            }]
         ));
     }
 
