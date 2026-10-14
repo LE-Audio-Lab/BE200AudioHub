@@ -2,6 +2,8 @@ use std::fmt;
 
 use bumble_hci::Command;
 
+use super::connection::ConnectionToken;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StoredLeKeyMaterial {
     pub long_term_key: [u8; 16],
@@ -31,7 +33,7 @@ impl StoredLeKeyMaterial {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoredEncryptionRequest {
-    pub connection_handle: u16,
+    pub connection: ConnectionToken,
     pub key: StoredLeKeyMaterial,
 }
 
@@ -50,7 +52,7 @@ pub enum StoredEncryptionFailureKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoredEncryptionFailure {
-    pub connection_handle: u16,
+    pub connection: ConnectionToken,
     pub kind: StoredEncryptionFailureKind,
 }
 
@@ -60,7 +62,7 @@ pub enum StoredEncryptionState {
     Submitting,
     AwaitingChange,
     Encrypted {
-        connection_handle: u16,
+        connection: ConnectionToken,
         encryption_key_size: u8,
     },
     Failed(StoredEncryptionFailure),
@@ -84,7 +86,7 @@ pub enum EncryptionEvent {
 pub enum StoredEncryptionAction {
     AwaitChange,
     Encrypted {
-        connection_handle: u16,
+        connection: ConnectionToken,
         encryption_key_size: u8,
     },
     Failed(StoredEncryptionFailure),
@@ -92,7 +94,7 @@ pub enum StoredEncryptionAction {
 }
 
 pub struct StoredEncryptionTransaction {
-    connection_handle: u16,
+    connection: ConnectionToken,
     awaiting_change: bool,
     terminal: bool,
 }
@@ -101,22 +103,22 @@ impl StoredEncryptionTransaction {
     pub fn begin(
         request: StoredEncryptionRequest,
     ) -> Result<(Self, Command), StoredEncryptionConfigError> {
-        if request.connection_handle > 0x0eff {
+        if request.connection.connection_handle > 0x0eff {
             return Err(
                 StoredEncryptionConfigError::InvalidConnectionHandle(
-                    request.connection_handle,
+                    request.connection.connection_handle,
                 ),
             );
         }
 
         Ok((
             Self {
-                connection_handle: request.connection_handle,
+                connection_handle: request.connection.connection_handle,
                 awaiting_change: false,
                 terminal: false,
             },
             Command::LeEnableEncryption {
-                connection_handle: request.connection_handle,
+                connection_handle: request.connection.connection_handle,
                 random_number: request.key.random_number,
                 encrypted_diversifier: request.key.encrypted_diversifier,
                 long_term_key: request.key.long_term_key,
@@ -139,7 +141,7 @@ impl StoredEncryptionTransaction {
             self.terminal = true;
             return StoredEncryptionAction::Failed(
                 StoredEncryptionFailure {
-                    connection_handle: self.connection_handle,
+                    connection: self.connection,
                     kind: StoredEncryptionFailureKind::CommandStatus {
                         status,
                     },
@@ -166,7 +168,7 @@ impl StoredEncryptionTransaction {
                 encryption_enabled,
                 encryption_key_size,
             } => {
-                if connection_handle != self.connection_handle {
+                if connection_handle != self.connection.connection_handle {
                     return StoredEncryptionAction::Ignored;
                 }
 
@@ -202,7 +204,7 @@ impl StoredEncryptionTransaction {
                 connection_handle,
                 reason,
             } => {
-                if connection_handle != self.connection_handle {
+                if connection_handle != self.connection.connection_handle {
                     return StoredEncryptionAction::Ignored;
                 }
 
@@ -225,7 +227,7 @@ mod tests {
     #[test]
     fn debug_output_redacts_ltk_and_rand() {
         let request = StoredEncryptionRequest {
-            connection_handle: 0x0800,
+            connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
             key: StoredLeKeyMaterial {
                 long_term_key: [0x5a; 16],
                 encrypted_diversifier: 0x1234,
@@ -249,7 +251,7 @@ mod tests {
     #[test]
     fn command_preserves_stored_legacy_or_sc_parameters() {
         let request = StoredEncryptionRequest {
-            connection_handle: 0x0800,
+            connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
             key: StoredLeKeyMaterial {
                 long_term_key: [0x11; 16],
                 encrypted_diversifier: 0x2233,
@@ -286,7 +288,7 @@ mod tests {
         let (mut tx, _command) =
             StoredEncryptionTransaction::begin(
                 StoredEncryptionRequest {
-                    connection_handle: 0x0800,
+                    connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
                     key: StoredLeKeyMaterial::secure_connections([0x22; 16]),
                 },
             )
@@ -303,12 +305,12 @@ mod tests {
         assert!(matches!(
             tx.on_event(EncryptionEvent::Change {
                 status: 0,
-                connection_handle: 0x0800,
+                connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
                 encryption_enabled: 1,
                 encryption_key_size: 16,
             }),
             StoredEncryptionAction::Encrypted {
-                connection_handle: 0x0800,
+                connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
                 encryption_key_size: 16,
             }
         ));
@@ -319,7 +321,7 @@ mod tests {
         let (mut tx, _command) =
             StoredEncryptionTransaction::begin(
                 StoredEncryptionRequest {
-                    connection_handle: 0x0800,
+                    connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
                     key: StoredLeKeyMaterial::secure_connections([0x66; 16]),
                 },
             )
@@ -330,7 +332,7 @@ mod tests {
         );
 
         match tx.on_event(EncryptionEvent::Disconnected {
-            connection_handle: 0x0800,
+            connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
             reason: 0x08,
         }) {
             StoredEncryptionAction::Failed(failure) => {
@@ -352,7 +354,7 @@ mod tests {
         let (mut tx, _command) =
             StoredEncryptionTransaction::begin(
                 StoredEncryptionRequest {
-                    connection_handle: 0x0800,
+                    connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
                     key: StoredLeKeyMaterial::secure_connections([0x33; 16]),
                 },
             )
@@ -376,7 +378,7 @@ mod tests {
         let (mut tx, _command) =
             StoredEncryptionTransaction::begin(
                 StoredEncryptionRequest {
-                    connection_handle: 0x0801,
+                    connection: ConnectionToken { connection_handle: 0x0801, generation: 10 },
                     key: StoredLeKeyMaterial::secure_connections([0x44; 16]),
                 },
             )
@@ -388,7 +390,7 @@ mod tests {
 
         match tx.on_event(EncryptionEvent::Change {
             status: 0,
-            connection_handle: 0x0801,
+            connection: ConnectionToken { connection_handle: 0x0801, generation: 10 },
             encryption_enabled: 0,
             encryption_key_size: 0,
         }) {
