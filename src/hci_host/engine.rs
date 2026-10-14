@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use bumble_hci::{
     codes::{
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+        HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
         HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
     },
     Command,
@@ -145,6 +146,22 @@ impl HciEngine {
 
     pub fn fal_connection_state(&self) -> &FalConnectionState {
         &self.fal_connection_state
+    }
+
+    pub fn cancel_fal_connection(&mut self) -> Result<(), EngineFault> {
+        let action = {
+            let transaction = self
+                .fal_connection_transaction
+                .as_mut()
+                .ok_or(EngineFault::InvalidState)?;
+            transaction.request_cancel()
+        };
+
+        if matches!(action, FalConnectAction::Ignored) {
+            return Err(EngineFault::InvalidState);
+        }
+
+        self.handle_fal_connection_action(action)
     }
 
     pub fn begin_fal_connection(
@@ -454,6 +471,9 @@ impl HciEngine {
                 if opcode == HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND {
                     self.fal_connection_state =
                         FalConnectionState::Initiating;
+                } else if opcode == HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND {
+                    self.fal_connection_state =
+                        FalConnectionState::Cancelling;
                 } else if opcode == HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND
                     && matches!(
                         self.fal_connection_state,
@@ -954,6 +974,102 @@ mod tests {
                 assert_eq!(connection.supervision_timeout, 42);
             }
             other => panic!("expected Connected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_cancel_waits_for_terminal_le_connection_event() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .begin_fal_connection(
+                super::super::connection::FalConnectRequest {
+                    peer: super::super::connection::LePeerIdentity {
+                        address_le: [
+                            0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
+                        ],
+                        address_type: 0,
+                    },
+                    parameters:
+                        super::super::connection::LeInitiationParameters::default(),
+                },
+            )
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        for (opcode, extra) in [
+            (0x200f, &[8][..]),
+            (0x2010, &[][..]),
+            (0x2011, &[][..]),
+        ] {
+            engine.ingest(complete(opcode, 0, extra)).unwrap();
+            engine.poll_until_quiescent().unwrap();
+            let _ = rx.try_recv().unwrap();
+        }
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x43, 0x20,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.fal_connection_state(),
+            &FalConnectionState::AwaitingConnection
+        );
+
+        engine.cancel_fal_connection().unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            0x200e
+        );
+        assert_eq!(
+            engine.fal_connection_state(),
+            &FalConnectionState::Cancelling
+        );
+
+        engine.ingest(complete(0x200e, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.fal_connection_state(),
+            &FalConnectionState::CancelAccepted
+        );
+
+        // Terminal LE Connection Complete failure after accepted cancel.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x02,
+                0x00, 0x00,
+                0x00,
+                0x00,
+                0, 0, 0, 0, 0, 0,
+                0x00, 0x00,
+                0x00, 0x00,
+                0x00, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            0x2010
+        );
+
+        engine.ingest(complete(0x2010, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        match engine.fal_connection_state() {
+            FalConnectionState::Failed(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    super::super::connection::FalConnectFailureKind::Cancelled {
+                        connection_status: 0x02,
+                    }
+                );
+            }
+            other => panic!("expected cancelled terminal state, got {other:?}"),
         }
     }
 
