@@ -70,6 +70,7 @@ pub enum FalConnectFailureKind {
     MalformedCapacityResponse,
     EmptyFilterAcceptList,
     ConnectionFailed { status: u8 },
+    Cancelled { connection_status: u8 },
     CleanupAfterConnection {
         connection_handle: u16,
         status: u8,
@@ -88,8 +89,12 @@ pub enum FalConnectionState {
     Preparing,
     Initiating,
     AwaitingConnection,
+    Cancelling,
+    CancelAccepted,
+    CancelRejected { status: u8 },
     Cleaning,
     Connected(LeConnectionSnapshot),
+    ConnectedAfterCancel(LeConnectionSnapshot),
     Failed(FalConnectFailure),
 }
 
@@ -103,7 +108,10 @@ pub enum ConnectionEvent {
 pub enum FalConnectAction {
     Send(Command),
     AwaitConnection,
+    CancelAccepted,
+    CancelRejected { status: u8 },
     Connected(LeConnectionSnapshot),
+    ConnectedAfterCancel(LeConnectionSnapshot),
     Failed(FalConnectFailure),
     Ignored,
 }
@@ -115,10 +123,19 @@ enum Phase {
     AddingPeer,
     SubmittingConnection,
     AwaitingConnection,
+    Cancelling,
     ClearingAfterSuccess,
     ClearingAfterFailure,
     Complete,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelProgress {
+    None,
+    Pending,
+    Accepted,
+    Rejected,
 }
 
 pub struct FalConnectTransaction {
@@ -127,6 +144,7 @@ pub struct FalConnectTransaction {
     pending_opcode: u16,
     pending_connection: Option<LeConnectionSnapshot>,
     failure: Option<FalConnectFailure>,
+    cancel_progress: CancelProgress,
 }
 
 impl FalConnectTransaction {
@@ -142,9 +160,25 @@ impl FalConnectTransaction {
                 pending_opcode: command.op_code(),
                 pending_connection: None,
                 failure: None,
+                cancel_progress: CancelProgress::None,
             },
             command,
         ))
+    }
+
+    pub fn request_cancel(&mut self) -> FalConnectAction {
+        if self.phase != Phase::AwaitingConnection
+            || matches!(
+                self.cancel_progress,
+                CancelProgress::Pending | CancelProgress::Accepted
+            )
+        {
+            return FalConnectAction::Ignored;
+        }
+
+        self.cancel_progress = CancelProgress::Pending;
+        self.phase = Phase::Cancelling;
+        self.send(Command::LeCreateConnectionCancel)
     }
 
     pub fn on_command_complete(
@@ -203,6 +237,18 @@ impl FalConnectTransaction {
                 self.phase = Phase::SubmittingConnection;
                 self.send(self.create_connection_command())
             }
+            Phase::Cancelling => {
+                self.pending_opcode = 0;
+                self.phase = Phase::AwaitingConnection;
+
+                if status == 0 {
+                    self.cancel_progress = CancelProgress::Accepted;
+                    FalConnectAction::CancelAccepted
+                } else {
+                    self.cancel_progress = CancelProgress::Rejected;
+                    FalConnectAction::CancelRejected { status }
+                }
+            }
             Phase::ClearingAfterSuccess => {
                 let connection = self
                     .pending_connection
@@ -221,7 +267,14 @@ impl FalConnectTransaction {
                 }
 
                 self.phase = Phase::Complete;
-                FalConnectAction::Connected(connection)
+                if matches!(
+                    self.cancel_progress,
+                    CancelProgress::Pending | CancelProgress::Accepted
+                ) {
+                    FalConnectAction::ConnectedAfterCancel(connection)
+                } else {
+                    FalConnectAction::Connected(connection)
+                }
             }
             Phase::ClearingAfterFailure => {
                 let mut failure = self
@@ -270,7 +323,10 @@ impl FalConnectTransaction {
         &mut self,
         event: ConnectionEvent,
     ) -> FalConnectAction {
-        if self.phase != Phase::AwaitingConnection {
+        if !matches!(
+            self.phase,
+            Phase::AwaitingConnection | Phase::Cancelling
+        ) {
             return FalConnectAction::Ignored;
         }
 
@@ -281,8 +337,18 @@ impl FalConnectTransaction {
                 self.send(Command::LeClearFilterAcceptList)
             }
             ConnectionEvent::Failed { status } => {
+                let kind = if matches!(
+                    self.cancel_progress,
+                    CancelProgress::Pending | CancelProgress::Accepted
+                ) {
+                    FalConnectFailureKind::Cancelled {
+                        connection_status: status,
+                    }
+                } else {
+                    FalConnectFailureKind::ConnectionFailed { status }
+                };
                 self.failure = Some(FalConnectFailure {
-                    kind: FalConnectFailureKind::ConnectionFailed { status },
+                    kind,
                     cleanup_status: None,
                 });
                 self.phase = Phase::ClearingAfterFailure;
@@ -566,6 +632,154 @@ mod tests {
                 status: 0x0c,
             }
         );
+    }
+
+    #[test]
+    fn accepted_cancel_waits_for_terminal_connection_event() {
+        let (mut tx, first) =
+            FalConnectTransaction::begin(request()).unwrap();
+        let _ = tx.on_command_complete(first.op_code(), 0, &[8]);
+        let _ = tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_complete(
+            HCI_LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_status(
+            HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
+            0,
+        );
+
+        let cancel = expect_send(
+            tx.request_cancel(),
+            bumble_hci::codes::HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
+        );
+        assert!(matches!(cancel, Command::LeCreateConnectionCancel));
+
+        assert!(matches!(
+            tx.on_command_complete(
+                bumble_hci::codes::HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
+                0,
+                &[],
+            ),
+            FalConnectAction::CancelAccepted
+        ));
+
+        expect_send(
+            tx.on_connection_event(ConnectionEvent::Failed {
+                status: 0x02,
+            }),
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+        );
+
+        let failure = match tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        ) {
+            FalConnectAction::Failed(failure) => failure,
+            other => panic!("expected cancelled failure, got {other:?}"),
+        };
+        assert_eq!(
+            failure.kind,
+            FalConnectFailureKind::Cancelled {
+                connection_status: 0x02,
+            }
+        );
+    }
+
+    #[test]
+    fn late_success_while_cancel_pending_is_preserved() {
+        let (mut tx, first) =
+            FalConnectTransaction::begin(request()).unwrap();
+        let _ = tx.on_command_complete(first.op_code(), 0, &[8]);
+        let _ = tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_complete(
+            HCI_LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_status(
+            HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
+            0,
+        );
+        let _ = tx.request_cancel();
+
+        expect_send(
+            tx.on_connection_event(ConnectionEvent::Established(
+                snapshot(0x0801),
+            )),
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+        );
+
+        match tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        ) {
+            FalConnectAction::ConnectedAfterCancel(connection) => {
+                assert_eq!(connection, snapshot(0x0801));
+            }
+            other => {
+                panic!("expected late connected-after-cancel, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_cancel_keeps_initiation_transaction_alive() {
+        let (mut tx, first) =
+            FalConnectTransaction::begin(request()).unwrap();
+        let _ = tx.on_command_complete(first.op_code(), 0, &[8]);
+        let _ = tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_complete(
+            HCI_LE_ADD_DEVICE_TO_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        );
+        let _ = tx.on_command_status(
+            HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
+            0,
+        );
+        let _ = tx.request_cancel();
+
+        assert!(matches!(
+            tx.on_command_complete(
+                bumble_hci::codes::HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
+                0x0c,
+                &[],
+            ),
+            FalConnectAction::CancelRejected { status: 0x0c }
+        ));
+
+        expect_send(
+            tx.on_connection_event(ConnectionEvent::Established(
+                snapshot(0x0802),
+            )),
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+        );
+        match tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        ) {
+            FalConnectAction::Connected(connection) => {
+                assert_eq!(connection, snapshot(0x0802));
+            }
+            other => panic!("expected normal connected result, got {other:?}"),
+        }
     }
 
     #[test]
