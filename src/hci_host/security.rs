@@ -113,7 +113,7 @@ impl StoredEncryptionTransaction {
 
         Ok((
             Self {
-                connection_handle: request.connection.connection_handle,
+                connection: request.connection,
                 awaiting_change: false,
                 terminal: false,
             },
@@ -176,7 +176,7 @@ impl StoredEncryptionTransaction {
                 if status != 0 {
                     return StoredEncryptionAction::Failed(
                         StoredEncryptionFailure {
-                            connection_handle,
+                            connection: self.connection,
                             kind:
                                 StoredEncryptionFailureKind::EncryptionChangeStatus {
                                     status,
@@ -188,7 +188,7 @@ impl StoredEncryptionTransaction {
                 if encryption_enabled == 0 {
                     return StoredEncryptionAction::Failed(
                         StoredEncryptionFailure {
-                            connection_handle,
+                            connection: self.connection,
                             kind:
                                 StoredEncryptionFailureKind::EncryptionNotEnabled,
                         },
@@ -196,7 +196,7 @@ impl StoredEncryptionTransaction {
                 }
 
                 StoredEncryptionAction::Encrypted {
-                    connection_handle,
+                    connection: self.connection,
                     encryption_key_size,
                 }
             }
@@ -210,7 +210,7 @@ impl StoredEncryptionTransaction {
 
                 self.terminal = true;
                 StoredEncryptionAction::Failed(StoredEncryptionFailure {
-                    connection_handle,
+                    connection: self.connection,
                     kind: StoredEncryptionFailureKind::ConnectionLost {
                         reason,
                     },
@@ -305,7 +305,7 @@ mod tests {
         assert!(matches!(
             tx.on_event(EncryptionEvent::Change {
                 status: 0,
-                connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
+                connection_handle: 0x0800,
                 encryption_enabled: 1,
                 encryption_key_size: 16,
             }),
@@ -332,7 +332,7 @@ mod tests {
         );
 
         match tx.on_event(EncryptionEvent::Disconnected {
-            connection: ConnectionToken { connection_handle: 0x0800, generation: 9 },
+            connection_handle: 0x0800,
             reason: 0x08,
         }) {
             StoredEncryptionAction::Failed(failure) => {
@@ -390,7 +390,7 @@ mod tests {
 
         match tx.on_event(EncryptionEvent::Change {
             status: 0,
-            connection: ConnectionToken { connection_handle: 0x0801, generation: 10 },
+            connection_handle: 0x0801,
             encryption_enabled: 0,
             encryption_key_size: 0,
         }) {
