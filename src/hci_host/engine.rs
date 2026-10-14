@@ -6,7 +6,10 @@ use crate::transport::{
     worker::TransportTx,
 };
 
-use super::link::{HciObservation, LinkFault, QueueHostTransport};
+use super::{
+    link::{HciObservation, LinkFault, QueueHostTransport},
+    scan::{ScanAccumulator, ScanSummary},
+};
 
 const DEFAULT_POLL_BUDGET: usize = 64;
 
@@ -70,6 +73,8 @@ pub struct HciEngine {
     attach_state: OperationalAttachState,
     scan_state: PassiveScanState,
     scan_pending_opcode: Option<u16>,
+    scan_accumulator: ScanAccumulator,
+    completed_scan: Option<ScanSummary>,
 }
 
 impl HciEngine {
@@ -80,6 +85,8 @@ impl HciEngine {
             attach_state: OperationalAttachState::Idle,
             scan_state: PassiveScanState::Idle,
             scan_pending_opcode: None,
+            scan_accumulator: ScanAccumulator::default(),
+            completed_scan: None,
         }
     }
 
@@ -95,12 +102,22 @@ impl HciEngine {
         self.scan_state
     }
 
+    pub fn take_completed_scan(&mut self) -> Option<ScanSummary> {
+        self.completed_scan.take()
+    }
+
     pub fn begin_passive_extended_scan(&mut self) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.scan_state != PassiveScanState::Idle
         {
             return Err(EngineFault::InvalidState);
         }
+
+        // Discard any stale advertisements left by an earlier probe before
+        // beginning a new bounded scan session.
+        let _ = self.device.take_advertisements();
+        self.scan_accumulator.reset();
+        self.completed_scan = None;
 
         let command = Command::LeSetExtendedScanParameters {
             own_address_type: 0,
@@ -214,6 +231,7 @@ impl HciEngine {
 
             if !self.device.poll(&mut self.link) {
                 self.check_link_fault()?;
+                self.collect_scan_observations();
                 self.process_observations()?;
                 self.check_link_fault()?;
                 self.refresh_attach_state();
@@ -231,6 +249,22 @@ impl HciEngine {
             Err(EngineFault::Link(fault))
         } else {
             Ok(())
+        }
+    }
+
+    fn collect_scan_observations(&mut self) {
+        if matches!(
+            self.scan_state,
+            PassiveScanState::Idle | PassiveScanState::Failed { .. }
+        ) {
+            // Still drain Device's journal so stale pre-session reports cannot
+            // leak into the next scan.
+            let _ = self.device.take_advertisements();
+            return;
+        }
+
+        for advertisement in self.device.take_advertisements() {
+            self.scan_accumulator.push(advertisement);
         }
     }
 
@@ -275,6 +309,7 @@ impl HciEngine {
                 }
                 PassiveScanState::Disabling => {
                     self.scan_pending_opcode = None;
+                    self.completed_scan = Some(self.scan_accumulator.summary());
                     self.scan_state = PassiveScanState::Idle;
                 }
                 PassiveScanState::Idle
@@ -503,6 +538,11 @@ mod tests {
             engine.passive_scan_state(),
             PassiveScanState::Idle
         );
+
+        let summary = engine.take_completed_scan().unwrap();
+        assert_eq!(summary.reports_seen, 0);
+        assert!(summary.observations.is_empty());
+        assert!(!summary.truncated);
     }
 
     #[test]
