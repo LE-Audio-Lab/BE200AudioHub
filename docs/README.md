@@ -6,6 +6,7 @@ Active documentation is organized by responsibility.
 - **reference/** — high-level external implementation references and adoption rules.
 - **reference-index/** — implementation-facing source index, precise to upstream file/function/type, with adoption boundaries and deterministic test obligations.
 - **history/** — navigation for the sealed Experiment/R5 material. Historical source and Round documents remain byte-for-byte under `deprecated/r5/` and are not evolved in place.
+- **Timeline/** — active engineering chronology. Round1–4 are restored from the sealed archive; new Review rounds are appended here without rewriting the archived originals.
 
 ## Read first
 
@@ -16,6 +17,7 @@ Active documentation is organized by responsibility.
 5. [Data Flow](./design/DATA_FLOW.md)
 6. [Reference implementations](./reference/README.md)
 7. [Function-level Reference Index](./reference-index/README.md)
+8. [Engineering Timeline](./Timeline/README.md)
 
 ## Archive rule
 
