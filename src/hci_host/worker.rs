@@ -258,6 +258,9 @@ fn process_command(
         HciCommand::ConfigureControllerPrivacy(config) => {
             engine.begin_controller_privacy(config)
         }
+        HciCommand::ClearControllerPrivacy => {
+            engine.begin_controller_privacy_clear()
+        }
         HciCommand::BeginFalConnection(request) => {
             engine.begin_fal_connection(request)
         }
