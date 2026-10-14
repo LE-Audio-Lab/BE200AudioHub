@@ -142,7 +142,7 @@ Round4 文档核对过的 Git 比较：R3 基线 `a80cf1e8` → Round4 最终 HI
 | Review-1 Runtime Kernel | **COMPLETE** | generation, bounded mailbox, cancellation, request/reply, serial context, fault propagation |
 | Review-1 Async Transport | **COMPLETE** | concurrent Event+ACL pending RX, reassembly, cancellation, libusb async backend, persistent transfer reuse |
 | Review-1 validation | **PASS** | `cargo test --workspace`: 48/48; `cargo check --workspace`: PASS; `cargo build --workspace`: PASS |
-| HCI Host | **WIP** | gated behind `hci-wip`; synthetic resetless attach/scan fixtures still need repair |
+| HCI Host | **Review-2A COMPLETE** | default main component; resetless attach/capabilities/passive scan software + HIL PASS |
 | Reference Index | **COMPLETE** | `docs/reference-index/` provides file/function/type-level upstream oracle map |
 
 ### Round5 architecture pivot
@@ -160,9 +160,9 @@ The project no longer optimizes for “make the next HIL command work once”. R
 ```text
 Review-1 Runtime + Async Transport      ✅
         ↓
-Review-2A HCI attach/capabilities/scan 🟡
+Review-2A HCI attach/capabilities/scan ✅
         ↓
-Review-2B ACL/privacy/stored LTK
+Review-2B ACL/privacy/stored LTK       ← NEXT
         ↓
 Review-2C ATT/GATT
         ↓
@@ -179,6 +179,28 @@ WASAPI + ASRC
 Lifecycle / Recovery
         ↓
 Profiling / HIL hardening
+```
+
+### Review-2A HIL evidence
+
+Review-2A real-device acceptance completed after adding an isolated L3 firmware bypass:
+
+```text
+Firmware bypass: Booted
+Capabilities: PASS
+Scan: PASS reports=2 observations=2 truncated=false
+Target seen: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+The bypass independently claims/releases BE200 interface 0 before the normal async Transport reopens it. It is not part of HCI Host or the async Transport adapter. HCI Host was then promoted out of the `hci-wip` feature gate into the default build.
+
+Default validation after promotion:
+
+```text
+cargo test  -> 91 passed, 0 failed
+cargo check -> PASS
+cargo build -> PASS
 ```
 
 ### New active references
