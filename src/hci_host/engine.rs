@@ -3092,4 +3092,137 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn fragmented_acl_reassembles_before_gatt_response_dispatch() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let token =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 501,
+                connection: token,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0042,
+                    },
+            })
+            .unwrap();
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
+
+        let att = bumble_att::AttPdu::ReadResponse {
+            attribute_value: vec![1, 2, 3, 4, 5, 6],
+        }
+        .to_bytes();
+        let mut l2cap = Vec::with_capacity(4 + att.len());
+        l2cap.extend_from_slice(&(att.len() as u16).to_le_bytes());
+        l2cap.extend_from_slice(&bumble_host::ATT_CID.to_le_bytes());
+        l2cap.extend_from_slice(&att);
+
+        let split = 5usize;
+        for (pb_flag, fragment) in [
+            (bumble_hci::HCI_ACL_PB_FIRST_FLUSHABLE, &l2cap[..split]),
+            (bumble_hci::HCI_ACL_PB_CONTINUATION, &l2cap[split..]),
+        ] {
+            let h4 = bumble_hci::AclDataPacket {
+                connection_handle: 0x0800,
+                pb_flag,
+                bc_flag: 0,
+                data_total_length: fragment.len() as u16,
+                data: fragment.to_vec(),
+            }
+            .to_bytes();
+            engine
+                .ingest(ControllerPacket::Acl(h4[1..].to_vec()))
+                .unwrap();
+            engine.poll_until_quiescent().unwrap();
+
+            if pb_flag == bumble_hci::HCI_ACL_PB_FIRST_FLUSHABLE {
+                assert!(engine.take_gatt_reports().is_empty());
+                assert_eq!(engine.gatt_in_flight_count(), 1);
+            }
+        }
+
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 501,
+                result: super::super::gatt::GattResult::Value {
+                    attribute_handle: 0x0042,
+                    value,
+                },
+                ..
+            }] if value == &vec![1, 2, 3, 4, 5, 6]
+        ));
+    }
+
+    #[test]
+    fn gatt_rejects_busy_bearer_and_duplicate_request_id_without_acl_io() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let first =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+        let second =
+            establish_encrypted_test_acl(&mut engine, 0x0801, 7);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 601,
+                connection: first,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0040,
+                    },
+            })
+            .unwrap();
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 602,
+                connection: first,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0041,
+                    },
+            })
+            .unwrap();
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Failed(
+                super::super::gatt::GattFailure {
+                    request_id: 602,
+                    kind: super::super::gatt::GattFailureKind::Busy,
+                    ..
+                }
+            )]
+        ));
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 601,
+                connection: second,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0050,
+                    },
+            })
+            .unwrap();
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Failed(
+                super::super::gatt::GattFailure {
+                    request_id: 601,
+                    kind:
+                        super::super::gatt::GattFailureKind::DuplicateRequestId,
+                    ..
+                }
+            )]
+        ));
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+        assert_eq!(engine.gatt_in_flight_count(), 1);
+    }
+
 }
