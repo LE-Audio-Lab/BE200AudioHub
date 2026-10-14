@@ -11,7 +11,9 @@ use crate::{
 };
 
 use super::{
-    connection::{FalConnectRequest, FalConnectionState},
+    connection::{
+        DisconnectState, FalConnectRequest, FalConnectionState,
+    },
     engine::{
         ControllerCapabilities, OperationalAttachState, PassiveScanState,
     },
@@ -27,6 +29,7 @@ pub enum HciCommand {
     ConfigureControllerPrivacy(ResolvingListConfig),
     BeginFalConnection(FalConnectRequest),
     CancelFalConnection,
+    Disconnect { connection_handle: u16 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +40,7 @@ pub enum HciReport {
     ScanComplete(ScanSummary),
     ControllerPrivacyState(ControllerPrivacyState),
     FalConnectionState(FalConnectionState),
+    DisconnectState(DisconnectState),
 }
 
 #[derive(Clone)]
@@ -139,6 +143,15 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_disconnect(
+        &self,
+        connection_handle: u16,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::Disconnect { connection_handle })
+            .map_err(map_send_error)
+    }
+
     /// Urgent lifecycle stop has a dedicated one-slot lane. A full stop lane
     /// means a stop is already pending and is therefore treated as success.
     pub fn request_stop(&self) -> Result<(), SendError> {
@@ -195,6 +208,20 @@ mod tests {
 
         assert_eq!(control.request_stop(), Ok(()));
         assert_eq!(control.request_stop(), Ok(()));
+    }
+
+    #[test]
+    fn disconnect_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        control.try_disconnect(0x0800).unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::Disconnect {
+                connection_handle: 0x0800,
+            }
+        );
     }
 
     #[test]
