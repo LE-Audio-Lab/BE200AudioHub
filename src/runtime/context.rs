@@ -25,6 +25,7 @@ enum ContextMessage<S> {
         generation: Generation,
         job: Job<S>,
     },
+    Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +41,8 @@ pub struct ContextHandle<S> {
     generation: GenerationGate,
 }
 
-pub struct ContextJoin {
+pub struct ContextJoin<S> {
+    tx: SyncSender<ContextMessage<S>>,
     accepting: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -51,7 +53,7 @@ pub fn spawn_serial_context<S>(
     initial_state: S,
     generation: GenerationGate,
     faults: FaultSink,
-) -> (ContextHandle<S>, ContextJoin)
+) -> (ContextHandle<S>, ContextJoin<S>)
 where
     S: Send + 'static,
 {
@@ -90,6 +92,7 @@ where
                             break;
                         }
                     }
+                    ContextMessage::Stop => break,
                 }
             }
             thread_accepting.store(false, Ordering::Release);
@@ -103,6 +106,7 @@ where
             generation,
         },
         ContextJoin {
+            tx: tx.clone(),
             accepting,
             join: Some(join),
         },
@@ -147,16 +151,18 @@ impl<S> ContextHandle<S> {
     }
 }
 
-impl ContextJoin {
+impl<S> ContextJoin<S> {
     pub fn request_stop(&self) {
         self.accepting.store(false, Ordering::Release);
+        // If the inbox is empty this wakes recv(). If it is full the worker is
+        // already runnable; after processing one queued item it observes
+        // accepting=false and exits on the next loop condition.
+        let _ = self.tx.try_send(ContextMessage::Stop);
     }
 
     pub fn join(mut self) {
-        self.accepting.store(false, Ordering::Release);
+        self.request_stop();
         if let Some(join) = self.join.take() {
-            // The sender side must be gone or the worker may still be waiting in
-            // recv(). Runtime composition drops ContextHandle before join().
             let _ = join.join();
         }
     }
@@ -217,6 +223,27 @@ mod tests {
         );
         drop(handle);
         join.join();
+    }
+
+    #[test]
+    fn request_stop_wakes_idle_context_even_if_handle_is_still_alive() {
+        let generation = GenerationGate::new(Generation(5));
+        let (faults, _fault_inbox) = fault_channel(4);
+        let (handle, join) = spawn_serial_context(
+            ExecutionDomain::Core,
+            2,
+            (),
+            generation,
+            faults,
+        );
+
+        join.request_stop();
+        join.join();
+
+        assert_eq!(
+            handle.try_post(Generation(5), |_| {}),
+            Err(PostError::Stopped)
+        );
     }
 
     #[test]
