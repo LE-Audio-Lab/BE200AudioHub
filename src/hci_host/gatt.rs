@@ -671,7 +671,6 @@ impl GattTransaction {
                                 declaration_handle.saturating_sub(1);
                         }
                         self.characteristics.push(GattCharacteristic {
-                            declaration_handle,
                             handle,
                             end_group_handle: end,
                             properties,
