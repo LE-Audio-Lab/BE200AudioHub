@@ -2616,4 +2616,480 @@ mod tests {
             Err(EngineFault::Link(LinkFault::TransportFull))
         );
     }
+
+    fn establish_encrypted_test_acl(
+        engine: &mut HciEngine,
+        connection_handle: u16,
+        address_seed: u8,
+    ) -> ConnectionToken {
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                connection_handle as u8,
+                (connection_handle >> 8) as u8,
+                0x00,
+                0x01,
+                address_seed,
+                address_seed.wrapping_add(1),
+                address_seed.wrapping_add(2),
+                address_seed.wrapping_add(3),
+                address_seed.wrapping_add(4),
+                address_seed.wrapping_add(5),
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x08, 0x04, 0x00,
+                connection_handle as u8,
+                (connection_handle >> 8) as u8,
+                0x01,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .connection_set_snapshot()
+            .connections
+            .into_iter()
+            .find(|connection| {
+                connection.connection_handle == connection_handle
+            })
+            .expect("synthetic connection must exist")
+            .token()
+    }
+
+    fn inbound_att(
+        connection_handle: u16,
+        pdu: bumble_att::AttPdu,
+    ) -> ControllerPacket {
+        let att = pdu.to_bytes();
+        let mut l2cap = Vec::with_capacity(4 + att.len());
+        l2cap.extend_from_slice(&(att.len() as u16).to_le_bytes());
+        l2cap.extend_from_slice(&bumble_host::ATT_CID.to_le_bytes());
+        l2cap.extend_from_slice(&att);
+
+        let h4 = bumble_hci::AclDataPacket {
+            connection_handle,
+            pb_flag: 0b10,
+            bc_flag: 0,
+            data_total_length: l2cap.len() as u16,
+            data: l2cap,
+        }
+        .to_bytes();
+        assert_eq!(h4[0], bumble_hci::codes::HCI_ACL_DATA_PACKET);
+        ControllerPacket::Acl(h4[1..].to_vec())
+    }
+
+    fn expect_outbound_att(
+        packet: HostPacket,
+        expected_handle: u16,
+        expected_opcode: u8,
+    ) {
+        let HostPacket::Acl(bytes) = packet else {
+            panic!("expected outbound ACL packet");
+        };
+        assert!(bytes.len() >= 9);
+        let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+        assert_eq!(header & 0x0fff, expected_handle);
+        let acl_length = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
+        assert_eq!(acl_length, bytes.len() - 4);
+        let l2cap_length =
+            u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        assert_eq!(l2cap_length, bytes.len() - 8);
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), bumble_host::ATT_CID);
+        assert_eq!(bytes[8], expected_opcode);
+    }
+
+    #[test]
+    fn gatt_requires_encrypted_current_connection_before_acl_io() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let token = engine.connection_set_snapshot().connections[0].token();
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 100,
+                connection: token,
+                operation:
+                    super::super::gatt::GattOperation::DiscoverServices,
+            })
+            .unwrap();
+
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Failed(
+                super::super::gatt::GattFailure {
+                    request_id: 100,
+                    kind: super::super::gatt::GattFailureKind::NotEncrypted,
+                    ..
+                }
+            )]
+        ));
+    }
+
+    #[test]
+    fn gatt_mtu_round_trip_uses_real_acl_l2cap_att_path() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let token = establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 101,
+                connection: token,
+                operation:
+                    super::super::gatt::GattOperation::ExchangeMtu {
+                        client_rx_mtu: 247,
+                    },
+            })
+            .unwrap();
+
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x02);
+        assert_eq!(engine.gatt_in_flight_count(), 1);
+
+        engine
+            .ingest(inbound_att(
+                0x0800,
+                bumble_att::AttPdu::ExchangeMtuResponse {
+                    server_rx_mtu: 185,
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(engine.gatt_in_flight_count(), 0);
+        assert_eq!(engine.gatt_mtu(token), Some(185));
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 101,
+                connection,
+                result: super::super::gatt::GattResult::Mtu { mtu: 185 },
+            }] if *connection == token
+        ));
+    }
+
+    #[test]
+    fn gatt_fixed_bearer_transactions_are_isolated_per_acl_handle() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let first =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+        let second =
+            establish_encrypted_test_acl(&mut engine, 0x0801, 7);
+
+        for (id, token, attribute_handle) in [
+            (201, first, 0x0040),
+            (202, second, 0x0050),
+        ] {
+            engine
+                .begin_gatt_request(super::super::gatt::GattRequest {
+                    request_id: id,
+                    connection: token,
+                    operation:
+                        super::super::gatt::GattOperation::ReadValue {
+                            attribute_handle,
+                        },
+                })
+                .unwrap();
+        }
+
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0801, 0x0a);
+        assert_eq!(engine.gatt_in_flight_count(), 2);
+
+        engine
+            .ingest(inbound_att(
+                0x0801,
+                bumble_att::AttPdu::ReadResponse {
+                    attribute_value: vec![0xB2],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let reports = engine.take_gatt_reports();
+        assert!(matches!(
+            reports.as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 202,
+                connection,
+                result: super::super::gatt::GattResult::Value {
+                    attribute_handle: 0x0050,
+                    value,
+                },
+            }] if *connection == second && value == &vec![0xB2]
+        ));
+        assert_eq!(engine.gatt_in_flight_count(), 1);
+
+        engine
+            .ingest(inbound_att(
+                0x0800,
+                bumble_att::AttPdu::ReadResponse {
+                    attribute_value: vec![0xA1],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 201,
+                connection,
+                result: super::super::gatt::GattResult::Value {
+                    attribute_handle: 0x0040,
+                    value,
+                },
+            }] if *connection == first && value == &vec![0xA1]
+        ));
+    }
+
+    #[test]
+    fn unsolicited_notification_and_indication_are_connection_local() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let first =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+        let second =
+            establish_encrypted_test_acl(&mut engine, 0x0801, 7);
+
+        engine
+            .ingest(inbound_att(
+                0x0800,
+                bumble_att::AttPdu::HandleValueNotification {
+                    attribute_handle: 0x0046,
+                    attribute_value: vec![1, 2],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Value(
+                super::super::gatt::GattValueEvent::Notification {
+                    connection,
+                    attribute_handle: 0x0046,
+                    value,
+                }
+            )] if *connection == first && value == &vec![1, 2]
+        ));
+
+        engine
+            .ingest(inbound_att(
+                0x0801,
+                bumble_att::AttPdu::HandleValueIndication {
+                    attribute_handle: 0x0056,
+                    attribute_value: vec![3, 4],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0801, 0x1e);
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Value(
+                super::super::gatt::GattValueEvent::Indication {
+                    connection,
+                    attribute_handle: 0x0056,
+                    value,
+                }
+            )] if *connection == second && value == &vec![3, 4]
+        ));
+    }
+
+    #[test]
+    fn gatt_cancel_poison_drops_late_response_until_disconnect() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let first =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 301,
+                connection: first,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0040,
+                    },
+            })
+            .unwrap();
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
+
+        engine.cancel_gatt_request(first, 301).unwrap();
+        let cancel_reports = engine.take_gatt_reports();
+        assert!(matches!(
+            cancel_reports.as_slice(),
+            [
+                super::super::gatt::GattReport::Failed(
+                    super::super::gatt::GattFailure {
+                        request_id: 301,
+                        kind:
+                            super::super::gatt::GattFailureKind::Cancelled,
+                        ..
+                    }
+                ),
+                super::super::gatt::GattReport::BearerPoisoned {
+                    request_id: 301,
+                    ..
+                }
+            ]
+        ));
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 302,
+                connection: first,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0041,
+                    },
+            })
+            .unwrap();
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Failed(
+                super::super::gatt::GattFailure {
+                    request_id: 302,
+                    kind:
+                        super::super::gatt::GattFailureKind::BearerPoisoned {
+                            previous_request_id: 301,
+                        },
+                    ..
+                }
+            )]
+        ));
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+
+        engine
+            .ingest(inbound_att(
+                0x0800,
+                bumble_att::AttPdu::ReadResponse {
+                    attribute_value: vec![0xFF],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::LateResponseDropped {
+                request_id: 301,
+                ..
+            }]
+        ));
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x08, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let second =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 9);
+        assert_eq!(second.connection_handle, first.connection_handle);
+        assert_ne!(second.generation, first.generation);
+
+        engine
+            .begin_gatt_request(super::super::gatt::GattRequest {
+                request_id: 303,
+                connection: second,
+                operation:
+                    super::super::gatt::GattOperation::ReadValue {
+                        attribute_handle: 0x0042,
+                    },
+            })
+            .unwrap();
+        expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
+    }
+
+    #[test]
+    fn disconnect_fails_only_matching_gatt_transaction() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+        let first =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+        let second =
+            establish_encrypted_test_acl(&mut engine, 0x0801, 7);
+
+        for (id, token) in [(401, first), (402, second)] {
+            engine
+                .begin_gatt_request(super::super::gatt::GattRequest {
+                    request_id: id,
+                    connection: token,
+                    operation:
+                        super::super::gatt::GattOperation::ReadValue {
+                            attribute_handle: 0x0040,
+                        },
+                })
+                .unwrap();
+            let _ = rx.try_recv().unwrap();
+        }
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x08, 0x08,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Failed(
+                super::super::gatt::GattFailure {
+                    request_id: 401,
+                    connection,
+                    kind:
+                        super::super::gatt::GattFailureKind::Disconnected {
+                            reason: 0x08,
+                        },
+                }
+            )] if *connection == first
+        ));
+        assert_eq!(engine.gatt_in_flight_count(), 1);
+
+        engine
+            .ingest(inbound_att(
+                0x0801,
+                bumble_att::AttPdu::ReadResponse {
+                    attribute_value: vec![0x55],
+                },
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(matches!(
+            engine.take_gatt_reports().as_slice(),
+            [super::super::gatt::GattReport::Complete {
+                request_id: 402,
+                connection,
+                ..
+            }] if *connection == second
+        ));
+    }
+
 }
