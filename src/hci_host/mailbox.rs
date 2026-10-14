@@ -19,6 +19,7 @@ use super::{
         ControllerCapabilities, ControllerIdentity,
         ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
+    gatt::{GattReport, GattRequest, GattRequestId},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -36,6 +37,11 @@ pub enum HciCommand {
     CancelFalConnection,
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
+    BeginGatt(GattRequest),
+    CancelGatt {
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +58,7 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     ConnectionSet(LeConnectionSetSnapshot),
+    Gatt(GattReport),
 }
 
 #[derive(Clone)]
@@ -181,6 +188,28 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::BeginStoredEncryption(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_begin_gatt(
+        &self,
+        request: GattRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BeginGatt(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_cancel_gatt(
+        &self,
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::CancelGatt {
+                connection,
+                request_id,
+            })
             .map_err(map_send_error)
     }
 
