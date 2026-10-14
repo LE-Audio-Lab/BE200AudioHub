@@ -270,8 +270,8 @@ fn process_command(
         HciCommand::CancelFalConnection => {
             engine.cancel_fal_connection()
         }
-        HciCommand::Disconnect { connection_handle } => {
-            engine.begin_disconnect(connection_handle)
+        HciCommand::Disconnect { connection } => {
+            engine.begin_disconnect(connection)
         }
         HciCommand::BeginStoredEncryption(request) => {
             engine.begin_stored_encryption(request)
