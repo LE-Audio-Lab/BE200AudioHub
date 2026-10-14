@@ -8,6 +8,10 @@ use crate::transport::{
 
 use super::{
     link::{HciObservation, LinkFault, QueueHostTransport},
+    privacy::{
+        ControllerPrivacyState, PrivacyAction, PrivacyConfigError,
+        PrivacyTransaction, ResolvingListConfig,
+    },
     scan::{ScanAccumulator, ScanSummary},
 };
 
@@ -18,6 +22,7 @@ pub enum EngineFault {
     Link(LinkFault),
     PollBudgetExceeded,
     InvalidState,
+    PrivacyConfig(PrivacyConfigError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +80,8 @@ pub struct HciEngine {
     scan_pending_opcode: Option<u16>,
     scan_accumulator: ScanAccumulator,
     completed_scan: Option<ScanSummary>,
+    privacy_state: ControllerPrivacyState,
+    privacy_transaction: Option<PrivacyTransaction>,
 }
 
 impl HciEngine {
@@ -87,6 +94,8 @@ impl HciEngine {
             scan_pending_opcode: None,
             scan_accumulator: ScanAccumulator::default(),
             completed_scan: None,
+            privacy_state: ControllerPrivacyState::Idle,
+            privacy_transaction: None,
         }
     }
 
@@ -104,6 +113,34 @@ impl HciEngine {
 
     pub fn take_completed_scan(&mut self) -> Option<ScanSummary> {
         self.completed_scan.take()
+    }
+
+    pub fn controller_privacy_state(&self) -> &ControllerPrivacyState {
+        &self.privacy_state
+    }
+
+    pub fn begin_controller_privacy(
+        &mut self,
+        config: ResolvingListConfig,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.scan_state != PassiveScanState::Idle
+            || self.privacy_transaction.is_some()
+            || self.device.is_scanning()
+            || self.device.is_le_connecting()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) =
+            PrivacyTransaction::begin(config).map_err(EngineFault::PrivacyConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.privacy_transaction = Some(transaction);
+        self.privacy_state = ControllerPrivacyState::Configuring;
+        Ok(())
     }
 
     pub fn begin_passive_extended_scan(&mut self) -> Result<(), EngineFault> {
@@ -270,54 +307,105 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
-            let (opcode, status) = match observation {
-                HciObservation::CommandComplete {
-                    opcode,
-                    status,
-                    ..
-                } => (opcode, status.unwrap_or(0xff)),
-                HciObservation::CommandStatus { opcode, status } => {
-                    (opcode, status)
-                }
+            self.process_privacy_observation(&observation)?;
+            self.process_scan_observation(&observation)?;
+        }
+        Ok(())
+    }
+
+    fn process_privacy_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let HciObservation::CommandComplete {
+            opcode,
+            status,
+            parameters_after_status,
+        } = observation
+        else {
+            return Ok(());
+        };
+
+        let action = {
+            let Some(transaction) = self.privacy_transaction.as_mut() else {
+                return Ok(());
             };
+            transaction.on_command_complete(
+                *opcode,
+                status.unwrap_or(0xff),
+                parameters_after_status,
+            )
+        };
 
-            if self.scan_pending_opcode != Some(opcode) {
-                continue;
+        match action {
+            PrivacyAction::Send(command) => {
+                self.link.handle_command(0, command);
+                self.check_link_fault()?;
             }
+            PrivacyAction::Complete => {
+                self.privacy_transaction = None;
+                self.privacy_state = ControllerPrivacyState::Ready;
+            }
+            PrivacyAction::Failed(failure) => {
+                self.privacy_transaction = None;
+                self.privacy_state = ControllerPrivacyState::Failed(failure);
+            }
+            PrivacyAction::Ignored => {}
+        }
+        Ok(())
+    }
 
-            if status != 0 {
+    fn process_scan_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let (opcode, status) = match observation {
+            HciObservation::CommandComplete {
+                opcode,
+                status,
+                ..
+            } => (*opcode, status.unwrap_or(0xff)),
+            HciObservation::CommandStatus { opcode, status } => {
+                (*opcode, *status)
+            }
+        };
+
+        if self.scan_pending_opcode != Some(opcode) {
+            return Ok(());
+        }
+
+        if status != 0 {
+            self.scan_pending_opcode = None;
+            self.scan_state =
+                PassiveScanState::Failed { opcode, status };
+            return Ok(());
+        }
+
+        match self.scan_state {
+            PassiveScanState::Configuring => {
+                let command = Command::LeSetExtendedScanEnable {
+                    enable: 1,
+                    filter_duplicates: 1,
+                    duration: 0,
+                    period: 0,
+                };
+                self.scan_pending_opcode = Some(command.op_code());
+                self.link.handle_command(0, command);
+                self.check_link_fault()?;
+                self.scan_state = PassiveScanState::Enabling;
+            }
+            PassiveScanState::Enabling => {
                 self.scan_pending_opcode = None;
-                self.scan_state =
-                    PassiveScanState::Failed { opcode, status };
-                continue;
+                self.scan_state = PassiveScanState::Scanning;
             }
-
-            match self.scan_state {
-                PassiveScanState::Configuring => {
-                    let command = Command::LeSetExtendedScanEnable {
-                        enable: 1,
-                        filter_duplicates: 1,
-                        duration: 0,
-                        period: 0,
-                    };
-                    self.scan_pending_opcode = Some(command.op_code());
-                    self.link.handle_command(0, command);
-                    self.check_link_fault()?;
-                    self.scan_state = PassiveScanState::Enabling;
-                }
-                PassiveScanState::Enabling => {
-                    self.scan_pending_opcode = None;
-                    self.scan_state = PassiveScanState::Scanning;
-                }
-                PassiveScanState::Disabling => {
-                    self.scan_pending_opcode = None;
-                    self.completed_scan = Some(self.scan_accumulator.summary());
-                    self.scan_state = PassiveScanState::Idle;
-                }
-                PassiveScanState::Idle
-                | PassiveScanState::Scanning
-                | PassiveScanState::Failed { .. } => {}
+            PassiveScanState::Disabling => {
+                self.scan_pending_opcode = None;
+                self.completed_scan = Some(self.scan_accumulator.summary());
+                self.scan_state = PassiveScanState::Idle;
             }
+            PassiveScanState::Idle
+            | PassiveScanState::Scanning
+            | PassiveScanState::Failed { .. } => {}
         }
         Ok(())
     }
@@ -485,6 +573,77 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
 
         assert_eq!(engine.attach_state(), OperationalAttachState::Ready);
+    }
+
+    fn command_opcode(packet: HostPacket) -> u16 {
+        let HostPacket::Command(bytes) = packet else {
+            panic!("expected HCI command");
+        };
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    }
+
+    fn complete(opcode: u16, status: u8, extra: &[u8]) -> ControllerPacket {
+        let mut event = vec![
+            0x0e,
+            (4 + extra.len()) as u8,
+            0x01,
+            opcode as u8,
+            (opcode >> 8) as u8,
+            status,
+        ];
+        event.extend_from_slice(extra);
+        ControllerPacket::Event(event)
+    }
+
+    #[test]
+    fn engine_drives_resolving_list_transaction_from_completion_journal() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .begin_controller_privacy(ResolvingListConfig {
+                peers: vec![super::super::privacy::ResolvingPeer {
+                    identity_address_le: [0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8],
+                    identity_address_type: 0,
+                    peer_irk: [0x11; 16],
+                }],
+                local_irk: [0x22; 16],
+                rpa_timeout_seconds:
+                    super::super::privacy::DEFAULT_RPA_TIMEOUT_SECONDS,
+            })
+            .unwrap();
+
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            0x202d
+        );
+        assert!(matches!(
+            engine.controller_privacy_state(),
+            ControllerPrivacyState::Configuring
+        ));
+
+        for (opcode, extra, next_opcode) in [
+            (0x202d, &[][..], 0x2029),
+            (0x2029, &[][..], 0x202a),
+            (0x202a, &[1][..], 0x2027),
+            (0x2027, &[][..], 0x202e),
+            (0x202e, &[][..], 0x202d),
+        ] {
+            engine.ingest(complete(opcode, 0, extra)).unwrap();
+            engine.poll_until_quiescent().unwrap();
+            assert_eq!(
+                command_opcode(rx.try_recv().unwrap()),
+                next_opcode
+            );
+        }
+
+        engine.ingest(complete(0x202d, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.controller_privacy_state(),
+            &ControllerPrivacyState::Ready
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
     #[test]
