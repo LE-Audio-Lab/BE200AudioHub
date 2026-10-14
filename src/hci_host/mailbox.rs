@@ -20,6 +20,7 @@ use super::{
         ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
     gatt::{GattReport, GattRequest, GattRequestId},
+    gatt::{GattReport, GattRequest, GattRequestId},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -58,6 +59,7 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     ConnectionSet(LeConnectionSetSnapshot),
+    Gatt(GattReport),
     Gatt(GattReport),
 }
 
@@ -213,6 +215,28 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_begin_gatt(
+        &self,
+        request: GattRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BeginGatt(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_cancel_gatt(
+        &self,
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::CancelGatt {
+                connection,
+                request_id,
+            })
+            .map_err(map_send_error)
+    }
+
     /// Urgent lifecycle stop has a dedicated one-slot lane. A full stop lane
     /// means a stop is already pending and is therefore treated as success.
     pub fn request_stop(&self) -> Result<(), SendError> {
@@ -292,6 +316,43 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::ClearControllerPrivacy
+        );
+    }
+
+    #[test]
+    fn gatt_requests_use_bounded_control_lane() {
+        use super::super::gatt::{
+            GattOperation, GattRequest,
+        };
+
+        let (control, _, _, ports) = hci_mailbox(1, 2, 1);
+        let connection = ConnectionToken {
+            connection_handle: 0x0800,
+            generation: 7,
+        };
+
+        control
+            .try_begin_gatt(GattRequest {
+                request_id: 41,
+                connection,
+                operation: GattOperation::DiscoverServices,
+            })
+            .unwrap();
+        control.try_cancel_gatt(connection, 41).unwrap();
+
+        assert!(matches!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::BeginGatt(GattRequest {
+                request_id: 41,
+                ..
+            })
+        ));
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::CancelGatt {
+                connection,
+                request_id: 41,
+            }
         );
     }
 
