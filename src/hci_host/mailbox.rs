@@ -29,6 +29,7 @@ pub enum HciCommand {
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
     ConfigureControllerPrivacy(ResolvingListConfig),
+    ClearControllerPrivacy,
     BeginFalConnection(FalConnectRequest),
     CancelFalConnection,
     Disconnect { connection_handle: u16 },
@@ -133,6 +134,12 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_clear_controller_privacy(&self) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ClearControllerPrivacy)
+            .map_err(map_send_error)
+    }
+
     pub fn try_begin_fal_connection(
         &self,
         request: FalConnectRequest,
@@ -222,6 +229,18 @@ mod tests {
 
         assert_eq!(control.request_stop(), Ok(()));
         assert_eq!(control.request_stop(), Ok(()));
+    }
+
+    #[test]
+    fn privacy_clear_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        control.try_clear_controller_privacy().unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::ClearControllerPrivacy
+        );
     }
 
     #[test]
