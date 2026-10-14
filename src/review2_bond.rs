@@ -5,6 +5,7 @@ use bumble::{
     Address, AddressType,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReviewBondMember {
@@ -15,6 +16,47 @@ pub struct ReviewBondMember {
     pub long_term_key: [u8; 16],
     pub encrypted_diversifier: u16,
     pub random_number: [u8; 8],
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct BondStoreFingerprint {
+    controller_identity: [u8; 32],
+    local_identity: [u8; 32],
+    bond_sets: [u8; 32],
+    pairing_keys: [u8; 32],
+}
+
+pub fn fingerprint_bond_store(
+    root: &Path,
+) -> Result<BondStoreFingerprint, BondInputError> {
+    Ok(BondStoreFingerprint {
+        controller_identity: hash_file(
+            &root.join("controller-identity.txt"),
+            "controller-identity.txt",
+        )?,
+        local_identity: hash_file(
+            &root.join("local-identity.json"),
+            "local-identity.json",
+        )?,
+        bond_sets: hash_file(
+            &root.join("bond-sets.json"),
+            "bond-sets.json",
+        )?,
+        pairing_keys: hash_file(
+            &root.join("pairing-keys.json"),
+            "pairing-keys.json",
+        )?,
+    })
+}
+
+fn hash_file(
+    path: &Path,
+    label: &str,
+) -> Result<[u8; 32], BondInputError> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        BondInputError(format!("cannot read {label}: {error}"))
+    })?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -507,6 +549,22 @@ mod tests {
         assert_eq!(left.peer_irk, [0x35; 16]);
         assert_eq!(left.long_term_key, [0x33; 16]);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_detects_any_bond_store_mutation() {
+        let root = fixture_root();
+        write_fixture(&root);
+
+        let before = fingerprint_bond_store(&root).unwrap();
+        let path = root.join("bond-sets.json");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(b' ');
+        std::fs::write(&path, bytes).unwrap();
+        let after = fingerprint_bond_store(&root).unwrap();
+
+        assert!(before != after);
         std::fs::remove_dir_all(root).unwrap();
     }
 
