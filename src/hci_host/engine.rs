@@ -29,8 +29,9 @@ use super::{
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
-        ControllerPrivacyState, PrivacyAction, PrivacyConfigError,
-        PrivacyTransaction, ResolvingListConfig,
+        ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
+        PrivacyClearTransaction, PrivacyConfigError, PrivacyTransaction,
+        ResolvingListConfig,
     },
     scan::{ScanAccumulator, ScanSummary},
     security::{
@@ -112,6 +113,7 @@ pub struct HciEngine {
     completed_scan: Option<ScanSummary>,
     privacy_state: ControllerPrivacyState,
     privacy_transaction: Option<PrivacyTransaction>,
+    privacy_clear_transaction: Option<PrivacyClearTransaction>,
     fal_connection_state: FalConnectionState,
     fal_connection_transaction: Option<FalConnectTransaction>,
     disconnect_state: DisconnectState,
@@ -133,6 +135,7 @@ impl HciEngine {
             completed_scan: None,
             privacy_state: ControllerPrivacyState::Idle,
             privacy_transaction: None,
+            privacy_clear_transaction: None,
             fal_connection_state: FalConnectionState::Idle,
             fal_connection_transaction: None,
             disconnect_state: DisconnectState::Idle,
@@ -268,6 +271,7 @@ impl HciEngine {
         if self.attach_state != OperationalAttachState::Ready
             || self.scan_state != PassiveScanState::Idle
             || self.privacy_transaction.is_some()
+            || self.privacy_clear_transaction.is_some()
             || self.fal_connection_transaction.is_some()
             || self.device.is_scanning()
             || self.device.is_le_connecting()
@@ -284,6 +288,29 @@ impl HciEngine {
 
         self.fal_connection_transaction = Some(transaction);
         self.fal_connection_state = FalConnectionState::Preparing;
+        Ok(())
+    }
+
+    pub fn begin_controller_privacy_clear(
+        &mut self,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.scan_state != PassiveScanState::Idle
+            || self.privacy_transaction.is_some()
+            || self.privacy_clear_transaction.is_some()
+            || self.fal_connection_transaction.is_some()
+            || self.device.is_scanning()
+            || self.device.is_le_connecting()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) = PrivacyClearTransaction::begin();
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.privacy_clear_transaction = Some(transaction);
+        self.privacy_state = ControllerPrivacyState::Clearing;
         Ok(())
     }
 
@@ -500,6 +527,34 @@ impl HciEngine {
         else {
             return Ok(());
         };
+
+        if self.privacy_clear_transaction.is_some() {
+            let action = self
+                .privacy_clear_transaction
+                .as_mut()
+                .expect("checked above")
+                .on_command_complete(
+                    *opcode,
+                    status.unwrap_or(0xff),
+                );
+            match action {
+                PrivacyClearAction::Send(command) => {
+                    self.link.handle_command(0, command);
+                    self.check_link_fault()?;
+                }
+                PrivacyClearAction::Complete => {
+                    self.privacy_clear_transaction = None;
+                    self.privacy_state = ControllerPrivacyState::Idle;
+                }
+                PrivacyClearAction::Failed(failure) => {
+                    self.privacy_clear_transaction = None;
+                    self.privacy_state =
+                        ControllerPrivacyState::Failed(failure);
+                }
+                PrivacyClearAction::Ignored => {}
+            }
+            return Ok(());
+        }
 
         let action = {
             let Some(transaction) = self.privacy_transaction.as_mut() else {
@@ -1181,6 +1236,30 @@ mod tests {
             &ControllerPrivacyState::Ready
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn engine_clears_controller_privacy_as_typed_transaction() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_controller_privacy_clear().unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x202d);
+        assert_eq!(
+            engine.controller_privacy_state(),
+            &ControllerPrivacyState::Clearing
+        );
+
+        engine.ingest(complete(0x202d, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2029);
+
+        engine.ingest(complete(0x2029, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.controller_privacy_state(),
+            &ControllerPrivacyState::Idle
+        );
     }
 
     #[test]
