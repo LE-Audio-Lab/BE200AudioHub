@@ -1,0 +1,18 @@
+BE200AudioHub
+Copyright 2026 BE200AudioHub contributors
+
+Licensed under the Apache License, Version 2.0.
+
+This product includes software developed by the bumble-rs contributors.
+
+bumble-rs
+Copyright 2026 The bumble-rs contributors
+
+bumble-rs is an independent Rust port of parts of Google's Bumble Bluetooth
+stack (https://github.com/google/bumble), which is licensed under the Apache
+License, Version 2.0. Wire formats, constants, and cryptographic test vectors
+in bumble-rs are derived from that project and from the Bluetooth Core
+Specification.
+
+Additional third-party components and their licenses are documented in
+THIRD_PARTY_NOTICES.md.
