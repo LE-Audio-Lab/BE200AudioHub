@@ -5,6 +5,8 @@ mod transport;
 
 #[cfg(any(feature = "hci-wip", test))]
 mod hci_host;
+#[cfg(any(feature = "hci-wip", test))]
+mod review2;
 
 fn main() {
     #[cfg(all(feature = "hci-wip", windows))]
@@ -13,7 +15,7 @@ fn main() {
         if args.first().map(String::as_str) == Some("review2")
             && args.get(1).map(String::as_str) == Some("hci-smoke")
         {
-            let config = match hci_host::smoke::parse_smoke_args(&args[2..]) {
+            let config = match review2::parse_hci_smoke_args(&args[2..]) {
                 Ok(config) => config,
                 Err(error) => {
                     eprintln!("Review-2A hci-smoke argument error: {error}");
@@ -21,15 +23,27 @@ fn main() {
                 }
             };
 
+            println!("Review-2A firmware bypass: probe -> optional one-shot load -> release");
+            match platform::be200_firmware_port::ensure_operational(
+                &config.sfi,
+                &config.ddc,
+            ) {
+                Ok(outcome) => println!("Firmware bypass: {outcome:?}"),
+                Err(error) => {
+                    eprintln!("Review-2A firmware bypass FAILED: {error:?}");
+                    std::process::exit(1);
+                }
+            }
+
             println!(
                 "Review-2A HCI smoke: resetless attach -> capabilities -> passive scan"
             );
-            println!("Scan duration: {} s", config.scan_duration.as_secs());
-            if let Some(name) = &config.target_name {
+            println!("Scan duration: {} s", config.smoke.scan_duration.as_secs());
+            if let Some(name) = &config.smoke.target_name {
                 println!("Target name: {name}");
             }
 
-            match hci_host::smoke::run_be200_smoke(config) {
+            match hci_host::smoke::run_be200_smoke(config.smoke) {
                 Ok(result) => {
                     println!("Capabilities: PASS");
                     println!(
