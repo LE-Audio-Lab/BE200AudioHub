@@ -67,8 +67,12 @@ fn main() {
                             member.cas.end_handle,
                         );
                         println!(
-                            "  PACS characteristics={} supported-contexts-handle=0x{:04X} value-bytes={}",
+                            "  GATT: PACS chars={} ASCS chars={} CAS includes={} CSIS={} descriptors={} supported-contexts-handle=0x{:04X} value-bytes={}",
                             member.pacs_characteristic_count,
+                            member.ascs_characteristic_count,
+                            member.cas_included_service_count,
+                            member.cas_includes_csis,
+                            member.descriptor_probe_count,
                             member.supported_contexts_handle,
                             member.supported_contexts_value.len(),
                         );
