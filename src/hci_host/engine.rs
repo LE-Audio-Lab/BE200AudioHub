@@ -275,7 +275,7 @@ impl HciEngine {
                     opcode,
                     status,
                     ..
-                } => (opcode, status.unwrap_or(0xff))
+                } => (opcode, status.unwrap_or(0xff)),
                 HciObservation::CommandStatus { opcode, status } => {
                     (opcode, status)
                 }
