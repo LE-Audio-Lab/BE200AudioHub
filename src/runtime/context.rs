@@ -101,12 +101,12 @@ where
 
     (
         ContextHandle {
-            tx,
+            tx: tx.clone(),
             accepting: accepting.clone(),
             generation,
         },
         ContextJoin {
-            tx: tx.clone(),
+            tx,
             accepting,
             join: Some(join),
         },
