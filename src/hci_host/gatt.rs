@@ -110,6 +110,10 @@ pub enum GattFailureKind {
     Protocol(String),
     Disconnected { reason: u8 },
     Cancelled,
+    NotEncrypted,
+    Busy,
+    BearerPoisoned { previous_request_id: GattRequestId },
+    DuplicateRequestId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +134,30 @@ pub enum GattValueEvent {
         connection: ConnectionToken,
         attribute_handle: u16,
         value: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GattReport {
+    Complete {
+        request_id: GattRequestId,
+        connection: ConnectionToken,
+        result: GattResult,
+    },
+    Failed(GattFailure),
+    Value(GattValueEvent),
+    BearerPoisoned {
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    },
+    LateResponseDropped {
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+        opcode: u8,
+    },
+    UnexpectedPdu {
+        connection: ConnectionToken,
+        opcode: u8,
     },
 }
 
