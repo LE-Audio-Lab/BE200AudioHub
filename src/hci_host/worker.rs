@@ -109,6 +109,7 @@ fn run_loop(
                         &mut last_fal_connection_state,
                         &mut last_disconnect_state,
                         &mut last_stored_encryption_state,
+                        &mut last_connection_set,
                         &report_tx,
                     ) {
                         return HciWorkerExit::Faulted(fault);
@@ -201,6 +202,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_connection_set,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -229,6 +231,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_connection_set,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
