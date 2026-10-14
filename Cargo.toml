@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusb = { version = "0.9", features = ["vendored"] }
+bumble = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 bumble-hci = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 bumble-host = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
 crossbeam-channel = "0.5"
