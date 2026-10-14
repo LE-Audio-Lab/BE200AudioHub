@@ -14,6 +14,7 @@ use crate::{
 use super::{
     packet::{ControllerPacket, HostPacket},
     reactor::{StepOutcome, TransportFault, TransportReactor},
+    sink::ControllerPacketSink,
 };
 
 const TX_BUDGET_PER_TURN: usize = 32;
@@ -91,8 +92,23 @@ where
     B: DeviceBackend + 'static,
     F: FnOnce() -> Result<B, BackendError> + Send + 'static,
 {
-    let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let (hci_tx, hci_rx) = mailbox::bounded(hci_rx_capacity);
+    let (tx, join) =
+        spawn_transport_worker_with_sink(factory, tx_capacity, hci_tx);
+    (tx, hci_rx, join)
+}
+
+pub fn spawn_transport_worker_with_sink<B, F, S>(
+    factory: F,
+    tx_capacity: usize,
+    hci_sink: S,
+) -> (TransportTx, TransportWorkerJoin)
+where
+    B: DeviceBackend + 'static,
+    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
+    S: ControllerPacketSink + Send + 'static,
+{
+    let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
 
@@ -101,10 +117,12 @@ where
         .spawn(move || {
             let backend = match factory() {
                 Ok(backend) => backend,
-                Err(error) => return TransportWorkerExit::BackendOpenFailed(error),
+                Err(error) => {
+                    return TransportWorkerExit::BackendOpenFailed(error)
+                }
             };
 
-            let mut reactor = TransportReactor::new(backend, hci_tx);
+            let mut reactor = TransportReactor::new(backend, hci_sink);
             if let Err(fault) = reactor.start() {
                 return TransportWorkerExit::Faulted(fault);
             }
@@ -115,21 +133,18 @@ where
         })
         .expect("failed to spawn USB reactor");
 
-    (
-        TransportTx { tx, cancel },
-        hci_rx,
-        TransportWorkerJoin { join },
-    )
+    (TransportTx { tx, cancel }, TransportWorkerJoin { join })
 }
 
-fn run_loop<B: DeviceBackend>(
-    reactor: &mut TransportReactor<
-        B,
-        BoundedSender<ControllerPacket>,
-    >,
+fn run_loop<B, S>(
+    reactor: &mut TransportReactor<B, S>,
     tx_rx: &BoundedReceiver<HostPacket>,
     cancel: &CancellationToken,
-) -> TransportWorkerExit {
+) -> TransportWorkerExit
+where
+    B: DeviceBackend,
+    S: ControllerPacketSink,
+{
     loop {
         if cancel.is_cancelled() {
             return TransportWorkerExit::Cancelled;
@@ -252,6 +267,42 @@ mod tests {
         fn is_attached(&self) -> bool {
             self.attached
         }
+    }
+
+    #[derive(Clone)]
+    struct CountingSink {
+        count: Arc<Mutex<usize>>,
+    }
+
+    impl ControllerPacketSink for CountingSink {
+        fn try_send_controller(
+            &self,
+            _packet: ControllerPacket,
+        ) -> Result<(), crate::transport::sink::PacketSinkError> {
+            *self.count.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn worker_accepts_custom_controller_packet_sink() {
+        let state = Arc::new(Mutex::new(TestState::default()));
+        let factory_state = state.clone();
+        let count = Arc::new(Mutex::new(0usize));
+        let sink = CountingSink {
+            count: count.clone(),
+        };
+
+        let (tx, join) = spawn_transport_worker_with_sink(
+            move || Ok(RecordingBackend::new(factory_state)),
+            4,
+            sink,
+        );
+
+        tx.cancel();
+        assert_eq!(join.join(), TransportWorkerExit::Cancelled);
+        assert_eq!(*count.lock().unwrap(), 0);
+        assert!(state.lock().unwrap().cancelled);
     }
 
     #[test]
