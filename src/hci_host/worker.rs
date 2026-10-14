@@ -89,7 +89,7 @@ fn run_loop(
                             HciWorkerFault::Engine(fault),
                         );
                     }
-                    if let Err(fault) = publish_attach_transition(
+                    if let Err(fault) = publish_state_transitions(
                         &engine,
                         &mut last_attach_state,
                         &mut last_scan_state,
@@ -134,9 +134,10 @@ fn run_loop(
                     HciWorkerFault::Engine(fault),
                 );
             }
-            if let Err(fault) = publish_attach_transition(
+            if let Err(fault) = publish_state_transitions(
                 &engine,
                 &mut last_attach_state,
+                &mut last_scan_state,
                 &report_tx,
             ) {
                 return HciWorkerExit::Faulted(fault);
@@ -171,7 +172,7 @@ fn run_loop(
                         HciWorkerFault::Engine(fault),
                     );
                 }
-                if let Err(fault) = publish_attach_transition(
+                if let Err(fault) = publish_state_transitions(
                     &engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
@@ -195,7 +196,7 @@ fn run_loop(
                         HciWorkerFault::Engine(fault),
                     );
                 }
-                if let Err(fault) = publish_attach_transition(
+                if let Err(fault) = publish_state_transitions(
                     &engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
@@ -225,27 +226,25 @@ fn process_command(
     }
 }
 
-fn publish_attach_transition(
+fn publish_state_transitions(
     engine: &HciEngine,
     last_state: &mut OperationalAttachState,
     last_scan_state: &mut PassiveScanState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
-    if state == *last_state {
-        return Ok(());
-    }
+    if state != *last_state {
+        report_tx
+            .try_send(HciReport::AttachState(state))
+            .map_err(map_report_error)?;
+        *last_state = state;
 
-    report_tx
-        .try_send(HciReport::AttachState(state))
-        .map_err(map_report_error)?;
-    *last_state = state;
-
-    if state == OperationalAttachState::Ready {
-        if let Some(capabilities) = engine.capabilities() {
-            report_tx
-                .try_send(HciReport::CapabilitiesReady(capabilities))
-                .map_err(map_report_error)?;
+        if state == OperationalAttachState::Ready {
+            if let Some(capabilities) = engine.capabilities() {
+                report_tx
+                    .try_send(HciReport::CapabilitiesReady(capabilities))
+                    .map_err(map_report_error)?;
+            }
         }
     }
 
