@@ -285,6 +285,53 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_event_and_acl_completions_preserve_arrival_order_without_starvation() {
+        let (mut reactor, rx) = reactor(256);
+        reactor.start().unwrap();
+
+        let mut expected = Vec::new();
+        for i in 0u8..100 {
+            let event = vec![0x0e, 0x01, i];
+            let acl = vec![0x01, 0x20, 0x01, 0x00, i];
+
+            if i % 2 == 0 {
+                reactor
+                    .backend
+                    .inject_read(RxEndpoint::Acl, acl.clone())
+                    .unwrap();
+                reactor
+                    .backend
+                    .inject_read(RxEndpoint::Event, event.clone())
+                    .unwrap();
+                expected.push(ControllerPacket::Acl(acl));
+                expected.push(ControllerPacket::Event(event));
+            } else {
+                reactor
+                    .backend
+                    .inject_read(RxEndpoint::Event, event.clone())
+                    .unwrap();
+                reactor
+                    .backend
+                    .inject_read(RxEndpoint::Acl, acl.clone())
+                    .unwrap();
+                expected.push(ControllerPacket::Event(event));
+                expected.push(ControllerPacket::Acl(acl));
+            }
+
+            assert_eq!(reactor.step(), StepOutcome::PacketsDelivered(1));
+            assert_eq!(reactor.step(), StepOutcome::PacketsDelivered(1));
+            assert!(reactor.backend.pending_read(RxEndpoint::Event));
+            assert!(reactor.backend.pending_read(RxEndpoint::Acl));
+        }
+
+        let mut actual = Vec::new();
+        while let Ok(packet) = rx.try_recv() {
+            actual.push(packet);
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn stop_cancels_pending_io_and_clears_reassembly() {
         let (mut reactor, _rx) = reactor(8);
         reactor.start().unwrap();
