@@ -22,6 +22,7 @@ pub struct DisconnectFailure {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisconnectState {
+    Idle,
     Submitting,
     AwaitingEvent,
     Disconnected {
