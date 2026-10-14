@@ -697,7 +697,7 @@ fn run_member(
     let encryption_key_size = wait_encrypted(
         stack.reports(),
         tracker,
-        Duration::from_secs(5),
+        Duration::from_secs(10),
         &member.identity_address,
         token,
     )?;
