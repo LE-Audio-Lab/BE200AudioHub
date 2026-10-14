@@ -1720,8 +1720,15 @@ mod tests {
         assert!(engine.device().is_connected_on_handle(0x0800));
 
         assert_eq!(
-            engine.begin_disconnect(ConnectionToken { connection_handle: 0x0801, generation: 1 }),
-            Err(EngineFault::InvalidState)
+            engine.begin_disconnect(ConnectionToken {
+                connection_handle: 0x0801,
+                generation: 1,
+            }),
+            Err(EngineFault::StaleConnection {
+                connection_handle: 0x0801,
+                requested_generation: 1,
+                current_generation: None,
+            })
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
 
@@ -1763,6 +1770,70 @@ mod tests {
             }
         );
         assert!(!engine.device().is_connected_on_handle(0x0800));
+    }
+
+    #[test]
+    fn reused_handle_rejects_previous_generation_token() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        let established = || {
+            ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ])
+        };
+
+        engine.ingest(established()).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let first = engine.connection_set_snapshot().connections[0].token();
+        assert_eq!(first.generation, 1);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x08, 0x08,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(engine.connection_set_snapshot().connections.is_empty());
+
+        engine.ingest(established()).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let second = engine.connection_set_snapshot().connections[0].token();
+        assert_eq!(second.connection_handle, first.connection_handle);
+        assert_eq!(second.generation, 2);
+
+        assert_eq!(
+            engine.begin_disconnect(first),
+            Err(EngineFault::StaleConnection {
+                connection_handle: 0x0800,
+                requested_generation: 1,
+                current_generation: Some(2),
+            })
+        );
+
+        assert_eq!(
+            engine.begin_stored_encryption(
+                super::super::security::StoredEncryptionRequest {
+                    connection: first,
+                    key: super::super::security::StoredLeKeyMaterial::
+                        secure_connections([0x44; 16]),
+                },
+            ),
+            Err(EngineFault::StaleConnection {
+                connection_handle: 0x0800,
+                requested_generation: 1,
+                current_generation: Some(2),
+            })
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
     #[test]
