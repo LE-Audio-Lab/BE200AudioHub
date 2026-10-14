@@ -180,6 +180,52 @@ mod tests {
     }
 
     #[test]
+    fn minimal_operational_attach_reaches_ready_without_reset() {
+        let (mut engine, rx) = engine(8);
+        engine.begin_operational_attach().unwrap();
+
+        // Discard initial Read Local Supported Commands.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            HostPacket::Command(_)
+        ));
+
+        // Supported Commands success with an all-zero bitmap. That deliberately
+        // disables every optional capability branch; Device should proceed only
+        // with the mandatory Event Mask + LE Event Mask host initialization.
+        let mut supported = vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        engine
+            .ingest(ControllerPacket::Event(supported))
+            .unwrap();
+        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+
+        let first = rx.try_recv().unwrap();
+        let second = rx.try_recv().unwrap();
+        assert!(matches!(first, HostPacket::Command(_)));
+        assert!(matches!(second, HostPacket::Command(_)));
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+
+        // Set Event Mask complete, status 0.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        // LE Set Event Mask complete, status 0.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+
+        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+        assert_eq!(engine.attach_state(), OperationalAttachState::Ready);
+        assert_eq!(engine.device().reset_status(), None);
+    }
+
+    #[test]
     fn supported_commands_failure_terminates_operational_attach() {
         let (mut engine, _rx) = engine(8);
         engine.begin_operational_attach().unwrap();
