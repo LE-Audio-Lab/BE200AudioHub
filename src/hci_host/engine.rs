@@ -154,7 +154,6 @@ impl HciEngine {
         if self.attach_state != OperationalAttachState::Ready
             || self.scan_state != PassiveScanState::Idle
             || self.privacy_transaction.is_some()
-            || self.privacy_state != ControllerPrivacyState::Ready
             || self.fal_connection_transaction.is_some()
             || self.device.is_scanning()
             || self.device.is_le_connecting()
@@ -855,7 +854,6 @@ mod tests {
     fn engine_routes_bumble_connection_event_into_fal_cleanup() {
         let (mut engine, rx) = engine(32);
         make_minimal_attach_ready(&mut engine, &rx);
-        engine.privacy_state = ControllerPrivacyState::Ready;
 
         engine
             .begin_fal_connection(
