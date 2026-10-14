@@ -3,7 +3,8 @@
 Active documentation is organized by responsibility.
 
 - **design/** — current architecture contracts and design principles. These documents describe the Review/Refactor target and are authoritative for new implementation work.
-- **reference/** — external implementation references and the rules for adopting ideas from AOSP, Zephyr, Bumble-RS, PipeWire, BTstack, Linux/BlueZ, nRF Audio and Espressif.
+- **reference/** — high-level external implementation references and adoption rules.
+- **reference-index/** — implementation-facing source index, precise to upstream file/function/type, with adoption boundaries and deterministic test obligations.
 - **history/** — navigation for the sealed Experiment/R5 material. Historical source and Round documents remain byte-for-byte under `deprecated/r5/` and are not evolved in place.
 
 ## Read first
@@ -14,6 +15,7 @@ Active documentation is organized by responsibility.
 4. [Review-1 Runtime + Async Transport](./design/REVIEW1_RUNTIME_TRANSPORT.md)
 5. [Data Flow](./design/DATA_FLOW.md)
 6. [Reference implementations](./reference/README.md)
+7. [Function-level Reference Index](./reference-index/README.md)
 
 ## Archive rule
 
