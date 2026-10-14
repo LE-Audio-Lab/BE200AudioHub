@@ -19,6 +19,7 @@ use super::{
     },
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
+    security::{StoredEncryptionRequest, StoredEncryptionState},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub enum HciCommand {
     BeginFalConnection(FalConnectRequest),
     CancelFalConnection,
     Disconnect { connection_handle: u16 },
+    BeginStoredEncryption(StoredEncryptionRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub enum HciReport {
     ControllerPrivacyState(ControllerPrivacyState),
     FalConnectionState(FalConnectionState),
     DisconnectState(DisconnectState),
+    StoredEncryptionState(StoredEncryptionState),
 }
 
 #[derive(Clone)]
@@ -152,6 +155,15 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_begin_stored_encryption(
+        &self,
+        request: StoredEncryptionRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BeginStoredEncryption(request))
+            .map_err(map_send_error)
+    }
+
     /// Urgent lifecycle stop has a dedicated one-slot lane. A full stop lane
     /// means a stop is already pending and is therefore treated as success.
     pub fn request_stop(&self) -> Result<(), SendError> {
@@ -208,6 +220,25 @@ mod tests {
 
         assert_eq!(control.request_stop(), Ok(()));
         assert_eq!(control.request_stop(), Ok(()));
+    }
+
+    #[test]
+    fn stored_encryption_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        let request = StoredEncryptionRequest {
+            connection_handle: 0x0800,
+            key: super::super::security::StoredLeKeyMaterial::
+                secure_connections([0x55; 16]),
+        };
+        control
+            .try_begin_stored_encryption(request)
+            .unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::BeginStoredEncryption(request)
+        );
     }
 
     #[test]
