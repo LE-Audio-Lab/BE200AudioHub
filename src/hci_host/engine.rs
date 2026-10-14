@@ -30,6 +30,26 @@ pub enum OperationalAttachFailure {
     HostInitializationFailed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacketPoolSnapshot {
+    pub data_packet_length: u16,
+    pub total_num_data_packets: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControllerCapabilities {
+    pub supported_commands: [u8; 64],
+    pub hci_version: Option<u8>,
+    pub hci_subversion: Option<u16>,
+    pub manufacturer: Option<u16>,
+    pub local_le_features: Vec<u8>,
+    pub local_le_features_max_page: Option<u8>,
+    pub le_acl_pool: Option<PacketPoolSnapshot>,
+    pub iso_pool: Option<PacketPoolSnapshot>,
+    pub number_of_supported_advertising_sets: u8,
+    pub maximum_advertising_data_length: u16,
+}
+
 pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
@@ -51,6 +71,43 @@ impl HciEngine {
 
     pub fn attach_state(&self) -> OperationalAttachState {
         self.attach_state
+    }
+
+    pub fn capabilities(&self) -> Option<ControllerCapabilities> {
+        if self.attach_state != OperationalAttachState::Ready {
+            return None;
+        }
+
+        let supported_commands = *self.device.local_supported_commands()?;
+        let version = self.device.local_version();
+
+        let map_pool = |pool: bumble_host::ControllerBufferInfo| {
+            PacketPoolSnapshot {
+                data_packet_length: pool.data_packet_length,
+                total_num_data_packets: pool.total_num_data_packets,
+            }
+        };
+
+        Some(ControllerCapabilities {
+            supported_commands,
+            hci_version: version.map(|version| version.hci_version),
+            hci_subversion: version.map(|version| version.hci_subversion),
+            manufacturer: version.map(|version| version.company_identifier),
+            local_le_features: self
+                .device
+                .local_le_features()
+                .unwrap_or(&[])
+                .to_vec(),
+            local_le_features_max_page: self.device.local_le_features_max_page(),
+            le_acl_pool: self.device.le_acl_buffer().map(map_pool),
+            iso_pool: self.device.iso_buffer().map(map_pool),
+            number_of_supported_advertising_sets: self
+                .device
+                .number_of_supported_advertising_sets(),
+            maximum_advertising_data_length: self
+                .device
+                .maximum_advertising_data_length(),
+        })
     }
 
     /// Attach to an already-operational controller without issuing HCI Reset.
@@ -223,6 +280,12 @@ mod tests {
         assert_eq!(engine.poll_until_quiescent(), Ok(1));
         assert_eq!(engine.attach_state(), OperationalAttachState::Ready);
         assert_eq!(engine.device().reset_status(), None);
+
+        let capabilities = engine.capabilities().unwrap();
+        assert_eq!(capabilities.supported_commands, [0u8; 64]);
+        assert_eq!(capabilities.hci_version, None);
+        assert_eq!(capabilities.le_acl_pool, None);
+        assert_eq!(capabilities.iso_pool, None);
     }
 
     #[test]
