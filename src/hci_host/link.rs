@@ -170,10 +170,7 @@ impl HostTransport for QueueHostTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::mailbox,
-        transport::worker::TransportTx,
-    };
+    use crate::transport::worker::TransportTx;
 
     fn tx(capacity: usize) -> (
         TransportTx,
