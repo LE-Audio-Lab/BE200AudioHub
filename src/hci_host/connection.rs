@@ -199,6 +199,12 @@ pub enum FalConnectConfigError {
     ZeroSupervisionTimeout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionToken {
+    pub connection_handle: u16,
+    pub generation: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LeConnectionSetSnapshot {
     pub connections: Vec<LeConnectionSnapshot>,
@@ -207,6 +213,7 @@ pub struct LeConnectionSetSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeConnectionSnapshot {
     pub connection_handle: u16,
+    pub generation: u64,
     pub role: u8,
     pub peer_address_le: [u8; 6],
     pub peer_address_type: u8,
@@ -215,6 +222,15 @@ pub struct LeConnectionSnapshot {
     pub supervision_timeout: u16,
     pub encryption_enabled: u8,
     pub encryption_key_size: u8,
+}
+
+impl LeConnectionSnapshot {
+    pub const fn token(&self) -> ConnectionToken {
+        ConnectionToken {
+            connection_handle: self.connection_handle,
+            generation: self.generation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -610,6 +626,7 @@ mod tests {
     fn snapshot(handle: u16) -> LeConnectionSnapshot {
         LeConnectionSnapshot {
             connection_handle: handle,
+            generation: 1,
             role: 0,
             peer_address_le: [1, 2, 3, 4, 5, 6],
             peer_address_type: 1,
