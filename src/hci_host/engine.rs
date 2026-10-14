@@ -949,6 +949,7 @@ impl HciEngine {
     fn process_device_events(&mut self) -> Result<(), EngineFault> {
         for event in self.device.take_device_events() {
             self.prepare_connection_generation(&event);
+            let is_flush = matches!(&event, DeviceEvent::Flush);
 
             let mut consumed = false;
             consumed |= self.process_disconnect_device_event(&event)?;
@@ -986,7 +987,7 @@ impl HciEngine {
                 self.connection_generations.remove(&handle);
             }
 
-            if matches!(event, DeviceEvent::Flush) {
+            if is_flush {
                 self.acl_credit_audit.flush_all();
             }
         }
