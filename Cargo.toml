@@ -21,6 +21,7 @@ rusb = { version = "0.9", features = ["vendored"] }
 bumble-hci = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85", optional = true }
 bumble-host = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 bumble-hci = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }
