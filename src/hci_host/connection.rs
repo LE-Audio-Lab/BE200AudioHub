@@ -16,7 +16,7 @@ pub enum DisconnectFailureKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisconnectFailure {
-    pub connection_handle: u16,
+    pub connection: ConnectionToken,
     pub kind: DisconnectFailureKind,
 }
 
@@ -26,7 +26,7 @@ pub enum DisconnectState {
     Submitting,
     AwaitingEvent,
     Disconnected {
-        connection_handle: u16,
+        connection: ConnectionToken,
         event_reason: u8,
     },
     Failed(DisconnectFailure),
@@ -48,7 +48,7 @@ pub enum DisconnectEvent {
 pub enum DisconnectAction {
     AwaitEvent,
     Disconnected {
-        connection_handle: u16,
+        connection: ConnectionToken,
         event_reason: u8,
     },
     Failed(DisconnectFailure),
@@ -56,29 +56,29 @@ pub enum DisconnectAction {
 }
 
 pub struct DisconnectTransaction {
-    connection_handle: u16,
+    connection: ConnectionToken,
     awaiting_event: bool,
     terminal: bool,
 }
 
 impl DisconnectTransaction {
     pub fn begin(
-        connection_handle: u16,
+        connection: ConnectionToken,
     ) -> Result<(Self, Command), DisconnectConfigError> {
-        if connection_handle > 0x0eff {
+        if connection.connection_handle > 0x0eff {
             return Err(DisconnectConfigError::InvalidConnectionHandle(
-                connection_handle,
+                connection.connection_handle,
             ));
         }
 
         Ok((
             Self {
-                connection_handle,
+                connection,
                 awaiting_event: false,
                 terminal: false,
             },
             Command::Disconnect {
-                connection_handle,
+                connection_handle: connection.connection_handle,
                 reason: DISCONNECT_REASON_REMOTE_USER_TERMINATED,
             },
         ))
@@ -98,7 +98,7 @@ impl DisconnectTransaction {
         if status != 0 {
             self.terminal = true;
             return DisconnectAction::Failed(DisconnectFailure {
-                connection_handle: self.connection_handle,
+                connection: self.connection,
                 kind: DisconnectFailureKind::CommandStatus { status },
             });
         }
@@ -120,12 +120,12 @@ impl DisconnectTransaction {
                 connection_handle,
                 reason,
             } => {
-                if connection_handle != self.connection_handle {
+                if connection_handle != self.connection.connection_handle {
                     return DisconnectAction::Ignored;
                 }
                 self.terminal = true;
                 DisconnectAction::Disconnected {
-                    connection_handle,
+                    connection: self.connection,
                     event_reason: reason,
                 }
             }
@@ -133,12 +133,12 @@ impl DisconnectTransaction {
                 connection_handle,
                 status,
             } => {
-                if connection_handle != self.connection_handle {
+                if connection_handle != self.connection.connection_handle {
                     return DisconnectAction::Ignored;
                 }
                 self.terminal = true;
                 DisconnectAction::Failed(DisconnectFailure {
-                    connection_handle,
+                    connection: self.connection,
                     kind: DisconnectFailureKind::DisconnectionEventStatus {
                         status,
                     },
@@ -227,7 +227,7 @@ pub struct LeConnectionSnapshot {
 impl LeConnectionSnapshot {
     pub const fn token(&self) -> ConnectionToken {
         ConnectionToken {
-            connection_handle: self.connection_handle,
+            connection: self.connection,
             generation: self.generation,
         }
     }
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn disconnect_command_reason_is_fixed_to_0x13() {
         let (_tx, command) =
-            DisconnectTransaction::begin(0x0800).unwrap();
+            DisconnectTransaction::begin(ConnectionToken { connection_handle: 0x0800, generation: 7 }).unwrap();
         match command {
             Command::Disconnect {
                 connection_handle,
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn local_0x16_event_reason_is_result_not_command_parameter() {
         let (mut tx, _command) =
-            DisconnectTransaction::begin(0x0800).unwrap();
+            DisconnectTransaction::begin(ConnectionToken { connection_handle: 0x0800, generation: 7 }).unwrap();
 
         assert!(matches!(
             tx.on_command_status(
@@ -686,10 +686,11 @@ mod tests {
             reason: 0x16,
         }) {
             DisconnectAction::Disconnected {
-                connection_handle,
+                connection,
                 event_reason,
             } => {
-                assert_eq!(connection_handle, 0x0800);
+                assert_eq!(connection.connection_handle, 0x0800);
+                assert_eq!(connection.generation, 7);
                 assert_eq!(event_reason, 0x16);
                 assert_ne!(
                     event_reason,
@@ -703,17 +704,18 @@ mod tests {
     #[test]
     fn disconnect_rejects_invalid_handle_and_nonzero_status() {
         assert!(matches!(
-            DisconnectTransaction::begin(0x0f00),
+            DisconnectTransaction::begin(ConnectionToken { connection_handle: 0x0f00, generation: 7 }),
             Err(DisconnectConfigError::InvalidConnectionHandle(0x0f00))
         ));
 
         let (mut tx, _command) =
-            DisconnectTransaction::begin(0x0800).unwrap();
+            DisconnectTransaction::begin(ConnectionToken { connection_handle: 0x0800, generation: 7 }).unwrap();
         match tx.on_command_status(
             bumble_hci::codes::HCI_DISCONNECT_COMMAND,
             0x12,
         ) {
             DisconnectAction::Failed(failure) => {
+                assert_eq!(failure.connection.generation, 7);
                 assert_eq!(
                     failure.kind,
                     DisconnectFailureKind::CommandStatus {
