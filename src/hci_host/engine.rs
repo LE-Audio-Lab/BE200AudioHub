@@ -622,7 +622,8 @@ mod tests {
         assert_eq!(summary.observations.len(), 1);
 
         let observation = &summary.observations[0];
-        assert_eq!(observation.address, "11:22:33:44:55:66");
+        assert_eq!(observation.address, "11:22:33:44:55:66/P");
+        assert_eq!(observation.address_type, 0);
         assert_eq!(observation.name.as_deref(), Some("Buds3"));
         assert_eq!(observation.rsi, Some([1, 2, 3, 4, 5, 6]));
         assert_eq!(observation.rssi, -40);
