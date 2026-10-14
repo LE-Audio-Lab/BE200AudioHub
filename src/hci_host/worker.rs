@@ -11,7 +11,9 @@ use super::{
     engine::{
         EngineFault, HciEngine, OperationalAttachState, PassiveScanState,
     },
-    connection::{DisconnectState, FalConnectionState},
+    connection::{
+        DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
+    },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
@@ -79,6 +81,7 @@ fn run_loop(
     let mut last_disconnect_state = engine.disconnect_state().clone();
     let mut last_stored_encryption_state =
         engine.stored_encryption_state().clone();
+    let mut last_connection_set = engine.connection_set_snapshot();
 
     loop {
         match stop_rx.try_recv() {
@@ -155,6 +158,7 @@ fn run_loop(
                 &mut last_fal_connection_state,
                 &mut last_disconnect_state,
                 &mut last_stored_encryption_state,
+                &mut last_connection_set,
                 &report_tx,
             ) {
                 return HciWorkerExit::Faulted(fault);
@@ -274,6 +278,7 @@ fn publish_state_transitions(
     last_fal_connection_state: &mut FalConnectionState,
     last_disconnect_state: &mut DisconnectState,
     last_stored_encryption_state: &mut StoredEncryptionState,
+    last_connection_set: &mut LeConnectionSetSnapshot,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
@@ -345,6 +350,16 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_stored_encryption_state = stored_encryption_state;
+    }
+
+    let connection_set = engine.connection_set_snapshot();
+    if connection_set != *last_connection_set {
+        report_tx
+            .try_send(HciReport::ConnectionSet(
+                connection_set.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_connection_set = connection_set;
     }
 
     Ok(())
@@ -708,6 +723,18 @@ mod tests {
                 FalConnectionState::Cleaning,
             )
         );
+        match recv_report(&reports) {
+            HciReport::ConnectionSet(snapshot) => {
+                assert_eq!(snapshot.connections.len(), 1);
+                assert_eq!(
+                    snapshot.connections[0].connection_handle,
+                    0x0800
+                );
+            }
+            other => {
+                panic!("expected connection-set report, got {other:?}")
+            }
+        }
 
         ingress
             .try_send_controller(ControllerPacket::Event(vec![
