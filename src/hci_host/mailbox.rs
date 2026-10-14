@@ -12,8 +12,8 @@ use crate::{
 
 use super::{
     connection::{
-        DisconnectState, FalConnectRequest, FalConnectionState,
-        LeConnectionSetSnapshot,
+        ConnectionToken, DisconnectState, FalConnectRequest,
+        FalConnectionState, LeConnectionSetSnapshot,
     },
     engine::{
         ControllerCapabilities, ControllerIdentity,
@@ -34,7 +34,7 @@ pub enum HciCommand {
     ClearControllerPrivacy,
     BeginFalConnection(FalConnectRequest),
     CancelFalConnection,
-    Disconnect { connection_handle: u16 },
+    Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
 }
 
@@ -168,10 +168,10 @@ impl HciControl {
 
     pub fn try_disconnect(
         &self,
-        connection_handle: u16,
+        connection: ConnectionToken,
     ) -> Result<(), SendError> {
         self.tx
-            .try_send(HciCommand::Disconnect { connection_handle })
+            .try_send(HciCommand::Disconnect { connection })
             .map_err(map_send_error)
     }
 
@@ -290,12 +290,14 @@ mod tests {
         let (control, _ingress, _reports, ports) =
             hci_mailbox(1, 2, 1);
 
-        control.try_disconnect(0x0800).unwrap();
+        let connection = ConnectionToken {
+            connection_handle: 0x0800,
+            generation: 7,
+        };
+        control.try_disconnect(connection).unwrap();
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
-            HciCommand::Disconnect {
-                connection_handle: 0x0800,
-            }
+            HciCommand::Disconnect { connection }
         );
     }
 
