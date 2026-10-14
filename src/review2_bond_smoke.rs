@@ -9,13 +9,13 @@ use crate::{
         connection::{
             ConnectionToken, DisconnectState, FalConnectRequest,
             FalConnectionState, LeConnectionSetSnapshot,
-            LeConnectionSnapshot, LeInitiationParameters, LePeerIdentity,
+            LeInitiationParameters, LePeerIdentity,
         },
         engine::{
             ControllerIdentity, ControllerIdentityFailure,
             OperationalAttachState,
         },
-        mailbox::{HciControl, HciReport, HciReportInbox},
+        mailbox::{HciReport, HciReportInbox},
         stack::{
             spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
         },
