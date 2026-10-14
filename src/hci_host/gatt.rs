@@ -5,6 +5,7 @@ use super::connection::ConnectionToken;
 
 pub const ATT_DEFAULT_MTU: u16 = 23;
 pub const GATT_PRIMARY_SERVICE_UUID: u16 = 0x2800;
+pub const GATT_INCLUDE_UUID: u16 = 0x2802;
 pub const GATT_CHARACTERISTIC_UUID: u16 = 0x2803;
 pub const CCCD_NOTIFICATION: u16 = 0x0001;
 pub const CCCD_INDICATION: u16 = 0x0002;
@@ -40,6 +41,10 @@ pub struct GattDescriptor {
 pub enum GattOperation {
     ExchangeMtu { client_rx_mtu: u16 },
     DiscoverServices,
+    DiscoverIncludedServices {
+        service_handle: u16,
+        end_group_handle: u16,
+    },
     DiscoverCharacteristics {
         service_handle: u16,
         end_group_handle: u16,
@@ -81,6 +86,7 @@ pub struct GattRequest {
 pub enum GattResult {
     Mtu { mtu: u16 },
     Services(Vec<GattService>),
+    IncludedServices(Vec<GattService>),
     Characteristics(Vec<GattCharacteristic>),
     Descriptors(Vec<GattDescriptor>),
     Value {
@@ -174,6 +180,8 @@ pub enum GattAction {
 enum Phase {
     ExchangeMtu { client_rx_mtu: u16 },
     DiscoverServices { next: u16 },
+    DiscoverIncludedServices { next: u16, end: u16 },
+    ReadIncludedUuid { handle: u16 },
     DiscoverCharacteristics { next: u16, end: u16 },
     DiscoverDescriptors { next: u16, end: u16 },
     ReadInitial { handle: u16 },
@@ -190,6 +198,14 @@ enum Phase {
     Failed,
 }
 
+#[derive(Clone, Debug)]
+struct PendingIncluded {
+    declaration_handle: u16,
+    handle: u16,
+    end_group_handle: u16,
+    uuid: Option<Uuid>,
+}
+
 #[derive(Debug)]
 pub struct GattTransaction {
     request_id: GattRequestId,
@@ -197,6 +213,9 @@ pub struct GattTransaction {
     mtu: u16,
     phase: Phase,
     services: Vec<GattService>,
+    included_services: Vec<GattService>,
+    pending_includes: std::collections::VecDeque<PendingIncluded>,
+    included_resume: Option<(u16, u16)>,
     characteristics: Vec<GattCharacteristic>,
     descriptors: Vec<GattDescriptor>,
     read_value: Vec<u8>,
@@ -220,6 +239,23 @@ impl GattTransaction {
                 Phase::DiscoverServices { next: 0x0001 },
                 service_request(0x0001),
             ),
+            GattOperation::DiscoverIncludedServices {
+                service_handle,
+                end_group_handle,
+            } => {
+                let starting_handle =
+                    service_handle.saturating_add(1);
+                (
+                    Phase::DiscoverIncludedServices {
+                        next: starting_handle,
+                        end: *end_group_handle,
+                    },
+                    included_service_request(
+                        starting_handle,
+                        *end_group_handle,
+                    ),
+                )
+            }
             GattOperation::DiscoverCharacteristics {
                 service_handle,
                 end_group_handle,
@@ -322,6 +358,9 @@ impl GattTransaction {
                 mtu,
                 phase,
                 services: Vec::new(),
+                included_services: Vec::new(),
+                pending_includes: std::collections::VecDeque::new(),
+                included_resume: None,
                 characteristics: Vec::new(),
                 descriptors: Vec::new(),
                 read_value: Vec::new(),
@@ -384,6 +423,9 @@ impl GattTransaction {
                 match self.phase {
                     Phase::DiscoverServices { .. } => {
                         return self.complete_services();
+                    }
+                    Phase::DiscoverIncludedServices { .. } => {
+                        return self.complete_included_services();
                     }
                     Phase::DiscoverCharacteristics { end, .. } => {
                         return self.complete_characteristics(end);
@@ -471,6 +513,115 @@ impl GattTransaction {
                     }
                 }
                 other => self.unexpected("Read By Group Type Response", &other),
+            },
+            Phase::DiscoverIncludedServices { next, end } => match pdu {
+                AttPdu::ReadByTypeResponse {
+                    length,
+                    attribute_data_list,
+                } => {
+                    let entries = match parse_type_entries(
+                        length,
+                        &attribute_data_list,
+                    ) {
+                        Ok(entries) => entries,
+                        Err(error) => return self.fail(error),
+                    };
+                    if entries.is_empty() {
+                        return self.complete_included_services();
+                    }
+
+                    let mut last_decl = 0u16;
+                    for (declaration_handle, value) in entries {
+                        if declaration_handle < next
+                            || (value.len() != 4 && value.len() != 6)
+                        {
+                            return self.fail(
+                                GattFailureKind::Protocol(
+                                    "invalid included-service declaration"
+                                        .into(),
+                                ),
+                            );
+                        }
+                        let handle =
+                            u16::from_le_bytes([value[0], value[1]]);
+                        let end_group_handle =
+                            u16::from_le_bytes([value[2], value[3]]);
+                        if handle == 0 || end_group_handle < handle {
+                            return self.fail(
+                                GattFailureKind::Protocol(format!(
+                                    "invalid included-service range {handle:#06x}..={end_group_handle:#06x}"
+                                )),
+                            );
+                        }
+                        let uuid = if value.len() == 6 {
+                            match Uuid::from_bytes(&value[4..]) {
+                                Ok(uuid) => Some(uuid),
+                                Err(error) => {
+                                    return self.fail(
+                                        GattFailureKind::Protocol(format!(
+                                            "invalid included-service UUID: {error}"
+                                        )),
+                                    )
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        self.pending_includes.push_back(
+                            PendingIncluded {
+                                declaration_handle,
+                                handle,
+                                end_group_handle,
+                                uuid,
+                            },
+                        );
+                        last_decl = declaration_handle;
+                    }
+
+                    let resume_next =
+                        last_decl.saturating_add(1);
+                    self.included_resume = Some((resume_next, end));
+                    self.advance_included_services()
+                }
+                other => self.unexpected(
+                    "Read By Type Response for Include",
+                    &other,
+                ),
+            },
+            Phase::ReadIncludedUuid { handle } => match pdu {
+                AttPdu::ReadResponse { attribute_value } => {
+                    let uuid = match Uuid::from_bytes(&attribute_value) {
+                        Ok(uuid) => uuid,
+                        Err(error) => {
+                            return self.fail(
+                                GattFailureKind::Protocol(format!(
+                                    "invalid included-service UUID read: {error}"
+                                )),
+                            )
+                        }
+                    };
+                    let Some(front) = self.pending_includes.front_mut()
+                    else {
+                        return self.fail(
+                            GattFailureKind::Protocol(
+                                "missing pending included service".into(),
+                            ),
+                        );
+                    };
+                    if front.handle != handle {
+                        return self.fail(
+                            GattFailureKind::Protocol(
+                                "included-service read handle mismatch"
+                                    .into(),
+                            ),
+                        );
+                    }
+                    front.uuid = Some(uuid);
+                    self.advance_included_services()
+                }
+                other => {
+                    self.unexpected("Read Response for included service", &other)
+                }
             },
             Phase::DiscoverCharacteristics { next, end } => match pdu {
                 AttPdu::ReadByTypeResponse {
@@ -652,6 +803,50 @@ impl GattTransaction {
         }
     }
 
+    fn advance_included_services(&mut self) -> GattAction {
+        loop {
+            let Some(front) = self.pending_includes.front() else {
+                let Some((next, end)) = self.included_resume.take()
+                else {
+                    return self.complete_included_services();
+                };
+                if next == 0 || next > end {
+                    return self.complete_included_services();
+                }
+                self.phase =
+                    Phase::DiscoverIncludedServices { next, end };
+                return GattAction::Send(included_service_request(
+                    next, end,
+                ));
+            };
+
+            if front.uuid.is_none() {
+                let handle = front.handle;
+                self.phase = Phase::ReadIncludedUuid { handle };
+                return GattAction::Send(AttPdu::ReadRequest {
+                    attribute_handle: handle,
+                });
+            }
+
+            let pending = self
+                .pending_includes
+                .pop_front()
+                .expect("front included service exists");
+            self.included_services.push(GattService {
+                handle: pending.handle,
+                end_group_handle: pending.end_group_handle,
+                uuid: pending.uuid.expect("checked included UUID"),
+            });
+        }
+    }
+
+    fn complete_included_services(&mut self) -> GattAction {
+        self.pending_includes.clear();
+        self.included_resume = None;
+        let services = std::mem::take(&mut self.included_services);
+        self.complete(GattResult::IncludedServices(services))
+    }
+
     fn complete_services(&mut self) -> GattAction {
         let services = std::mem::take(&mut self.services);
         self.complete(GattResult::Services(services))
@@ -718,6 +913,12 @@ fn validate_request(request: &GattRequest) -> Result<(), GattFailure> {
                 "client ATT MTU must be >= {ATT_DEFAULT_MTU}"
             )))
         }
+        GattOperation::DiscoverIncludedServices {
+            service_handle,
+            end_group_handle,
+        } if *service_handle == 0 || service_handle >= end_group_handle => {
+            Err(invalid("invalid service handle range for includes".into()))
+        }
         GattOperation::DiscoverCharacteristics {
             service_handle,
             end_group_handle,
@@ -761,6 +962,17 @@ fn service_request(starting_handle: u16) -> AttPdu {
         attribute_group_type: Uuid::from_16_bits(
             GATT_PRIMARY_SERVICE_UUID,
         ),
+    }
+}
+
+fn included_service_request(
+    starting_handle: u16,
+    ending_handle: u16,
+) -> AttPdu {
+    AttPdu::ReadByTypeRequest {
+        starting_handle,
+        ending_handle,
+        attribute_type: Uuid::from_16_bits(GATT_INCLUDE_UUID),
     }
 }
 
@@ -952,6 +1164,81 @@ mod tests {
         assert_eq!(services.len(), 2);
         assert_eq!(services[0].handle, 1);
         assert_eq!(services[1].end_group_handle, 9);
+    }
+
+    #[test]
+    fn included_service_discovery_handles_inline_and_read_uuid_forms() {
+        let (mut tx, first) = GattTransaction::begin(
+            request(
+                20,
+                GattOperation::DiscoverIncludedServices {
+                    service_handle: 0x0010,
+                    end_group_handle: 0x0020,
+                },
+            ),
+            23,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            included_service_request(0x0011, 0x0020)
+        );
+
+        let next = tx.on_pdu(AttPdu::ReadByTypeResponse {
+            length: 8,
+            attribute_data_list: vec![
+                0x11, 0x00,
+                0x30, 0x00, 0x35, 0x00,
+                0x46, 0x18,
+            ],
+        });
+        assert_eq!(
+            drive_send(&mut tx, next),
+            included_service_request(0x0012, 0x0020)
+        );
+
+        let read_uuid = tx.on_pdu(AttPdu::ReadByTypeResponse {
+            length: 6,
+            attribute_data_list: vec![
+                0x12, 0x00,
+                0x40, 0x00, 0x45, 0x00,
+            ],
+        });
+        assert_eq!(
+            drive_send(&mut tx, read_uuid),
+            AttPdu::ReadRequest {
+                attribute_handle: 0x0040,
+            }
+        );
+
+        let next_page = tx.on_pdu(AttPdu::ReadResponse {
+            attribute_value: vec![0x50, 0x18],
+        });
+        assert_eq!(
+            drive_send(&mut tx, next_page),
+            included_service_request(0x0013, 0x0020)
+        );
+
+        let done = tx.on_pdu(AttPdu::ErrorResponse {
+            request_opcode_in_error: 0x08,
+            attribute_handle_in_error: 0x0013,
+            error_code: ATT_ATTRIBUTE_NOT_FOUND_ERROR,
+        });
+        let GattAction::Complete(
+            GattResult::IncludedServices(services),
+        ) = done
+        else {
+            panic!("expected included services");
+        };
+        assert_eq!(services.len(), 2);
+        assert_eq!(
+            services[0].uuid,
+            Uuid::from_16_bits(0x1846)
+        );
+        assert_eq!(
+            services[1].uuid,
+            Uuid::from_16_bits(0x1850)
+        );
     }
 
     #[test]
