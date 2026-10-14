@@ -209,6 +209,7 @@ pub struct LeConnectionSnapshot {
     pub peripheral_latency: u16,
     pub supervision_timeout: u16,
     pub encryption_enabled: u8,
+    pub encryption_key_size: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -611,6 +612,7 @@ mod tests {
             peripheral_latency: 0,
             supervision_timeout: 42,
             encryption_enabled: 0,
+            encryption_key_size: 0,
         }
     }
 
