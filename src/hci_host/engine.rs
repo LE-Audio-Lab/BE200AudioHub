@@ -1,4 +1,5 @@
-use bumble_host::Device;
+use bumble_hci::Command;
+use bumble_host::{Device, HostTransport};
 
 use crate::transport::{
     packet::ControllerPacket,
@@ -15,9 +16,24 @@ pub enum EngineFault {
     PollBudgetExceeded,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationalAttachState {
+    Idle,
+    Discovering,
+    Ready,
+    Failed(OperationalAttachFailure),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationalAttachFailure {
+    SupportedCommandsStatus(u8),
+    HostInitializationFailed,
+}
+
 pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
+    attach_state: OperationalAttachState,
 }
 
 impl HciEngine {
@@ -25,11 +41,38 @@ impl HciEngine {
         Self {
             device: Device::new(0),
             link: QueueHostTransport::new(tx),
+            attach_state: OperationalAttachState::Idle,
         }
     }
 
     pub fn ingest(&mut self, packet: ControllerPacket) -> Result<(), EngineFault> {
         self.link.ingest(packet).map_err(EngineFault::Link)
+    }
+
+    pub fn attach_state(&self) -> OperationalAttachState {
+        self.attach_state
+    }
+
+    /// Attach to an already-operational controller without issuing HCI Reset.
+    ///
+    /// Bumble Device already contains the asynchronous capability-discovery and
+    /// host-initialization completion chain. Kicking only Supported Commands is
+    /// enough for Device::poll() to schedule the remaining capability/event-mask/
+    /// buffer-size commands as completions arrive.
+    pub fn begin_operational_attach(&mut self) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Idle {
+            return Ok(());
+        }
+
+        self.link
+            .handle_command(0, Command::ReadLocalSupportedCommands);
+
+        if let Some(fault) = self.link.take_fault() {
+            return Err(EngineFault::Link(fault));
+        }
+
+        self.attach_state = OperationalAttachState::Discovering;
+        Ok(())
     }
 
     /// Drive Bumble's transport-neutral Device until it reports no more
@@ -51,6 +94,7 @@ impl HciEngine {
                 if let Some(fault) = self.link.take_fault() {
                     return Err(EngineFault::Link(fault));
                 }
+                self.refresh_attach_state();
                 return Ok(turns);
             }
 
@@ -58,6 +102,31 @@ impl HciEngine {
         }
 
         Err(EngineFault::PollBudgetExceeded)
+    }
+
+    fn refresh_attach_state(&mut self) {
+        if self.attach_state != OperationalAttachState::Discovering {
+            return;
+        }
+
+        if let Some(status) = self.device.local_supported_commands_status() {
+            if status != 0 {
+                self.attach_state = OperationalAttachState::Failed(
+                    OperationalAttachFailure::SupportedCommandsStatus(status),
+                );
+                return;
+            }
+        }
+
+        if self.device.host_initialization_complete() {
+            self.attach_state = if self.device.host_initialization_succeeded() {
+                OperationalAttachState::Ready
+            } else {
+                OperationalAttachState::Failed(
+                    OperationalAttachFailure::HostInitializationFailed,
+                )
+            };
+        }
     }
 
     pub(crate) fn device(&self) -> &Device {
@@ -89,6 +158,44 @@ mod tests {
     ) {
         let (tx, rx) = TransportTx::test_channel(capacity);
         (HciEngine::new(tx), rx)
+    }
+
+    #[test]
+    fn operational_attach_starts_with_supported_commands_and_never_reset() {
+        let (mut engine, rx) = engine(8);
+
+        engine.begin_operational_attach().unwrap();
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            HostPacket::Command(vec![0x02, 0x10, 0x00])
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+        assert_eq!(
+            engine.attach_state(),
+            OperationalAttachState::Discovering
+        );
+        assert!(engine.device().controller_ready());
+        assert_eq!(engine.device().reset_status(), None);
+    }
+
+    #[test]
+    fn supported_commands_failure_terminates_operational_attach() {
+        let (mut engine, _rx) = engine(8);
+        engine.begin_operational_attach().unwrap();
+
+        // Command Complete: Read Local Supported Commands, status=0x0C.
+        let mut event = vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x0c];
+        event.resize(2 + 0x44, 0);
+        engine.ingest(ControllerPacket::Event(event)).unwrap();
+
+        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+        assert_eq!(
+            engine.attach_state(),
+            OperationalAttachState::Failed(
+                OperationalAttachFailure::SupportedCommandsStatus(0x0c)
+            )
+        );
     }
 
     #[test]
