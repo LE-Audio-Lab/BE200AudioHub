@@ -86,6 +86,7 @@ mod imp {
         attached: bool,
         completions: Arc<Mutex<VecDeque<TransferCompletion>>>,
         active: Arc<Mutex<HashMap<TransferId, usize>>>,
+        pending_reads: Arc<Mutex<HashMap<RxEndpoint, TransferId>>>,
     }
 
     impl WindowsBe200Backend {
