@@ -79,6 +79,7 @@ mod imp {
         next_id: u64,
         callback_order: Arc<AtomicU64>,
         pending: HashMap<TransferId, PendingTransfer>,
+        idle_reads: HashMap<RxEndpoint, PendingTransfer>,
         attached: bool,
     }
 
@@ -129,6 +130,7 @@ mod imp {
                 next_id: 1,
                 callback_order: Arc::new(AtomicU64::new(0)),
                 pending: HashMap::new(),
+                idle_reads: HashMap::new(),
                 attached: true,
             })
         }
@@ -164,16 +166,31 @@ mod imp {
             }
 
             let id = self.allocate_id();
-            let mut state = Box::new(CallbackState::new(
-                id,
-                AsyncTransferKind::Read(endpoint),
-                vec![0u8; capacity],
-                self.callback_order.clone(),
-            ));
-            let raw = allocate_transfer()?;
+            let mut reusable = if let Some(mut transfer) = self.idle_reads.remove(&endpoint) {
+                debug_assert!(transfer.state.result().is_none());
+                transfer.state.id = id;
+                transfer.state.kind = AsyncTransferKind::Read(endpoint);
+                transfer
+            } else {
+                PendingTransfer {
+                    raw: allocate_transfer()?,
+                    state: Box::new(CallbackState::new(
+                        id,
+                        AsyncTransferKind::Read(endpoint),
+                        vec![0u8; capacity],
+                        self.callback_order.clone(),
+                    )),
+                }
+            };
+
+            // The read buffer remains heap-stable across resubmissions. Refill
+            // the transfer fields on every arm so a future layout/config change
+            // cannot leave stale metadata in a reusable slot.
+            let raw = reusable.raw;
+            let state = &mut reusable.state;
 
             unsafe {
-                let user_data = (&mut *state as *mut CallbackState).cast();
+                let user_data = (&mut **state as *mut CallbackState).cast();
                 match transfer_type {
                     TransferType::Interrupt => rusb::ffi::libusb_fill_interrupt_transfer(
                         raw.as_ptr(),
@@ -208,7 +225,7 @@ mod imp {
                 }
             }
 
-            self.pending.insert(id, PendingTransfer { raw, state });
+            self.pending.insert(id, reusable);
             Ok(id)
         }
 
@@ -325,7 +342,14 @@ mod imp {
                 _ => TransferCompletion::Failed { id: Some(id) },
             };
 
-            unsafe { pending.reclaim() };
+            match kind {
+                AsyncTransferKind::Read(endpoint) => {
+                    debug_assert!(pending.state.result().is_none());
+                    let old = self.idle_reads.insert(endpoint, pending);
+                    debug_assert!(old.is_none(), "duplicate idle read transfer slot");
+                }
+                AsyncTransferKind::Write(_) => unsafe { pending.reclaim() },
+            }
             Some(completion)
         }
 
@@ -365,6 +389,10 @@ mod imp {
             while !self.pending.is_empty() {
                 let _ = self.pump_events_once();
                 self.reclaim_completed_without_delivery();
+            }
+
+            for (_, idle) in self.idle_reads.drain() {
+                unsafe { idle.reclaim() };
             }
         }
     }
@@ -565,6 +593,14 @@ mod imp {
                 logical_write_length(TxEndpoint::Iso, &buffer, 10),
                 4
             );
+        }
+
+        #[test]
+        fn persistent_read_slot_model_is_single_slot_per_endpoint() {
+            let mut slots = HashMap::<RxEndpoint, usize>::new();
+            assert_eq!(slots.insert(RxEndpoint::Event, 1), None);
+            assert_eq!(slots.insert(RxEndpoint::Event, 2), Some(1));
+            assert_eq!(slots.len(), 1);
         }
 
         #[test]
