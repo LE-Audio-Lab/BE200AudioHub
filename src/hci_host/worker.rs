@@ -11,7 +11,7 @@ use super::{
     engine::{
         EngineFault, HciEngine, OperationalAttachState, PassiveScanState,
     },
-    connection::FalConnectionState,
+    connection::{DisconnectState, FalConnectionState},
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
 };
@@ -75,6 +75,7 @@ fn run_loop(
     let mut last_privacy_state = engine.controller_privacy_state().clone();
     let mut last_fal_connection_state =
         engine.fal_connection_state().clone();
+    let mut last_disconnect_state = engine.disconnect_state().clone();
 
     loop {
         match stop_rx.try_recv() {
@@ -100,6 +101,7 @@ fn run_loop(
                         &mut last_scan_state,
                         &mut last_privacy_state,
                         &mut last_fal_connection_state,
+                        &mut last_disconnect_state,
                         &report_tx,
                     ) {
                         return HciWorkerExit::Faulted(fault);
@@ -187,6 +189,7 @@ fn run_loop(
                     &mut last_scan_state,
                     &mut last_privacy_state,
                     &mut last_fal_connection_state,
+                    &mut last_disconnect_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -213,6 +216,7 @@ fn run_loop(
                     &mut last_scan_state,
                     &mut last_privacy_state,
                     &mut last_fal_connection_state,
+                    &mut last_disconnect_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -245,6 +249,9 @@ fn process_command(
         HciCommand::CancelFalConnection => {
             engine.cancel_fal_connection()
         }
+        HciCommand::Disconnect { connection_handle } => {
+            engine.begin_disconnect(connection_handle)
+        }
     }
 }
 
@@ -254,6 +261,7 @@ fn publish_state_transitions(
     last_scan_state: &mut PassiveScanState,
     last_privacy_state: &mut ControllerPrivacyState,
     last_fal_connection_state: &mut FalConnectionState,
+    last_disconnect_state: &mut DisconnectState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
@@ -304,6 +312,16 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_fal_connection_state = fal_connection_state;
+    }
+
+    let disconnect_state = engine.disconnect_state().clone();
+    if disconnect_state != *last_disconnect_state {
+        report_tx
+            .try_send(HciReport::DisconnectState(
+                disconnect_state.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_disconnect_state = disconnect_state;
     }
 
     Ok(())
