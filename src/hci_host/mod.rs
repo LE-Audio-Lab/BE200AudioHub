@@ -1,6 +1,7 @@
 pub mod acl_credit;
 pub mod connection;
 pub mod engine;
+pub mod gatt;
 pub mod link;
 pub mod mailbox;
 pub mod privacy;
