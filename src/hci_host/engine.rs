@@ -1137,6 +1137,11 @@ impl HciEngine {
                         ))?;
                     }
                     other => {
+                        let opcode = other
+                            .to_bytes()
+                            .first()
+                            .copied()
+                            .unwrap_or(0);
                         let action = if let Some(transaction) =
                             self.gatt_transactions.get_mut(&handle)
                         {
@@ -1148,11 +1153,6 @@ impl HciEngine {
                         if let Some(action) = action {
                             self.handle_gatt_action(handle, action)?;
                         } else {
-                            let opcode = other
-                                .to_bytes()
-                                .first()
-                                .copied()
-                                .unwrap_or(0);
                             if let Some(request_id) =
                                 self.gatt_poisoned.get(&handle).copied()
                             {
@@ -1196,13 +1196,14 @@ impl HciEngine {
             .gatt_transactions
             .get_mut(connection_handle)
             .map(|transaction| transaction.on_disconnect(*reason));
+        let consumed = action.is_some();
         if let Some(action) = action {
             self.handle_gatt_action(*connection_handle, action)?;
         }
 
         self.gatt_mtus.remove(connection_handle);
         self.gatt_poisoned.remove(connection_handle);
-        Ok(action.is_some())
+        Ok(consumed)
     }
 
     fn handle_gatt_action(
