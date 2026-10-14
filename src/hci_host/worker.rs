@@ -393,6 +393,120 @@ mod tests {
     }
 
     #[test]
+    fn worker_routes_passive_scan_as_typed_transaction() {
+        let (control, ingress, reports, ports) = hci_mailbox(32, 8, 16);
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(32);
+        let join = spawn_hci_worker(ports, transport_tx);
+
+        // Bring the synthetic controller to the minimal resetless Ready state.
+        control.try_begin_operational_attach().unwrap();
+        assert_eq!(
+            recv_host_packet(&transport_rx),
+            HostPacket::Command(vec![0x02, 0x10, 0x00])
+        );
+        assert!(matches!(
+            recv_report(&reports),
+            HciReport::AttachState(OperationalAttachState::Discovering)
+        ));
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        ingress
+            .try_send_controller(ControllerPacket::Event(supported))
+            .unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_host_packet(&transport_rx);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+
+        assert!(matches!(
+            recv_report(&reports),
+            HciReport::AttachState(OperationalAttachState::Ready)
+        ));
+        assert!(matches!(
+            recv_report(&reports),
+            HciReport::CapabilitiesReady(_)
+        ));
+
+        control.try_start_passive_extended_scan().unwrap();
+        assert!(matches!(
+            recv_host_packet(&transport_rx),
+            HostPacket::Command(_)
+        ));
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::PassiveScanState(PassiveScanState::Configuring)
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x41, 0x20, 0x00,
+            ]))
+            .unwrap();
+        assert!(matches!(
+            recv_host_packet(&transport_rx),
+            HostPacket::Command(_)
+        ));
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::PassiveScanState(PassiveScanState::Enabling)
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::PassiveScanState(PassiveScanState::Scanning)
+        );
+
+        control.try_stop_passive_extended_scan().unwrap();
+        assert!(matches!(
+            recv_host_packet(&transport_rx),
+            HostPacket::Command(_)
+        ));
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::PassiveScanState(PassiveScanState::Disabling)
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x42, 0x20, 0x00,
+            ]))
+            .unwrap();
+
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::PassiveScanState(PassiveScanState::Idle)
+        );
+        match recv_report(&reports) {
+            HciReport::ScanComplete(summary) => {
+                assert_eq!(summary.reports_seen, 0);
+                assert!(summary.observations.is_empty());
+                assert!(!summary.truncated);
+            }
+            other => panic!("unexpected report: {other:?}"),
+        }
+
+        control.request_stop().unwrap();
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
     fn urgent_stop_is_not_blocked_by_full_controller_lane() {
         let (control, ingress, _reports, ports) =
             hci_mailbox(1, 1, 4);
