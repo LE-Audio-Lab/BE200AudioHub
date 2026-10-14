@@ -515,14 +515,16 @@ mod tests {
             HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         );
 
-        assert_eq!(
-            tx.on_command_complete(
-                HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
-                0,
-                &[],
-            ),
-            FalConnectAction::Connected(snapshot(0x0800))
-        );
+        match tx.on_command_complete(
+            HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+            0,
+            &[],
+        ) {
+            FalConnectAction::Connected(connection) => {
+                assert_eq!(connection, snapshot(0x0800));
+            }
+            other => panic!("expected connected action, got {other:?}"),
+        }
     }
 
     #[test]
