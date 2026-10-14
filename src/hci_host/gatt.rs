@@ -1,5 +1,5 @@
 use bumble::Uuid;
-use bumble_att::AttPdu;
+use bumble_att::{codes, AttPdu};
 
 use super::connection::ConnectionToken;
 
@@ -414,6 +414,14 @@ impl GattTransaction {
             error_code,
         } = &pdu
         {
+            let expected_opcode = self.expected_request_opcode();
+            if expected_opcode != Some(*request_opcode_in_error) {
+                return self.fail(GattFailureKind::Protocol(format!(
+                    "ATT Error Response opcode mismatch: expected {:?}, got 0x{:02X}",
+                    expected_opcode,
+                    request_opcode_in_error,
+                )));
+            }
             if *error_code == ATT_ATTRIBUTE_NOT_FOUND_ERROR {
                 match self.phase {
                     Phase::DiscoverServices { .. } => {
@@ -839,6 +847,28 @@ impl GattTransaction {
         self.included_resume = None;
         let services = std::mem::take(&mut self.included_services);
         self.complete(GattResult::IncludedServices(services))
+    }
+
+    fn expected_request_opcode(&self) -> Option<u8> {
+        match self.phase {
+            Phase::ExchangeMtu { .. } => Some(codes::ATT_EXCHANGE_MTU_REQUEST),
+            Phase::DiscoverServices { .. } => {
+                Some(codes::ATT_READ_BY_GROUP_TYPE_REQUEST)
+            }
+            Phase::DiscoverIncludedServices { .. }
+            | Phase::DiscoverCharacteristics { .. } => {
+                Some(codes::ATT_READ_BY_TYPE_REQUEST)
+            }
+            Phase::ReadIncludedUuid { .. }
+            | Phase::ReadInitial { .. } => Some(codes::ATT_READ_REQUEST),
+            Phase::DiscoverDescriptors { .. } => {
+                Some(codes::ATT_FIND_INFORMATION_REQUEST)
+            }
+            Phase::ReadBlob { .. } => Some(codes::ATT_READ_BLOB_REQUEST),
+            Phase::WriteRequest { .. }
+            | Phase::Subscribe { .. } => Some(codes::ATT_WRITE_REQUEST),
+            Phase::WriteCommand { .. } | Phase::Complete | Phase::Failed => None,
+        }
     }
 
     fn complete_services(&mut self) -> GattAction {
@@ -1360,6 +1390,33 @@ mod tests {
         assert!(matches!(
             done,
             GattAction::Complete(GattResult::Value { .. })
+        ));
+    }
+
+    #[test]
+    fn error_response_must_match_current_request_opcode() {
+        let (mut tx, _) = GattTransaction::begin(
+            request(
+                40,
+                GattOperation::ReadValue {
+                    attribute_handle: 0x1234,
+                },
+            ),
+            23,
+        )
+        .unwrap();
+
+        let failed = tx.on_pdu(AttPdu::ErrorResponse {
+            request_opcode_in_error: codes::ATT_WRITE_REQUEST,
+            attribute_handle_in_error: 0x1234,
+            error_code: 0x05,
+        });
+        assert!(matches!(
+            failed,
+            GattAction::Failed(GattFailure {
+                kind: GattFailureKind::Protocol(message),
+                ..
+            }) if message.contains("opcode mismatch")
         ));
     }
 
