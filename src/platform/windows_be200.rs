@@ -4,13 +4,14 @@ use std::{
     time::Duration,
 };
 
-use rusb::{
-    Context, DeviceHandle, Direction, Recipient, RequestType, UsbContext,
-};
+use rusb::{Context, DeviceHandle, UsbContext};
 
-use super::backend::{
-    BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TransferId,
-    TxEndpoint,
+use super::{
+    backend::{
+        BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TransferId,
+        TxEndpoint,
+    },
+    libusb_async::{hci_command_control_buffer, AsyncTransferStatus},
 };
 
 pub const BE200_VID: u16 = 0x8087;
@@ -286,31 +287,16 @@ mod imp {
                 return Err(BackendError::Failed);
             }
 
-            let setup_len = constants::LIBUSB_CONTROL_SETUP_SIZE;
+            let command_buffer =
+                hci_command_control_buffer(&payload).map_err(|_| BackendError::Failed)?;
             let mut state = Box::new(CallbackState {
                 id,
                 endpoint: CallbackEndpoint::Write(TxEndpoint::Command),
-                buffer: vec![0; setup_len + payload.len()],
+                buffer: command_buffer,
                 completions: self.completions.clone(),
                 active: self.active.clone(),
                 pending_reads: self.pending_reads.clone(),
             });
-
-            unsafe {
-                ffi::libusb_fill_control_setup(
-                    state.buffer.as_mut_ptr(),
-                    rusb::request_type(
-                        Direction::Out,
-                        RequestType::Class,
-                        Recipient::Device,
-                    ),
-                    0,
-                    0,
-                    0,
-                    payload.len() as u16,
-                );
-            }
-            state.buffer[setup_len..].copy_from_slice(&payload);
 
             let buffer = state.buffer.as_mut_ptr();
             let user_data = Box::into_raw(state) as *mut c_void;
@@ -494,8 +480,8 @@ mod imp {
                 }
             }
 
-            let completion = match (*transfer).status {
-                constants::LIBUSB_TRANSFER_COMPLETED => match state.endpoint {
+            let completion = match AsyncTransferStatus::from_libusb((*transfer).status) {
+                AsyncTransferStatus::Completed => match state.endpoint {
                     CallbackEndpoint::Read(endpoint) => {
                         let actual = usize::try_from((*transfer).actual_length)
                             .unwrap_or(0)
@@ -516,13 +502,15 @@ mod imp {
                         }
                     }
                 },
-                constants::LIBUSB_TRANSFER_CANCELLED => {
+                AsyncTransferStatus::Cancelled => {
                     TransferCompletion::Cancelled { id: state.id }
                 }
-                constants::LIBUSB_TRANSFER_NO_DEVICE => {
-                    TransferCompletion::DeviceGone
-                }
-                _ => TransferCompletion::Failed {
+                AsyncTransferStatus::NoDevice => TransferCompletion::DeviceGone,
+                AsyncTransferStatus::Error
+                | AsyncTransferStatus::TimedOut
+                | AsyncTransferStatus::Stall
+                | AsyncTransferStatus::Overflow
+                | AsyncTransferStatus::Unknown(_) => TransferCompletion::Failed {
                     id: Some(state.id),
                 },
             };
