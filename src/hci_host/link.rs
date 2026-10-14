@@ -36,6 +36,12 @@ pub enum HciObservation {
         opcode: u16,
         status: u8,
     },
+    AclSubmitted {
+        connection_handle: u16,
+    },
+    CompletedPackets {
+        completions: Vec<(u16, u16)>,
+    },
 }
 
 pub struct QueueHostTransport {
@@ -62,6 +68,13 @@ impl QueueHostTransport {
             ControllerPacket::Event(bytes) => {
                 if let Some(observation) = observe_native_event(&bytes) {
                     self.observations.push_back(observation);
+                }
+                if let Some(completions) =
+                    observe_number_of_completed_packets(&bytes)
+                {
+                    self.observations.push_back(
+                        HciObservation::CompletedPackets { completions },
+                    );
                 }
                 (HCI_EVENT_PACKET, bytes)
             }
@@ -164,6 +177,31 @@ fn normalize_status_only_command_complete(packet: HciPacket) -> HciPacket {
     }
 }
 
+fn observe_number_of_completed_packets(
+    bytes: &[u8],
+) -> Option<Vec<(u16, u16)>> {
+    if bytes.first().copied()? != 0x13 || bytes.len() < 3 {
+        return None;
+    }
+
+    let handle_count = usize::from(bytes[2]);
+    if bytes.len() != 3 + handle_count * 4 {
+        return None;
+    }
+
+    let mut completions = Vec::with_capacity(handle_count);
+    let mut offset = 3usize;
+    for _ in 0..handle_count {
+        let handle =
+            u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+        let completed =
+            u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+        completions.push((handle, completed));
+        offset += 4;
+    }
+    Some(completions)
+}
+
 fn observe_native_event(bytes: &[u8]) -> Option<HciObservation> {
     match bytes.first().copied()? {
         // HCI Command Complete:
@@ -195,7 +233,15 @@ impl HostTransport for QueueHostTransport {
         _controller_id: usize,
         packet: AclDataPacket,
     ) -> bool {
-        self.send_native(HCI_ACL_DATA_PACKET, packet.to_bytes())
+        let connection_handle = packet.connection_handle;
+        let sent =
+            self.send_native(HCI_ACL_DATA_PACKET, packet.to_bytes());
+        if sent {
+            self.observations.push_back(HciObservation::AclSubmitted {
+                connection_handle,
+            });
+        }
+        sent
     }
 
     fn send_synchronous_data(
@@ -379,6 +425,54 @@ mod tests {
                 status: 0x0c,
             }]
         );
+    }
+
+    #[test]
+    fn successful_acl_submission_is_journaled_but_failed_enqueue_is_not() {
+        let (tx, rx) = tx(1);
+        let mut link = QueueHostTransport::new(tx);
+
+        let packet = AclDataPacket {
+            connection_handle: 0x0800,
+            pb_flag: 0,
+            bc_flag: 0,
+            data_total_length: 4,
+            data: vec![0, 0, 4, 0],
+        };
+        assert!(link.send_acl_packet(0, packet.clone()));
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::AclSubmitted {
+                connection_handle: 0x0800,
+            }]
+        );
+
+        // Keep the bounded transport lane full; the second ACL must fail and
+        // must not be accounted as submitted.
+        assert!(!link.send_acl_packet(0, packet));
+        assert!(link.take_observations().is_empty());
+        let _ = rx.try_recv().unwrap();
+    }
+
+    #[test]
+    fn number_of_completed_packets_is_journaled_per_handle() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x13, 0x09, 0x02,
+            0x00, 0x08, 0x01, 0x00,
+            0x01, 0x08, 0x02, 0x00,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::CompletedPackets {
+                completions: vec![(0x0800, 1), (0x0801, 2)],
+            }]
+        );
+        assert_eq!(link.drain_host_events(0).len(), 1);
     }
 
     #[test]
