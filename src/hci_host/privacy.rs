@@ -45,6 +45,10 @@ pub enum PrivacyFailureKind {
     CommandStatus { opcode: u16, status: u8 },
     MalformedCapacityResponse,
     CapacityTooSmall { capacity: u8, required: usize },
+    Cleanup {
+        disable_status: Option<u8>,
+        clear_status: Option<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,8 +62,88 @@ pub struct PrivacyFailure {
 pub enum ControllerPrivacyState {
     Idle,
     Configuring,
+    Clearing,
     Ready,
     Failed(PrivacyFailure),
+}
+
+#[derive(Debug)]
+pub enum PrivacyClearAction {
+    Send(Command),
+    Complete,
+    Failed(PrivacyFailure),
+    Ignored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivacyClearPhase {
+    Disabling,
+    Clearing,
+    Complete,
+    Failed,
+}
+
+pub struct PrivacyClearTransaction {
+    phase: PrivacyClearPhase,
+    pending_opcode: u16,
+    disable_status: Option<u8>,
+}
+
+impl PrivacyClearTransaction {
+    pub fn begin() -> (Self, Command) {
+        let command = set_resolution(false);
+        (
+            Self {
+                phase: PrivacyClearPhase::Disabling,
+                pending_opcode: command.op_code(),
+                disable_status: None,
+            },
+            command,
+        )
+    }
+
+    pub fn on_command_complete(
+        &mut self,
+        opcode: u16,
+        status: u8,
+    ) -> PrivacyClearAction {
+        if opcode != self.pending_opcode {
+            return PrivacyClearAction::Ignored;
+        }
+
+        match self.phase {
+            PrivacyClearPhase::Disabling => {
+                if status != 0 {
+                    self.disable_status = Some(status);
+                }
+                self.phase = PrivacyClearPhase::Clearing;
+                let command = Command::LeClearResolvingList;
+                self.pending_opcode = command.op_code();
+                PrivacyClearAction::Send(command)
+            }
+            PrivacyClearPhase::Clearing => {
+                self.pending_opcode = 0;
+                let clear_status = (status != 0).then_some(status);
+                if self.disable_status.is_none() && clear_status.is_none() {
+                    self.phase = PrivacyClearPhase::Complete;
+                    PrivacyClearAction::Complete
+                } else {
+                    self.phase = PrivacyClearPhase::Failed;
+                    PrivacyClearAction::Failed(PrivacyFailure {
+                        kind: PrivacyFailureKind::Cleanup {
+                            disable_status: self.disable_status,
+                            clear_status,
+                        },
+                        rollback_disable_status: None,
+                        rollback_clear_status: None,
+                    })
+                }
+            }
+            PrivacyClearPhase::Complete | PrivacyClearPhase::Failed => {
+                PrivacyClearAction::Ignored
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -300,6 +384,56 @@ mod tests {
             }
             other => panic!("expected Send({opcode:#06x}), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clear_transaction_always_attempts_disable_then_clear() {
+        let (mut tx, first) = PrivacyClearTransaction::begin();
+        assert_eq!(
+            first.op_code(),
+            HCI_LE_SET_ADDRESS_RESOLUTION_ENABLE_COMMAND
+        );
+
+        match tx.on_command_complete(first.op_code(), 0x0c) {
+            PrivacyClearAction::Send(command) => {
+                assert_eq!(
+                    command.op_code(),
+                    HCI_LE_CLEAR_RESOLVING_LIST_COMMAND
+                );
+            }
+            other => panic!("expected clear command, got {other:?}"),
+        }
+
+        match tx.on_command_complete(
+            HCI_LE_CLEAR_RESOLVING_LIST_COMMAND,
+            0,
+        ) {
+            PrivacyClearAction::Failed(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    PrivacyFailureKind::Cleanup {
+                        disable_status: Some(0x0c),
+                        clear_status: None,
+                    }
+                );
+            }
+            other => panic!("expected cleanup failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_transaction_returns_complete_only_when_both_succeed() {
+        let (mut tx, first) = PrivacyClearTransaction::begin();
+        let action = tx.on_command_complete(first.op_code(), 0);
+        assert!(matches!(action, PrivacyClearAction::Send(_)));
+
+        assert!(matches!(
+            tx.on_command_complete(
+                HCI_LE_CLEAR_RESOLVING_LIST_COMMAND,
+                0,
+            ),
+            PrivacyClearAction::Complete
+        ));
     }
 
     #[test]
