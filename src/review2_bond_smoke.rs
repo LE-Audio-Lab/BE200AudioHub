@@ -9,7 +9,7 @@ use crate::{
         connection::{
             ConnectionToken, DisconnectState, FalConnectRequest,
             FalConnectionState, LeConnectionSetSnapshot,
-            LeInitiationParameters, LePeerIdentity,
+            LeConnectionSnapshot, LeInitiationParameters, LePeerIdentity,
         },
         engine::{
             ControllerIdentity, ControllerIdentityFailure,
@@ -590,6 +590,615 @@ fn wait_disconnected(
             _ => None,
         },
     )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondMemberSmokeResult {
+    pub identity_address: String,
+    pub connection: ConnectionToken,
+    pub encryption_key_size: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondSmokeResult {
+    pub firmware: FirmwareLoadOutcome,
+    pub controller_identity: String,
+    pub members: Vec<BondMemberSmokeResult>,
+    pub bond_unchanged: bool,
+    pub exit: HciStackExit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BondSmokeStage {
+    BondInput,
+    Firmware,
+    Attach,
+    ControllerIdentity,
+    Privacy,
+    Connect(usize),
+    Encrypt(usize),
+    DualEncryptedAcl,
+    Cleanup,
+    BondIntegrity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondSmokeError {
+    pub stage: BondSmokeStage,
+    pub detail: String,
+}
+
+impl BondSmokeError {
+    fn new(stage: BondSmokeStage, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WaitError {
+    Timeout,
+    Disconnected,
+    Terminal(String),
+}
+
+#[cfg(windows)]
+pub fn execute_bond_smoke(
+    config: BondSmokeConfig,
+) -> Result<BondSmokeResult, BondSmokeError> {
+    let before = fingerprint_bond_store(&config.bond_root)
+        .map_err(|error| {
+            BondSmokeError::new(BondSmokeStage::BondInput, error.0)
+        })?;
+    let material = load_verified_bond_set(
+        &config.bond_root,
+        &config.target_name,
+    )
+    .map_err(|error| {
+        BondSmokeError::new(BondSmokeStage::BondInput, error.0)
+    })?;
+    let controller_identity = material.controller_identity.clone();
+    let plan = BondSmokePlan::from_material(material)
+        .map_err(|error| {
+            BondSmokeError::new(BondSmokeStage::BondInput, error)
+        })?;
+
+    let firmware =
+        crate::platform::be200_firmware_port::ensure_operational(
+            &config.sfi,
+            &config.ddc,
+        )
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::Firmware,
+                format!("{error:?}"),
+            )
+        })?;
+
+    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let mut tracker = BondSmokeTracker::default();
+
+    let run_result =
+        run_bond_sequence(&stack, &plan, &config, &mut tracker);
+    let cleanup_result =
+        cleanup_bond_sequence(&stack, &mut tracker);
+    let exit = stack.shutdown();
+
+    let fingerprint_result =
+        verify_bond_unchanged(&config.bond_root, &before);
+
+    if let Err(error) = fingerprint_result {
+        return Err(error);
+    }
+
+    let members = match run_result {
+        Ok(members) => members,
+        Err(mut primary) => {
+            if let Err(cleanup) = cleanup_result {
+                primary.detail.push_str("; cleanup: ");
+                primary.detail.push_str(&cleanup.detail);
+            }
+            return Err(primary);
+        }
+    };
+
+    cleanup_result?;
+
+    Ok(BondSmokeResult {
+        firmware,
+        controller_identity,
+        members,
+        bond_unchanged: true,
+        exit,
+    })
+}
+
+#[cfg(windows)]
+fn run_bond_sequence(
+    stack: &HciStack,
+    plan: &BondSmokePlan,
+    config: &BondSmokeConfig,
+    tracker: &mut BondSmokeTracker,
+) -> Result<Vec<BondMemberSmokeResult>, BondSmokeError> {
+    stack
+        .control()
+        .try_begin_operational_attach()
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::Attach,
+                format!("control lane rejected attach: {error:?}"),
+            )
+        })?;
+
+    wait_for_report(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+        |report, _| match report {
+            HciReport::AttachState(OperationalAttachState::Failed(failure)) => {
+                Err(format!("attach failed: {failure:?}"))
+            }
+            HciReport::CapabilitiesReady(_) => Ok(Some(())),
+            _ => Ok(None),
+        },
+    )
+    .map_err(|error| wait_stage(BondSmokeStage::Attach, error))?;
+
+    stack
+        .control()
+        .try_read_controller_identity()
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::ControllerIdentity,
+                format!("control lane rejected identity probe: {error:?}"),
+            )
+        })?;
+
+    let identity = wait_for_report(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(3),
+        |report, _| match report {
+            HciReport::ControllerIdentity(Ok(identity)) => {
+                Ok(Some(*identity))
+            }
+            HciReport::ControllerIdentity(Err(failure)) => {
+                Err(format!("Read BD_ADDR failed: {failure:?}"))
+            }
+            _ => Ok(None),
+        },
+    )
+    .map_err(|error| {
+        wait_stage(BondSmokeStage::ControllerIdentity, error)
+    })?;
+
+    if !plan.identity_matches(identity) {
+        return Err(BondSmokeError::new(
+            BondSmokeStage::ControllerIdentity,
+            format!(
+                "controller identity mismatch: live={} stored={}",
+                format_address_le(identity.public_address_le),
+                format_address_le(plan.controller_identity_le),
+            ),
+        ));
+    }
+
+    stack
+        .control()
+        .try_configure_controller_privacy(plan.privacy_config())
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::Privacy,
+                format!("control lane rejected privacy config: {error:?}"),
+            )
+        })?;
+
+    wait_for_report(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+        |report, _| match report {
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            ) => Ok(Some(())),
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Failed(failure),
+            ) => Err(format!("privacy configuration failed: {failure:?}")),
+            _ => Ok(None),
+        },
+    )
+    .map_err(|error| wait_stage(BondSmokeStage::Privacy, error))?;
+
+    let mut results = Vec::with_capacity(2);
+    for index in 0..plan.members.len() {
+        let connection = connect_member(
+            stack,
+            tracker,
+            plan,
+            index,
+            config.connect_timeout,
+        )?;
+        let encryption_key_size = encrypt_member(
+            stack,
+            tracker,
+            plan,
+            index,
+            connection.token(),
+        )?;
+
+        results.push(BondMemberSmokeResult {
+            identity_address: plan.members[index].identity_address.clone(),
+            connection: connection.token(),
+            encryption_key_size,
+        });
+    }
+
+    let expected: Vec<ConnectionToken> =
+        results.iter().map(|result| result.connection).collect();
+    wait_for_report(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(3),
+        |_report, tracker| {
+            let exactly_two = tracker.connection_set.connections.len() == 2;
+            let all_encrypted = expected
+                .iter()
+                .all(|token| tracker.is_encrypted(*token));
+            Ok((exactly_two && all_encrypted).then_some(()))
+        },
+    )
+    .map_err(|error| {
+        wait_stage(BondSmokeStage::DualEncryptedAcl, error)
+    })?;
+
+    Ok(results)
+}
+
+#[cfg(windows)]
+fn connect_member(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+    index: usize,
+    timeout: Duration,
+) -> Result<LeConnectionSnapshot, BondSmokeError> {
+    stack
+        .control()
+        .try_begin_fal_connection(plan.connect_request(index))
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::Connect(index),
+                format!("control lane rejected FAL connect: {error:?}"),
+            )
+        })?;
+
+    match wait_for_report(
+        stack.reports(),
+        tracker,
+        timeout,
+        |report, _| terminal_connection(report),
+    ) {
+        Ok(connection) => Ok(connection),
+        Err(WaitError::Timeout) => {
+            stack
+                .control()
+                .try_cancel_fal_connection()
+                .map_err(|error| {
+                    BondSmokeError::new(
+                        BondSmokeStage::Connect(index),
+                        format!(
+                            "connect timed out and cancel enqueue failed: {error:?}"
+                        ),
+                    )
+                })?;
+
+            let terminal = wait_for_report(
+                stack.reports(),
+                tracker,
+                Duration::from_secs(5),
+                |report, _| terminal_connection_after_cancel(report),
+            );
+
+            match terminal {
+                Ok(Some(connection)) => Err(BondSmokeError::new(
+                    BondSmokeStage::Connect(index),
+                    format!(
+                        "connect timed out; late success after cancel on handle 0x{:04X} generation {}",
+                        connection.connection_handle,
+                        connection.generation,
+                    ),
+                )),
+                Ok(None) => Err(BondSmokeError::new(
+                    BondSmokeStage::Connect(index),
+                    "connect timed out; controller cancellation reached terminal failure",
+                )),
+                Err(error) => Err(wait_stage(
+                    BondSmokeStage::Connect(index),
+                    error,
+                )),
+            }
+        }
+        Err(error) => Err(wait_stage(BondSmokeStage::Connect(index), error)),
+    }
+}
+
+#[cfg(windows)]
+fn terminal_connection(
+    report: &HciReport,
+) -> Result<Option<LeConnectionSnapshot>, String> {
+    match report {
+        HciReport::FalConnectionState(
+            FalConnectionState::Connected(connection),
+        ) => Ok(Some(connection.clone())),
+        HciReport::FalConnectionState(
+            FalConnectionState::ConnectedAfterCancel(connection),
+        ) => Ok(Some(connection.clone())),
+        HciReport::FalConnectionState(
+            FalConnectionState::Failed(failure),
+        ) => Err(format!("FAL connection failed: {failure:?}")),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(windows)]
+fn terminal_connection_after_cancel(
+    report: &HciReport,
+) -> Result<Option<Option<LeConnectionSnapshot>>, String> {
+    match report {
+        HciReport::FalConnectionState(
+            FalConnectionState::ConnectedAfterCancel(connection),
+        )
+        | HciReport::FalConnectionState(
+            FalConnectionState::Connected(connection),
+        ) => Ok(Some(Some(connection.clone()))),
+        HciReport::FalConnectionState(
+            FalConnectionState::Failed(_),
+        ) => Ok(Some(None)),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(windows)]
+fn encrypt_member(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+    index: usize,
+    connection: ConnectionToken,
+) -> Result<u8, BondSmokeError> {
+    stack
+        .control()
+        .try_begin_stored_encryption(
+            plan.encryption_request(index, connection),
+        )
+        .map_err(|error| {
+            BondSmokeError::new(
+                BondSmokeStage::Encrypt(index),
+                format!(
+                    "control lane rejected stored encryption: {error:?}"
+                ),
+            )
+        })?;
+
+    wait_for_report(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+        |report, _| match report {
+            HciReport::StoredEncryptionState(
+                StoredEncryptionState::Encrypted {
+                    connection: current,
+                    encryption_key_size,
+                },
+            ) if *current == connection => Ok(Some(*encryption_key_size)),
+            HciReport::StoredEncryptionState(
+                StoredEncryptionState::Failed(failure),
+            ) if failure.connection == connection => {
+                Err(format!("stored encryption failed: {failure:?}"))
+            }
+            _ => Ok(None),
+        },
+    )
+    .map_err(|error| wait_stage(BondSmokeStage::Encrypt(index), error))
+}
+
+#[cfg(windows)]
+fn cleanup_bond_sequence(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<(), BondSmokeError> {
+    drain_pending_reports(stack.reports(), tracker);
+
+    let mut cleanup_errors = Vec::new();
+    let mut tokens: Vec<ConnectionToken> = tracker
+        .connection_set
+        .connections
+        .iter()
+        .map(|connection| connection.token())
+        .collect();
+    tokens.reverse();
+
+    for token in tokens {
+        if !tracker.contains_connection(token) {
+            continue;
+        }
+
+        if let Err(error) = stack.control().try_disconnect(token) {
+            cleanup_errors.push(format!(
+                "disconnect 0x{:04X}/g{} enqueue failed: {error:?}",
+                token.connection_handle,
+                token.generation,
+            ));
+            continue;
+        }
+
+        let disconnected = wait_for_report(
+            stack.reports(),
+            tracker,
+            Duration::from_secs(4),
+            |report, _| match report {
+                HciReport::DisconnectState(
+                    DisconnectState::Disconnected {
+                        connection,
+                        ..
+                    },
+                ) if *connection == token => Ok(Some(())),
+                HciReport::DisconnectState(
+                    DisconnectState::Failed(failure),
+                ) if failure.connection == token => {
+                    Err(format!(
+                        "disconnect 0x{:04X}/g{} failed: {:?}",
+                        token.connection_handle,
+                        token.generation,
+                        failure.kind,
+                    ))
+                }
+                _ => Ok(None),
+            },
+        );
+
+        if let Err(error) = disconnected {
+            cleanup_errors.push(format!(
+                "disconnect 0x{:04X}/g{}: {}",
+                token.connection_handle,
+                token.generation,
+                describe_wait_error(error),
+            ));
+            continue;
+        }
+
+        let removed = wait_for_report(
+            stack.reports(),
+            tracker,
+            Duration::from_secs(2),
+            |_report, tracker| {
+                Ok((!tracker.contains_connection(token)).then_some(()))
+            },
+        );
+        if let Err(error) = removed {
+            cleanup_errors.push(format!(
+                "connection-set did not retire 0x{:04X}/g{}: {}",
+                token.connection_handle,
+                token.generation,
+                describe_wait_error(error),
+            ));
+        }
+    }
+
+    if matches!(tracker.attach, Some(OperationalAttachState::Ready)) {
+        match stack.control().try_clear_controller_privacy() {
+            Ok(()) => {
+                let privacy = wait_for_report(
+                    stack.reports(),
+                    tracker,
+                    Duration::from_secs(4),
+                    |report, _| match report {
+                        HciReport::ControllerPrivacyState(
+                            ControllerPrivacyState::Idle,
+                        ) => Ok(Some(())),
+                        HciReport::ControllerPrivacyState(
+                            ControllerPrivacyState::Failed(failure),
+                        ) => Err(format!(
+                            "privacy cleanup failed: {failure:?}"
+                        )),
+                        _ => Ok(None),
+                    },
+                );
+                if let Err(error) = privacy {
+                    cleanup_errors.push(format!(
+                        "privacy cleanup: {}",
+                        describe_wait_error(error),
+                    ));
+                }
+            }
+            Err(error) => cleanup_errors.push(format!(
+                "privacy cleanup enqueue failed: {error:?}"
+            )),
+        }
+    }
+
+    if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(BondSmokeError::new(
+            BondSmokeStage::Cleanup,
+            cleanup_errors.join("; "),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_report<T>(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    mut inspect: impl FnMut(
+        &HciReport,
+        &BondSmokeTracker,
+    ) -> Result<Option<T>, String>,
+) -> Result<T, WaitError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match reports.try_recv() {
+            Ok(report) => {
+                tracker.observe(&report);
+                match inspect(&report, tracker) {
+                    Ok(Some(value)) => return Ok(value),
+                    Ok(None) => {}
+                    Err(error) => return Err(WaitError::Terminal(error)),
+                }
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return Err(WaitError::Timeout);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err(WaitError::Disconnected)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn drain_pending_reports(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+) {
+    while let Ok(report) = reports.try_recv() {
+        tracker.observe(&report);
+    }
+}
+
+fn wait_stage(stage: BondSmokeStage, error: WaitError) -> BondSmokeError {
+    BondSmokeError::new(stage, describe_wait_error(error))
+}
+
+fn describe_wait_error(error: WaitError) -> String {
+    match error {
+        WaitError::Timeout => "timed out waiting for HCI report".into(),
+        WaitError::Disconnected => "HCI report lane disconnected".into(),
+        WaitError::Terminal(detail) => detail,
+    }
+}
+
+fn verify_bond_unchanged(
+    root: &std::path::Path,
+    before: &BondStoreFingerprint,
+) -> Result<(), BondSmokeError> {
+    let after = fingerprint_bond_store(root).map_err(|error| {
+        BondSmokeError::new(BondSmokeStage::BondIntegrity, error.0)
+    })?;
+    if &after != before {
+        return Err(BondSmokeError::new(
+            BondSmokeStage::BondIntegrity,
+            "bond store changed during Review-2B HIL",
+        ));
+    }
+    Ok(())
 }
 
 pub fn format_address_le(address: [u8; 6]) -> String {
