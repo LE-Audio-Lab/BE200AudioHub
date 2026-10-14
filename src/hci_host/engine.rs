@@ -22,7 +22,7 @@ use crate::transport::{
 
 use super::{
     connection::{
-        ConnectionEvent, DisconnectAction, DisconnectConfigError,
+        ConnectionEvent, ConnectionToken, DisconnectAction, DisconnectConfigError,
         DisconnectEvent, DisconnectState, DisconnectTransaction,
         FalConnectAction, FalConnectConfigError, FalConnectRequest,
         FalConnectTransaction, FalConnectionState,
@@ -54,6 +54,11 @@ pub enum EngineFault {
     FalConnectConfig(FalConnectConfigError),
     DisconnectConfig(DisconnectConfigError),
     StoredEncryptionConfig(StoredEncryptionConfigError),
+    StaleConnection {
+        connection_handle: u16,
+        requested_generation: u64,
+        current_generation: Option<u64>,
+    },
     DeviceEventBacklogFull,
 }
 
@@ -250,15 +255,18 @@ impl HciEngine {
             return Err(EngineFault::InvalidState);
         }
 
-        let Some(connection) =
-            self.device.le_connection(request.connection_handle)
-        else {
-            return Err(EngineFault::InvalidState);
-        };
+        self.validate_connection_token(request.connection)?;
+        let connection = self
+            .device
+            .le_connection(request.connection.connection_handle)
+            .expect("validated live connection missing from Bumble");
 
-        if self.device.is_encrypted_on_handle(request.connection_handle) {
+        if self
+            .device
+            .is_encrypted_on_handle(request.connection.connection_handle)
+        {
             self.stored_encryption_state = StoredEncryptionState::Encrypted {
-                connection_handle: request.connection_handle,
+                connection: request.connection,
                 encryption_key_size: connection.encryption_key_size,
             };
             return Ok(());
@@ -278,17 +286,18 @@ impl HciEngine {
 
     pub fn begin_disconnect(
         &mut self,
-        connection_handle: u16,
+        connection: ConnectionToken,
     ) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.disconnect_transaction.is_some()
-            || !self.device.is_connected_on_handle(connection_handle)
         {
             return Err(EngineFault::InvalidState);
         }
 
+        self.validate_connection_token(connection)?;
+
         let (transaction, command) =
-            DisconnectTransaction::begin(connection_handle)
+            DisconnectTransaction::begin(connection)
                 .map_err(EngineFault::DisconnectConfig)?;
 
         self.link.handle_command(0, command);
@@ -296,6 +305,30 @@ impl HciEngine {
 
         self.disconnect_transaction = Some(transaction);
         self.disconnect_state = DisconnectState::Submitting;
+        Ok(())
+    }
+
+    fn validate_connection_token(
+        &self,
+        connection: ConnectionToken,
+    ) -> Result<(), EngineFault> {
+        let current_generation = self
+            .connection_generations
+            .get(&connection.connection_handle)
+            .copied();
+
+        if current_generation != Some(connection.generation)
+            || !self
+                .device
+                .is_connected_on_handle(connection.connection_handle)
+        {
+            return Err(EngineFault::StaleConnection {
+                connection_handle: connection.connection_handle,
+                requested_generation: connection.generation,
+                current_generation,
+            });
+        }
+
         Ok(())
     }
 
@@ -703,19 +736,20 @@ impl HciEngine {
                     StoredEncryptionState::AwaitingChange;
             }
             StoredEncryptionAction::Encrypted {
-                connection_handle,
+                connection,
                 encryption_key_size,
             } => {
+                self.validate_connection_token(connection)?;
                 if !self
                     .device
-                    .is_encrypted_on_handle(connection_handle)
+                    .is_encrypted_on_handle(connection.connection_handle)
                 {
                     return Err(EngineFault::InvalidState);
                 }
                 self.stored_encryption_transaction = None;
                 self.stored_encryption_state =
                     StoredEncryptionState::Encrypted {
-                        connection_handle,
+                        connection,
                         encryption_key_size,
                     };
             }
@@ -758,12 +792,12 @@ impl HciEngine {
                 self.disconnect_state = DisconnectState::AwaitingEvent;
             }
             DisconnectAction::Disconnected {
-                connection_handle,
+                connection,
                 event_reason,
             } => {
                 self.disconnect_transaction = None;
                 self.disconnect_state = DisconnectState::Disconnected {
-                    connection_handle,
+                    connection,
                     event_reason,
                 };
             }
@@ -1600,7 +1634,7 @@ mod tests {
         engine
             .begin_stored_encryption(
                 super::super::security::StoredEncryptionRequest {
-                    connection_handle: 0x0800,
+                    connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
                     key: super::super::security::StoredLeKeyMaterial::
                         secure_connections([0x5a; 16]),
                 },
@@ -1643,7 +1677,7 @@ mod tests {
         assert_eq!(
             engine.stored_encryption_state(),
             &StoredEncryptionState::Encrypted {
-                connection_handle: 0x0800,
+                connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
                 encryption_key_size: 0,
             }
         );
@@ -1653,7 +1687,7 @@ mod tests {
         engine
             .begin_stored_encryption(
                 super::super::security::StoredEncryptionRequest {
-                    connection_handle: 0x0800,
+                    connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
                     key: super::super::security::StoredLeKeyMaterial::
                         secure_connections([0x5a; 16]),
                 },
@@ -1686,12 +1720,12 @@ mod tests {
         assert!(engine.device().is_connected_on_handle(0x0800));
 
         assert_eq!(
-            engine.begin_disconnect(0x0801),
+            engine.begin_disconnect(ConnectionToken { connection_handle: 0x0801, generation: 1 }),
             Err(EngineFault::InvalidState)
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
 
-        engine.begin_disconnect(0x0800).unwrap();
+        engine.begin_disconnect(ConnectionToken { connection_handle: 0x0800, generation: 1 }).unwrap();
         let command = rx.try_recv().unwrap();
         let HostPacket::Command(bytes) = command else {
             panic!("expected HCI Disconnect command");
@@ -1724,7 +1758,7 @@ mod tests {
         assert_eq!(
             engine.disconnect_state(),
             &DisconnectState::Disconnected {
-                connection_handle: 0x0800,
+                connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
                 event_reason: 0x16,
             }
         );
