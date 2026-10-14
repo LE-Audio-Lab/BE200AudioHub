@@ -99,6 +99,13 @@ impl AclCreditAudit {
         retired
     }
 
+    pub fn flush_all(&mut self) -> usize {
+        let retired = self.total_in_flight;
+        self.per_handle.clear();
+        self.total_in_flight = 0;
+        retired
+    }
+
     pub fn in_flight(&self) -> usize {
         self.total_in_flight
     }
