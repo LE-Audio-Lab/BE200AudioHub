@@ -144,7 +144,7 @@ pub enum GattAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Phase {
-    ExchangeMtu,
+    ExchangeMtu { client_rx_mtu: u16 },
     DiscoverServices { next: u16 },
     DiscoverCharacteristics { next: u16, end: u16 },
     DiscoverDescriptors { next: u16, end: u16 },
@@ -162,6 +162,7 @@ enum Phase {
     Failed,
 }
 
+#[derive(Debug)]
 pub struct GattTransaction {
     request_id: GattRequestId,
     connection: ConnectionToken,
@@ -182,7 +183,7 @@ impl GattTransaction {
         let mtu = current_mtu.max(ATT_DEFAULT_MTU);
         let (phase, pdu) = match &request.operation {
             GattOperation::ExchangeMtu { client_rx_mtu } => (
-                Phase::ExchangeMtu,
+                Phase::ExchangeMtu { client_rx_mtu: *client_rx_mtu },
                 AttPdu::ExchangeMtuRequest {
                     client_rx_mtu: *client_rx_mtu,
                 },
@@ -354,23 +355,13 @@ impl GattTransaction {
             if *error_code == ATT_ATTRIBUTE_NOT_FOUND_ERROR {
                 match self.phase {
                     Phase::DiscoverServices { .. } => {
-                        return self.complete(GattResult::Services(
-                            std::mem::take(&mut self.services),
-                        ));
+                        return self.complete_services();
                     }
                     Phase::DiscoverCharacteristics { end, .. } => {
-                        finalize_characteristics(
-                            &mut self.characteristics,
-                            end,
-                        );
-                        return self.complete(GattResult::Characteristics(
-                            std::mem::take(&mut self.characteristics),
-                        ));
+                        return self.complete_characteristics(end);
                     }
                     Phase::DiscoverDescriptors { .. } => {
-                        return self.complete(GattResult::Descriptors(
-                            std::mem::take(&mut self.descriptors),
-                        ));
+                        return self.complete_descriptors();
                     }
                     _ => {}
                 }
@@ -385,10 +376,7 @@ impl GattTransaction {
                     Phase::ReadBlob { handle, .. } => handle,
                     _ => unreachable!(),
                 };
-                return self.complete(GattResult::Value {
-                    attribute_handle: handle,
-                    value: std::mem::take(&mut self.read_value),
-                });
+                return self.complete_value(handle);
             }
             return self.fail(GattFailureKind::Att {
                 request_opcode: *request_opcode_in_error,
@@ -398,10 +386,9 @@ impl GattTransaction {
         }
 
         match self.phase.clone() {
-            Phase::ExchangeMtu => match pdu {
+            Phase::ExchangeMtu { client_rx_mtu } => match pdu {
                 AttPdu::ExchangeMtuResponse { server_rx_mtu } => {
-                    self.mtu = self
-                        .requested_mtu()
+                    self.mtu = client_rx_mtu
                         .min(server_rx_mtu)
                         .max(ATT_DEFAULT_MTU);
                     self.complete(GattResult::Mtu { mtu: self.mtu })
@@ -421,9 +408,7 @@ impl GattTransaction {
                         Err(error) => return self.fail(error),
                     };
                     if entries.is_empty() {
-                        return self.complete(GattResult::Services(
-                            std::mem::take(&mut self.services),
-                        ));
+                        return self.complete_services();
                     }
                     let mut last_end = 0u16;
                     for (handle, end_group_handle, value) in entries {
@@ -450,9 +435,7 @@ impl GattTransaction {
                         last_end = end_group_handle;
                     }
                     if last_end == 0xFFFF {
-                        self.complete(GattResult::Services(
-                            std::mem::take(&mut self.services),
-                        ))
+                        self.complete_services()
                     } else {
                         let next = last_end.saturating_add(1);
                         self.phase = Phase::DiscoverServices { next };
@@ -478,9 +461,7 @@ impl GattTransaction {
                             &mut self.characteristics,
                             end,
                         );
-                        return self.complete(GattResult::Characteristics(
-                            std::mem::take(&mut self.characteristics),
-                        ));
+                        return self.complete_characteristics(end);
                     }
                     let mut last_decl = 0u16;
                     for (declaration_handle, value) in entries {
@@ -518,13 +499,7 @@ impl GattTransaction {
                         last_decl = declaration_handle;
                     }
                     if last_decl >= end {
-                        finalize_characteristics(
-                            &mut self.characteristics,
-                            end,
-                        );
-                        self.complete(GattResult::Characteristics(
-                            std::mem::take(&mut self.characteristics),
-                        ))
+                        self.complete_characteristics(end)
                     } else {
                         let next = last_decl.saturating_add(1);
                         self.phase =
@@ -547,9 +522,7 @@ impl GattTransaction {
                         Err(error) => return self.fail(error),
                     };
                     if entries.is_empty() {
-                        return self.complete(GattResult::Descriptors(
-                            std::mem::take(&mut self.descriptors),
-                        ));
+                        return self.complete_descriptors();
                     }
                     let mut last = 0u16;
                     for (handle, uuid) in entries {
@@ -564,9 +537,7 @@ impl GattTransaction {
                         last = handle;
                     }
                     if last >= end {
-                        self.complete(GattResult::Descriptors(
-                            std::mem::take(&mut self.descriptors),
-                        ))
+                        self.complete_descriptors()
                     } else {
                         let next = last.saturating_add(1);
                         self.phase =
@@ -587,10 +558,7 @@ impl GattTransaction {
                     let part_len = attribute_value.len();
                     self.read_value = attribute_value;
                     if part_len < chunk {
-                        self.complete(GattResult::Value {
-                            attribute_handle: handle,
-                            value: std::mem::take(&mut self.read_value),
-                        })
+                        self.complete_value(handle)
                     } else {
                         let offset = u16::try_from(part_len)
                             .unwrap_or(u16::MAX);
@@ -611,10 +579,7 @@ impl GattTransaction {
                     let part_len = part_attribute_value.len();
                     self.read_value.extend_from_slice(&part_attribute_value);
                     if part_len < chunk {
-                        self.complete(GattResult::Value {
-                            attribute_handle: handle,
-                            value: std::mem::take(&mut self.read_value),
-                        })
+                        self.complete_value(handle)
                     } else {
                         let next = offset.saturating_add(
                             u16::try_from(part_len).unwrap_or(u16::MAX),
@@ -659,11 +624,34 @@ impl GattTransaction {
         }
     }
 
-    fn requested_mtu(&self) -> u16 {
-        match self.phase {
-            Phase::ExchangeMtu => self.mtu,
-            _ => self.mtu,
-        }
+    fn complete_services(&mut self) -> GattAction {
+        let services = std::mem::take(&mut self.services);
+        self.complete(GattResult::Services(services))
+    }
+
+    fn complete_characteristics(
+        &mut self,
+        end_group_handle: u16,
+    ) -> GattAction {
+        finalize_characteristics(
+            &mut self.characteristics,
+            end_group_handle,
+        );
+        let characteristics = std::mem::take(&mut self.characteristics);
+        self.complete(GattResult::Characteristics(characteristics))
+    }
+
+    fn complete_descriptors(&mut self) -> GattAction {
+        let descriptors = std::mem::take(&mut self.descriptors);
+        self.complete(GattResult::Descriptors(descriptors))
+    }
+
+    fn complete_value(&mut self, attribute_handle: u16) -> GattAction {
+        let value = std::mem::take(&mut self.read_value);
+        self.complete(GattResult::Value {
+            attribute_handle,
+            value,
+        })
     }
 
     fn complete(&mut self, result: GattResult) -> GattAction {
@@ -874,7 +862,7 @@ mod tests {
     }
 
     fn drive_send(
-        transaction: &mut GattTransaction,
+        _transaction: &mut GattTransaction,
         action: GattAction,
     ) -> AttPdu {
         match action {
