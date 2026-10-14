@@ -199,6 +199,11 @@ pub enum FalConnectConfigError {
     ZeroSupervisionTimeout,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeConnectionSetSnapshot {
+    pub connections: Vec<LeConnectionSnapshot>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeConnectionSnapshot {
     pub connection_handle: u16,
