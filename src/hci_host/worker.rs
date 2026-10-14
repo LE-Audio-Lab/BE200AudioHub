@@ -255,6 +255,9 @@ fn process_command(
         HciCommand::StopPassiveExtendedScan => {
             engine.stop_passive_extended_scan()
         }
+        HciCommand::ReadControllerIdentity => {
+            engine.begin_controller_identity_probe()
+        }
         HciCommand::ConfigureControllerPrivacy(config) => {
             engine.begin_controller_privacy(config)
         }
@@ -301,6 +304,12 @@ fn publish_state_transitions(
                     .map_err(map_report_error)?;
             }
         }
+    }
+
+    if let Some(identity) = engine.take_controller_identity_result() {
+        report_tx
+            .try_send(HciReport::ControllerIdentity(identity))
+            .map_err(map_report_error)?;
     }
 
     let scan_state = engine.passive_scan_state();
