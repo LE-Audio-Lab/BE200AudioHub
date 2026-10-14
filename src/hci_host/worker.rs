@@ -2,10 +2,10 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
-use crate::transport::{
-    packet::ControllerPacket,
-    worker::TransportTx,
-};
+use crate::transport::worker::TransportTx;
+
+#[cfg(test)]
+use crate::transport::packet::ControllerPacket;
 
 use super::{
     engine::{
