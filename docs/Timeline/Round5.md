@@ -774,3 +774,151 @@ Runtime + Async Transport 产品底座
 - HIL 只验证真实世界假设；
 
 作为默认工程门槛。
+
+---
+
+## 21. Review-2A 封板：Firmware Bypass + HCI Host Attach / Capabilities / Scan
+
+### 21.1 Synthetic attach failure 根因
+
+Review-2A 开始时 `hci-wip` 共 74 tests，其中 6 个失败集中在 minimal resetless attach / scan fixture。
+
+根因不是 worker 或 scan FSM，而是 pinned Bumble-RS 对部分 status-only Command Complete 的解析与 Device host-initialization predicate 不一致：
+
+- `Set Event Mask`
+- `Set Event Mask Page 2`
+- `LE Set Event Mask`
+- `LE Write Suggested Default Data Length`
+
+这些未列入 typed return table 的 completion 被解析成 `ReturnParameters::Raw`，而 Device host initialization 只接受 `ReturnParameters::Status`。
+
+Review 修复：
+
+- 在 HCI adapter 边界仅对白名单 opcode 做 `Raw(1 byte) -> Status` normalization；
+- 未知 Raw Command Complete 保持 Raw；
+- 不修改 Bumble-RS upstream；
+- 加 deterministic regression tests。
+
+修复后原 6 个 failures 收敛并全部关闭。
+
+### 21.2 Scan address contract 修正
+
+Extended Advertising synthetic fixture 原先漏掉 Bumble public-address qualifier。Review 保留带 address-type qualifier 的 rendered address，同时保留独立 `address_type` 字段。
+
+这与 Round2 已冻结的规则一致：**Bluetooth address bytes/string 不能替代 address type。**
+
+### 21.3 Firmware bootstrap 旁路接口
+
+Review-2A HIL 前发现 cold BE200 尚未加载 firmware。
+
+决定不把 firmware bootstrap 接入 HCI adapter / async Transport，而是在 L3 建立独立一次性旁路：
+
+```text
+Review2 / L0
+    |
+    +-- FirmwareBypassPort
+    |       |
+    |       +-- Be200FirmwareLoader
+    |               |
+    |               +-- PinnedFirmware planner
+    |
+    +-- release interface 0
+            |
+            v
+       Async Transport
+            |
+            v
+         HCI Host
+```
+
+职责：
+
+- FirmwareBypassPort：唯一 `8087:0036` 枚举、interface 0 独立 claim/release、EP0 HCI command、EP81 Event、EP02 Secure Send、vendor event framing、60 s firmware-download deadline。
+- Be200FirmwareLoader：不依赖 rusb，只依赖窄 `FirmwareIo`，完整 one-shot sequence 可由 fake Cargo-test 约束。
+- PinnedFirmware：exact SFI/DDC SHA256、RSA+ECDSA header、3 个 ECDSA header fragments、DATA <=252 B fragmentation、boot address/build/hardware profile guard。
+
+封盘 Experiment 中保留的最小顺序：
+
+```text
+FC05 Read Version
+  -> Operational 0x03: no-op
+  -> Bootloader 0x01:
+       HW/SBE guard
+       -> preboot DDC
+       -> Secure Send
+       -> FF/06
+       -> FC01 Boot
+       -> FF/02
+       -> DSBR default
+       -> FC05 require Operational
+       -> postboot DDC
+       -> release
+```
+
+明确抛弃 old Experiment CLI、inspect/plan/preflight 三套入口、PCAP replay oracle、旧 AppError/logging、cwd firmware magic、retry/reset/power-cycle fallback。
+
+### 21.4 软件验收
+
+Review-2A promotion 前最终软件 gate：
+
+```text
+cargo test
+91 passed; 0 failed
+
+cargo check
+PASS
+
+cargo build
+PASS
+```
+
+HCI Host 随后从 `hci-wip` feature gate 提升为默认 main component：Bumble-RS HCI/Host 和 crossbeam 成为 normal dependencies，`hci_host` / `review2` 默认编译，默认 `cargo check/build` 必须直接覆盖 HCI Host。
+
+Promotion acceptance 同样为 91/91 tests、cargo check PASS、cargo build PASS。
+
+### 21.5 Review-2A HIL PASS
+
+真实 HIL 路径：
+
+```text
+Firmware bypass
+-> Bootloader detected
+-> pinned firmware one-shot load
+-> Operational
+-> release interface 0
+-> async Transport reopen
+-> resetless HCI attach
+-> capabilities
+-> passive extended scan
+-> clean shutdown
+```
+
+实测：
+
+```text
+Firmware bypass: Booted
+Capabilities: PASS
+Scan: PASS reports=2 observations=2 truncated=false
+  addr=6B:FE:B1:FC:C5:A6 type=1 rssi=-80 name=Galaxy Buds3 Pro (2F23)
+  addr=72:B5:83:DC:64:40 type=1 rssi=-71 name=Galaxy Buds3 Pro (2F23)
+Target seen: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+结论：
+
+> **Review-2A resetless attach / controller capabilities / passive extended scan 已 software + HIL 双重封板。**
+
+HIL 没有建立 ACL、发 SMP、改 Bond、清除 LTK/IRK/SIRK，也没有 HCI Reset。
+
+### 21.6 当前状态
+
+```text
+Review-1 Runtime / Async Transport       COMPLETE
+Review-2A HCI attach/capabilities/scan   COMPLETE
+Review-2B ACL/privacy/stored security    NEXT
+Review-2C ATT/GATT                       pending
+Review-2D ISO Host                       pending
+```
+
+Review-2B 继续遵守：FAL / Resolving List 属于 HCI Host controller primitives；pairing policy / set semantics 仍属于 Control；默认不重新配对；stored-LTK 路径优先；HIL 失败必须尽量还原为 deterministic fixture。
