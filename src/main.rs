@@ -2,6 +2,8 @@ mod architecture;
 mod runtime;
 mod platform;
 mod transport;
+
+#[cfg(feature = "hci-wip")]
 mod hci_host;
 
 fn main() {
