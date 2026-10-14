@@ -268,6 +268,25 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_wins_under_sustained_tx_pressure() {
+        let state = Arc::new(Mutex::new(TestState::default()));
+        let factory_state = state.clone();
+        let (tx, _hci_rx, join) = spawn_transport_worker(
+            move || Ok(RecordingBackend::new(factory_state)),
+            64,
+            8,
+        );
+
+        for i in 0u8..32 {
+            tx.try_send(HostPacket::Iso(vec![i; 16])).unwrap();
+        }
+        tx.cancel();
+
+        assert_eq!(join.join(), TransportWorkerExit::Cancelled);
+        assert!(state.lock().unwrap().cancelled);
+    }
+
+    #[test]
     fn failed_backend_open_is_reported_without_starting_loop() {
         let (_tx, _hci_rx, join) =
             spawn_transport_worker::<RecordingBackend, _>(
