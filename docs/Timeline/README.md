@@ -8,8 +8,8 @@
 
 | 文件 | 作用 |
 |---|---|
-| **[TIMELINE.md](./TIMELINE.md)** | **跨四轮总索引**：里程碑、状态边界、重大技术决策的前后演变、关键 commit、各类证据导航 |
-| **[BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)** | **独立故障与修复记录**：48 个按轮编号的故障/纠偏项、17 个未解决或需小心处理的 Quirk/风险；包含现象、根因、错误修复过程、最终证据 |
+| **[TIMELINE.md](./TIMELINE.md)** | **跨 Round 总索引**：里程碑、状态边界、重大技术决策的前后演变、关键 commit、各类证据导航 |
+| **[BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)** | **独立故障与修复记录**：按 Round 编号的故障/纠偏项与未解决 Quirk/风险；包含现象、根因、错误修复过程、最终证据 |
 | [AllRounds.md](./AllRounds.md) | **原文全量合订版**：四份 Round 文档依序拼接，有章节跳转和来源身份 |
 | [Round1.md](./Round1.md) | **Round1 原文**：驱动/WinUSB、Intel OEM Signed SFI 冷启、HCI、BLE Passive Scan、初期选型反思 |
 | [Round2.md](./Round2.md) | **Round2 原文**：Bumble-RS Host no-reset、扫描、首次真实 LE ACL、后续 R2.4 Pairing 的设计（当时未完成） |
