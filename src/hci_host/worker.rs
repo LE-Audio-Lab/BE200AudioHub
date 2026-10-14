@@ -12,6 +12,7 @@ use super::{
         EngineFault, HciEngine, OperationalAttachState, PassiveScanState,
     },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
+    privacy::ControllerPrivacyState,
 };
 
 const CONTROL_BUDGET_PER_TURN: usize = 4;
@@ -70,6 +71,7 @@ fn run_loop(
     let mut engine = HciEngine::new(transport_tx);
     let mut last_attach_state = engine.attach_state();
     let mut last_scan_state = engine.passive_scan_state();
+    let mut last_privacy_state = engine.controller_privacy_state().clone();
 
     loop {
         match stop_rx.try_recv() {
@@ -93,6 +95,7 @@ fn run_loop(
                         &mut engine,
                         &mut last_attach_state,
                         &mut last_scan_state,
+                        &mut last_privacy_state,
                         &report_tx,
                     ) {
                         return HciWorkerExit::Faulted(fault);
@@ -176,6 +179,7 @@ fn run_loop(
                     &mut engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
+                    &mut last_privacy_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -200,6 +204,7 @@ fn run_loop(
                     &mut engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
+                    &mut last_privacy_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -223,6 +228,9 @@ fn process_command(
         HciCommand::StopPassiveExtendedScan => {
             engine.stop_passive_extended_scan()
         }
+        HciCommand::ConfigureControllerPrivacy(config) => {
+            engine.begin_controller_privacy(config)
+        }
     }
 }
 
@@ -230,6 +238,7 @@ fn publish_state_transitions(
     engine: &mut HciEngine,
     last_state: &mut OperationalAttachState,
     last_scan_state: &mut PassiveScanState,
+    last_privacy_state: &mut ControllerPrivacyState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
@@ -260,6 +269,16 @@ fn publish_state_transitions(
         report_tx
             .try_send(HciReport::ScanComplete(summary))
             .map_err(map_report_error)?;
+    }
+
+    let privacy_state = engine.controller_privacy_state().clone();
+    if privacy_state != *last_privacy_state {
+        report_tx
+            .try_send(HciReport::ControllerPrivacyState(
+                privacy_state.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_privacy_state = privacy_state;
     }
 
     Ok(())
