@@ -3,7 +3,7 @@ mod runtime;
 mod platform;
 mod transport;
 
-#[cfg(feature = "hci-wip")]
+#[cfg(any(feature = "hci-wip", test))]
 mod hci_host;
 
 fn main() {
