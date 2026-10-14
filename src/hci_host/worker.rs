@@ -412,6 +412,10 @@ mod tests {
                 FalConnectRequest, LeInitiationParameters,
                 LePeerIdentity,
             },
+            gatt::{
+                GattFailure, GattFailureKind, GattOperation, GattReport,
+                GattRequest,
+            },
             mailbox::hci_mailbox,
             privacy::{
                 ResolvingListConfig, ResolvingPeer,
@@ -779,6 +783,84 @@ mod tests {
             }
             other => panic!("expected connected report, got {other:?}"),
         }
+
+        control.request_stop().unwrap();
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
+    fn worker_routes_gatt_through_bounded_mailbox() {
+        let (control, ingress, reports, ports) =
+            hci_mailbox(32, 8, 24);
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(32);
+        let join = spawn_hci_worker(ports, transport_tx);
+
+        control.try_begin_operational_attach().unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_report(&reports);
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        ingress
+            .try_send_controller(ControllerPacket::Event(supported))
+            .unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_host_packet(&transport_rx);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+        let _ = recv_report(&reports);
+        let _ = recv_report(&reports);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+
+        let connection = match recv_report(&reports) {
+            HciReport::ConnectionSet(snapshot) => {
+                snapshot.connections[0].token()
+            }
+            other => panic!(
+                "expected connection-set report, got {other:?}"
+            ),
+        };
+
+        control
+            .try_begin_gatt(GattRequest {
+                request_id: 77,
+                connection,
+                operation: GattOperation::DiscoverServices,
+            })
+            .unwrap();
+
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::Gatt(GattReport::Failed(GattFailure {
+                request_id: 77,
+                connection,
+                kind: GattFailureKind::NotEncrypted,
+            }))
+        );
 
         control.request_stop().unwrap();
         assert_eq!(join.join(), HciWorkerExit::Stopped);
