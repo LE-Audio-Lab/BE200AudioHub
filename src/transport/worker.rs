@@ -147,6 +147,22 @@ fn run_loop<B: DeviceBackend>(
     }
 }
 
+#[cfg(windows)]
+pub fn spawn_be200_transport(
+    tx_capacity: usize,
+    hci_rx_capacity: usize,
+) -> (
+    TransportTx,
+    BoundedReceiver<ControllerPacket>,
+    TransportWorkerJoin,
+) {
+    spawn_transport_worker(
+        crate::platform::windows_be200::open_backend,
+        tx_capacity,
+        hci_rx_capacity,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
