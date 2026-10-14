@@ -2,12 +2,12 @@ use crate::{
     platform::backend::{
         BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TxEndpoint,
     },
-    runtime::mailbox::{BoundedSender, SendError},
 };
 
 use super::{
     packet::{ControllerPacket, ControllerPacketKind, HostPacket},
     reassembly::{PacketReassembler, ReassemblyError},
+    sink::{ControllerPacketSink, PacketSinkError},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,17 +37,17 @@ pub enum StepOutcome {
     Faulted(TransportFault),
 }
 
-pub struct TransportReactor<B: DeviceBackend> {
+pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     backend: B,
     state: ReactorState,
-    hci_rx: BoundedSender<ControllerPacket>,
+    hci_rx: S,
     event_rx: PacketReassembler,
     acl_rx: PacketReassembler,
     iso_rx: PacketReassembler,
 }
 
-impl<B: DeviceBackend> TransportReactor<B> {
-    pub fn new(backend: B, hci_rx: BoundedSender<ControllerPacket>) -> Self {
+impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
+    pub fn new(backend: B, hci_rx: S) -> Self {
         Self {
             backend,
             state: ReactorState::Stopped,
@@ -136,10 +136,10 @@ impl<B: DeviceBackend> TransportReactor<B> {
         };
 
         for packet in &packets {
-            if let Err(error) = self.hci_rx.try_send(packet.clone()) {
+            if let Err(error) = self.hci_rx.try_send_controller(packet.clone()) {
                 return self.fail(match error {
-                    SendError::Full => TransportFault::HciInboxFull,
-                    SendError::Disconnected => TransportFault::HciInboxDisconnected,
+                    PacketSinkError::Full => TransportFault::HciInboxFull,
+                    PacketSinkError::Disconnected => TransportFault::HciInboxDisconnected,
                 });
             }
         }
@@ -178,7 +178,7 @@ mod tests {
     fn reactor(
         hci_capacity: usize,
     ) -> (
-        TransportReactor<TestBackend>,
+        TransportReactor<TestBackend, crate::runtime::mailbox::BoundedSender<ControllerPacket>>,
         crate::runtime::mailbox::BoundedReceiver<ControllerPacket>,
     ) {
         let (tx, rx) = mailbox::bounded(hci_capacity);
