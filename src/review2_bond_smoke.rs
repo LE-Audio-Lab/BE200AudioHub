@@ -530,23 +530,34 @@ fn wait_encrypted(
     )
 }
 
+fn dual_encrypted(
+    tracker: &BondSmokeTracker,
+    expected: [ConnectionToken; 2],
+) -> bool {
+    tracker.connection_set.connections.len() == 2
+        && expected
+            .iter()
+            .all(|token| tracker.is_encrypted(*token))
+}
+
 fn wait_dual_encrypted(
     reports: &HciReportInbox,
     tracker: &mut BondSmokeTracker,
     timeout: Duration,
     expected: [ConnectionToken; 2],
 ) -> Result<(), BondSmokeRunError> {
+    if dual_encrypted(tracker, expected) {
+        return Ok(());
+    }
+
     wait_for_report(
         reports,
         tracker,
         timeout,
         "dual encrypted ACL",
         |report, tracker| match report {
-            HciReport::ConnectionSet(snapshot)
-                if snapshot.connections.len() == 2
-                    && expected
-                        .iter()
-                        .all(|token| tracker.is_encrypted(*token)) =>
+            HciReport::ConnectionSet(_)
+                if dual_encrypted(tracker, expected) =>
             {
                 Some(Ok(()))
             }
@@ -1313,6 +1324,37 @@ mod tests {
         ));
         assert!(tracker.contains_connection(token));
         assert!(tracker.is_encrypted(token));
+    }
+
+    #[test]
+    fn dual_encrypted_gate_accepts_already_observed_state() {
+        let first = ConnectionToken {
+            connection_handle: 0x0800,
+            generation: 1,
+        };
+        let second = ConnectionToken {
+            connection_handle: 0x0801,
+            generation: 2,
+        };
+        let mut tracker = BondSmokeTracker::default();
+        for (token, peer) in [(first, [1, 2, 3, 4, 5, 6]), (second, [7, 8, 9, 10, 11, 12])] {
+            tracker.connection_set.connections.push(
+                crate::hci_host::connection::LeConnectionSnapshot {
+                    connection_handle: token.connection_handle,
+                    generation: token.generation,
+                    role: 0,
+                    peer_address_le: peer,
+                    peer_address_type: 1,
+                    connection_interval: 24,
+                    peripheral_latency: 0,
+                    supervision_timeout: 42,
+                    encryption_enabled: 1,
+                    encryption_key_size: 16,
+                },
+            );
+        }
+
+        assert!(dual_encrypted(&tracker, [first, second]));
     }
 
     #[test]
