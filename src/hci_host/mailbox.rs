@@ -198,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn fal_cancel_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        control.try_cancel_fal_connection().unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::CancelFalConnection
+        );
+    }
+
+    #[test]
     fn control_and_controller_backpressure_are_independent() {
         let (control, ingress, _reports, _ports) = hci_mailbox(1, 1, 1);
 
