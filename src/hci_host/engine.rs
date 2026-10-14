@@ -472,10 +472,23 @@ impl HciEngine {
                 self.fal_connection_state =
                     FalConnectionState::AwaitingConnection;
             }
+            FalConnectAction::CancelAccepted => {
+                self.fal_connection_state =
+                    FalConnectionState::CancelAccepted;
+            }
+            FalConnectAction::CancelRejected { status } => {
+                self.fal_connection_state =
+                    FalConnectionState::CancelRejected { status };
+            }
             FalConnectAction::Connected(connection) => {
                 self.fal_connection_transaction = None;
                 self.fal_connection_state =
                     FalConnectionState::Connected(connection);
+            }
+            FalConnectAction::ConnectedAfterCancel(connection) => {
+                self.fal_connection_transaction = None;
+                self.fal_connection_state =
+                    FalConnectionState::ConnectedAfterCancel(connection);
             }
             FalConnectAction::Failed(failure) => {
                 self.fal_connection_transaction = None;
