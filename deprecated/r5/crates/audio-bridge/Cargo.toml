@@ -1,0 +1,9 @@
+[package]
+name = "audio-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+device-policy = { path = "../device-policy" }
+bumble-codecs = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bbac2a6803b8cab0920ab725a23aa408fc4fed85" }

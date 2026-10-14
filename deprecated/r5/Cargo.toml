@@ -1,0 +1,31 @@
+[package]
+name = "be200audiohub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+members = [
+    ".",
+    "crates/be200-runtime",
+    "crates/bumble-adapter",
+    "crates/audio-capture-win32",
+    "crates/audio-bridge",
+    "crates/bap-client",
+    "crates/device-policy",
+    "crates/iso-scheduler",
+    "crates/recovery-supervisor",
+]
+resolver = "2"
+
+[[bin]]
+name = "be200hub"
+path = "src/main.rs"
+
+[dependencies]
+bap-client = { path = "crates/bap-client" }
+bumble-adapter = { path = "crates/bumble-adapter" }
+log = { version = "0.4", features = ["std"] }
+rusb = { version = "0.9", features = ["vendored"] }
+sha2 = "0.10"
+audio-bridge = { path = "crates/audio-bridge" }

@@ -1,0 +1,231 @@
+//! USB descriptor discovery and a separate guarded WinUSB claim/release probe.
+//! The probe does not send HCI or reset the controller.
+use crate::error::{AppError, Result};
+use rusb::{self, Device, DeviceDescriptor, DeviceHandle, GlobalContext};
+
+pub const BE200_VID: u16 = 0x8087;
+pub const BE200_PID: u16 = 0x0036;
+
+const BLUETOOTH_HCI_CLASS: (u8, u8, u8) = (0xe0, 0x01, 0x01);
+
+pub fn parse_vid_pid(s: &str) -> Result<(u16,u16)> {
+    let (a,b) = s.split_once(':').ok_or_else(|| AppError::Usage(
+        "Expected hexadecimal VID:PID, e.g. 8087:0036".into()))?;
+    if a.len()!=4 || b.len()!=4 || !a.bytes().all(|c| c.is_ascii_hexdigit()) ||
+        !b.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::Usage("VID:PID must contain exactly four hex digits on each side".into()));
+    }
+    Ok((u16::from_str_radix(a,16).unwrap(),u16::from_str_radix(b,16).unwrap()))
+}
+
+fn location(dev: &Device<GlobalContext>) -> String {
+    let ports = dev.port_numbers().map(|p| {
+        if p.is_empty() { "?".into() } else { p.iter().map(u8::to_string).collect::<Vec<_>>().join(".") }
+    }).unwrap_or_else(|_| "?".into());
+    format!("bus={} addr={} ports={}",dev.bus_number(),dev.address(),ports)
+}
+fn describe(dev:&Device<GlobalContext>, desc:&DeviceDescriptor) {
+    println!("{:04x}:{:04x}  {}  usb={:04x} class={:02x}/{:02x}/{:02x} configurations={}",
+        desc.vendor_id(),desc.product_id(),location(dev),
+        desc.usb_version().major() as u16 * 0x100 + desc.usb_version().minor() as u16 * 0x10 + desc.usb_version().sub_minor() as u16,
+        desc.class_code(),desc.sub_class_code(),desc.protocol_code(),desc.num_configurations());
+}
+fn devices() -> Result<rusb::DeviceList<GlobalContext>> { Ok(rusb::devices()?) }
+
+fn descriptor_is_bluetooth_hci(desc: &DeviceDescriptor) -> bool {
+    (desc.class_code(), desc.sub_class_code(), desc.protocol_code()) == BLUETOOTH_HCI_CLASS
+}
+
+fn device_has_bluetooth_hci_interface(
+    dev: &Device<GlobalContext>,
+    desc: &DeviceDescriptor,
+) -> Result<bool> {
+    if descriptor_is_bluetooth_hci(desc) {
+        return Ok(true);
+    }
+
+    for index in 0..desc.num_configurations() {
+        let config = dev.config_descriptor(index)?;
+        for interface in config.interfaces() {
+            for setting in interface.descriptors() {
+                if (
+                    setting.class_code(),
+                    setting.sub_class_code(),
+                    setting.protocol_code(),
+                ) == BLUETOOTH_HCI_CLASS
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// R2 hot-path preflight.
+///
+/// This is intentionally descriptor-only and stays entirely in Rust:
+/// - exactly one 8087:0036 must be present;
+/// - it must expose the Bluetooth Primary Controller class triple;
+/// - no device handle is opened;
+/// - no interface is claimed;
+/// - no HCI command, reset, firmware load, or PnP/PowerShell query is issued.
+///
+/// Whether WinUSB can actually claim the interface is then proven by the
+/// Bumble USB transport itself. The heavyweight PowerShell driver audit remains
+/// available as the explicit `driver verify` diagnostic command.
+pub fn r2_fast_preflight() -> Result<()> {
+    let available = devices()?;
+    let mut target: Option<(Device<GlobalContext>, DeviceDescriptor)> = None;
+
+    for dev in available.iter() {
+        let Ok(desc) = dev.device_descriptor() else { continue; };
+        if desc.vendor_id() != BE200_VID || desc.product_id() != BE200_PID {
+            continue;
+        }
+        if target.is_some() {
+            return Err(AppError::Driver(
+                "Multiple 8087:0036 devices found; refusing ambiguous R2 attach".into(),
+            ));
+        }
+        target = Some((dev, desc));
+    }
+
+    let (device, desc) = target.ok_or(AppError::DeviceNotFound(BE200_VID, BE200_PID))?;
+    if !device_has_bluetooth_hci_interface(&device, &desc)? {
+        return Err(AppError::Driver(format!(
+            "8087:0036 at {} does not expose Bluetooth HCI class e0/01/01",
+            location(&device)
+        )));
+    }
+
+    println!(
+        "R2 fast USB preflight: 8087:0036 {} — Bluetooth HCI descriptor OK",
+        location(&device)
+    );
+    Ok(())
+}
+
+pub fn list(target_only: bool) -> Result<()> {
+    let mut count=0usize;
+    for dev in devices()?.iter() {
+        match dev.device_descriptor() {
+            Ok(desc)=>{
+                if target_only && (desc.vendor_id()!=BE200_VID || desc.product_id()!=BE200_PID) { continue; }
+                describe(&dev,&desc);
+                count+=1;
+            }
+            Err(error)=>log::debug!("descriptor read failed on {}: {error}",location(&dev)),
+        }
+    }
+    println!("Found {count} USB device(s){}",if target_only {" matching 8087:0036"}else{""});
+    Ok(())
+}
+fn endpoint_transfer_type(t: rusb::TransferType) -> &'static str {
+    match t {
+        rusb::TransferType::Control => "control",
+        rusb::TransferType::Isochronous => "isochronous",
+        rusb::TransferType::Bulk => "bulk",
+        rusb::TransferType::Interrupt => "interrupt",
+    }
+}
+
+pub fn inspect(vid:u16,pid:u16) -> Result<()> {
+    let mut found=false;
+    for dev in devices()?.iter() {
+        let Ok(desc)=dev.device_descriptor() else { continue };
+        if desc.vendor_id()!=vid || desc.product_id()!=pid {continue;}
+        found=true;
+        describe(&dev,&desc);
+        println!("  device release: {}",desc.device_version());
+        for idx in 0..desc.num_configurations() {
+            match dev.config_descriptor(idx) {
+                Ok(cfg)=>{
+                    println!("  configuration index={} value={} max_power={}mA",
+                        idx,cfg.number(),cfg.max_power());
+                    for interface in cfg.interfaces() {
+                        for setting in interface.descriptors() {
+                            println!("    interface {} alt={} class={:02x}/{:02x}/{:02x}",
+                                setting.interface_number(), setting.setting_number(),
+                                setting.class_code(),setting.sub_class_code(),setting.protocol_code());
+                            for ep in setting.endpoint_descriptors() {
+                                println!("      ep=0x{:02x} {:?} {} max_packet={} interval={}",
+                                    ep.address(),ep.direction(),endpoint_transfer_type(ep.transfer_type()),
+                                    ep.max_packet_size(),ep.interval());
+                            }
+                        }
+                    }
+                }
+                Err(e)=>println!("  configuration index={idx} unavailable: {e}"),
+            }
+        }
+    }
+    if !found {return Err(AppError::DeviceNotFound(vid,pid));}
+    log::info!("USB descriptor inspection completed for {vid:04x}:{pid:04x}");
+    Ok(())
+}
+
+/// R1.3b/R1.4: claim ONLY interface 0 on exactly one matching BE200.
+/// No USB reset, kernel-driver detach, power cycling or interface 1 manipulation.
+pub fn open_be200_claimed() -> Result<DeviceHandle<GlobalContext>> {
+    let available = devices()?;
+    let mut target: Option<Device<GlobalContext>> = None;
+    for dev in available.iter() {
+        let Ok(desc) = dev.device_descriptor() else { continue; };
+        if desc.vendor_id() == BE200_VID && desc.product_id() == BE200_PID {
+            if target.is_some() {
+                return Err(AppError::Driver(
+                    "Multiple 8087:0036 devices found; refusing ambiguous interface claim".into(),
+                ));
+            }
+            target = Some(dev);
+        }
+    }
+
+    let device = target.ok_or(AppError::DeviceNotFound(BE200_VID, BE200_PID))?;
+    let desc = device.device_descriptor()?;
+    if !descriptor_is_bluetooth_hci(&desc) {
+        return Err(AppError::Driver(format!(
+            "Unexpected USB device class {:02x}/{:02x}/{:02x}",
+            desc.class_code(), desc.sub_class_code(), desc.protocol_code(),
+        )));
+    }
+
+    println!("Target confirmed: 8087:0036 {}", location(&device));
+    println!("Opening BE200 via libusb/WinUSB...");
+    let handle = device.open()?;
+    println!("Open: OK");
+    handle.claim_interface(0)?;
+    println!("Claim interface 0: OK");
+    Ok(handle)
+}
+
+/// R1.3b: one intentional, short-lived WinUSB claim of interface 0.
+pub fn probe_winusb() -> Result<()> {
+    let handle = open_be200_claimed()?;
+    handle.release_interface(0)?;
+    println!("Release interface 0: OK");
+    println!("Probe complete. No HCI commands or USB reset were issued.");
+    log::info!(target: "be200hub::usb", "WinUSB interface 0 open/claim/release succeeded");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn valid_vid_pid() {
+        assert_eq!(parse_vid_pid("8087:0036").unwrap(),(0x8087,0x0036));
+        assert_eq!(parse_vid_pid("0E8D:7925").unwrap(),(0x0e8d,0x7925));
+    }
+    #[test] fn rejects_bad_vid_pid() {
+        for s in ["8087","8087:36","8087:0036:ffff","ZZZZ:0036","8087:003g"] {
+            assert!(parse_vid_pid(s).is_err(),"{s}");
+        }
+    }
+
+    #[test]
+    fn bluetooth_hci_class_triple_is_exact() {
+        assert_eq!(BLUETOOTH_HCI_CLASS, (0xe0, 0x01, 0x01));
+    }
+}
