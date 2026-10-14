@@ -33,8 +33,8 @@ use crate::{
         be200_firmware_port,
     },
     review2_bond::{
-        fingerprint_bond_store, load_verified_bond_set, ReviewBondMaterial,
-        ReviewBondMember,
+        fingerprint_bond_store, load_verified_bond_set, BondStoreFingerprint,
+        ReviewBondMaterial, ReviewBondMember,
     },
     runtime::mailbox::{RecvError, SendError},
 };
@@ -855,9 +855,124 @@ pub(crate) fn cleanup_stack(
 }
 
 #[cfg(windows)]
-pub fn execute_bond_smoke(
+pub(crate) struct DualEncryptedBondSession {
+    pub(crate) firmware: FirmwareLoadOutcome,
+    pub(crate) controller_identity: String,
+    pub(crate) plan: BondSmokePlan,
+    pub(crate) stack: HciStack,
+    pub(crate) tracker: BondSmokeTracker,
+    pub(crate) members: Vec<BondSmokeMemberResult>,
+    bond_root: PathBuf,
+    before: BondStoreFingerprint,
+}
+
+#[cfg(windows)]
+impl DualEncryptedBondSession {
+    pub(crate) fn parts(
+        &mut self,
+    ) -> (
+        &HciStack,
+        &mut BondSmokeTracker,
+        &BondSmokePlan,
+        &[BondSmokeMemberResult],
+    ) {
+        (
+            &self.stack,
+            &mut self.tracker,
+            &self.plan,
+            &self.members,
+        )
+    }
+
+    pub(crate) fn finish(
+        mut self,
+    ) -> Result<BondSmokeResult, BondSmokeExecuteError> {
+        let cleanup = cleanup_stack(&self.stack, &mut self.tracker);
+        let exit = self.stack.shutdown();
+
+        let (bond_unchanged, fingerprint_error) =
+            fingerprint_after(&self.bond_root, &self.before);
+
+        let primary = if let Some(error) = fingerprint_error {
+            Some(BondSmokeRunError::BondFingerprint(error))
+        } else if !bond_unchanged {
+            Some(BondSmokeRunError::BondStoreChanged)
+        } else if !cleanup.errors.is_empty() {
+            Some(BondSmokeRunError::CleanupIncomplete)
+        } else {
+            None
+        };
+
+        if let Some(primary) = primary {
+            return Err(BondSmokeExecuteError::Runtime {
+                primary,
+                cleanup,
+                bond_unchanged,
+                exit,
+            });
+        }
+
+        Ok(BondSmokeResult {
+            firmware: self.firmware,
+            controller_identity: self.controller_identity,
+            members: self.members,
+            bond_unchanged,
+            cleanup,
+            exit,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn fingerprint_after(
+    bond_root: &std::path::Path,
+    before: &BondStoreFingerprint,
+) -> (bool, Option<String>) {
+    match fingerprint_bond_store(bond_root) {
+        Ok(after) => (after == *before, None),
+        Err(error) => (
+            false,
+            Some(format!(
+                "cannot fingerprint bond store after HIL: {}",
+                error.0
+            )),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn fail_open_session(
+    stack: HciStack,
+    tracker: &mut BondSmokeTracker,
+    bond_root: &std::path::Path,
+    before: &BondStoreFingerprint,
+    primary: BondSmokeRunError,
+) -> BondSmokeExecuteError {
+    let mut cleanup = cleanup_stack(&stack, tracker);
+    let exit = stack.shutdown();
+
+    let (bond_unchanged, fingerprint_error) =
+        fingerprint_after(bond_root, before);
+    if let Some(error) = fingerprint_error {
+        cleanup.errors.push(error);
+    } else if !bond_unchanged {
+        cleanup
+            .errors
+            .push("bond store fingerprint changed".into());
+    }
+
+    BondSmokeExecuteError::Runtime {
+        primary,
+        cleanup,
+        bond_unchanged,
+        exit,
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn open_dual_encrypted_bond_session(
     config: BondSmokeConfig,
-) -> Result<BondSmokeResult, BondSmokeExecuteError> {
+) -> Result<DualEncryptedBondSession, BondSmokeExecuteError> {
     let before = fingerprint_bond_store(&config.bond_root)
         .map_err(|error| {
             BondSmokeExecuteError::Preflight(format!(
@@ -887,75 +1002,114 @@ pub fn execute_bond_smoke(
         ))
     })?;
 
-    let controller_identity = format_address_le(plan.controller_identity_le);
+    let controller_identity =
+        format_address_le(plan.controller_identity_le);
     let stack = spawn_be200_hci_stack(HciStackConfig::default());
     let mut tracker = BondSmokeTracker::default();
+    let mut known_connections = Vec::new();
+    let mut members = Vec::new();
 
-    let session = establish_dual_encrypted_session(
-        &stack,
-        &mut tracker,
-        &plan,
-        config.connect_timeout,
-    );
-    let primary = session.as_ref().map(|_| ()).map_err(Clone::clone);
-    let members = session.unwrap_or_default();
+    let primary = (|| -> Result<(), BondSmokeRunError> {
+        send_control(
+            stack.control().try_begin_operational_attach(),
+            "begin resetless attach",
+        )?;
+        wait_attach(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
 
-    // Cleanup runs even after the first failing stage. It derives live handles
-    // from the latest ConnectionSet report rather than from intended state.
-    let mut cleanup = cleanup_stack(&stack, &mut tracker);
-    let exit = stack.shutdown();
-
-    let after = fingerprint_bond_store(&config.bond_root);
-    let (bond_unchanged, fingerprint_error) = match after {
-        Ok(after) => (after == before, None),
-        Err(error) => (
-            false,
-            Some(format!(
-                "cannot fingerprint bond store after HIL: {}",
-                error.0
-            )),
-        ),
-    };
-
-    let mut final_error = primary.err();
-    if let Some(error) = fingerprint_error {
-        if final_error.is_none() {
-            final_error =
-                Some(BondSmokeRunError::BondFingerprint(error));
-        } else {
-            cleanup.errors.push(error);
+        send_control(
+            stack.control().try_read_controller_identity(),
+            "read controller identity",
+        )?;
+        let identity = wait_controller_identity(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
+        if !plan.identity_matches(identity) {
+            return Err(
+                BondSmokeRunError::ControllerIdentityMismatch {
+                    expected: plan.controller_identity_le,
+                    actual: identity.public_address_le,
+                },
+            );
         }
-    } else if !bond_unchanged {
-        if final_error.is_none() {
-            final_error = Some(BondSmokeRunError::BondStoreChanged);
-        } else {
-            cleanup
-                .errors
-                .push("bond store fingerprint changed".into());
-        }
-    }
 
-    if final_error.is_none() && !cleanup.errors.is_empty() {
-        final_error = Some(BondSmokeRunError::CleanupIncomplete);
-    }
+        send_control(
+            stack
+                .control()
+                .try_configure_controller_privacy(plan.privacy_config()),
+            "configure controller privacy",
+        )?;
+        wait_privacy_ready(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
 
-    if let Some(primary) = final_error {
-        return Err(BondSmokeExecuteError::Runtime {
+        let first = run_member(
+            &stack,
+            &mut tracker,
+            &plan,
+            0,
+            config.connect_timeout,
+            &mut known_connections,
+        )?;
+        members.push(first);
+
+        let second = run_member(
+            &stack,
+            &mut tracker,
+            &plan,
+            1,
+            config.connect_timeout,
+            &mut known_connections,
+        )?;
+        members.push(second);
+
+        wait_dual_encrypted(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+            [
+                members[0].connection,
+                members[1].connection,
+            ],
+        )?;
+
+        Ok(())
+    })();
+
+    if let Err(primary) = primary {
+        return Err(fail_open_session(
+            stack,
+            &mut tracker,
+            &config.bond_root,
+            &before,
             primary,
-            cleanup,
-            bond_unchanged,
-            exit,
-        });
+        ));
     }
 
-    Ok(BondSmokeResult {
+    Ok(DualEncryptedBondSession {
         firmware,
         controller_identity,
+        plan,
+        stack,
+        tracker,
         members,
-        bond_unchanged,
-        cleanup,
-        exit,
+        bond_root: config.bond_root,
+        before,
     })
+}
+
+#[cfg(windows)]
+pub fn execute_bond_smoke(
+    config: BondSmokeConfig,
+) -> Result<BondSmokeResult, BondSmokeExecuteError> {
+    open_dual_encrypted_bond_session(config)?.finish()
 }
 
 pub fn format_address_le(address: [u8; 6]) -> String {
