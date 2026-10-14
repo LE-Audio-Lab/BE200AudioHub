@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use bumble_hci::{
     codes::{
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
@@ -5,7 +7,9 @@ use bumble_hci::{
     },
     Command,
 };
-use bumble_host::{Device, HostTransport};
+use bumble_host::{
+    Device, DeviceConnectionTransport, DeviceEvent, HostTransport,
+};
 
 use crate::transport::{
     packet::ControllerPacket,
@@ -14,8 +18,9 @@ use crate::transport::{
 
 use super::{
     connection::{
-        FalConnectAction, FalConnectConfigError, FalConnectRequest,
-        FalConnectTransaction, FalConnectionState,
+        ConnectionEvent, FalConnectAction, FalConnectConfigError,
+        FalConnectRequest, FalConnectTransaction, FalConnectionState,
+        LeConnectionSnapshot,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
@@ -26,6 +31,7 @@ use super::{
 };
 
 const DEFAULT_POLL_BUDGET: usize = 64;
+const MAX_DEFERRED_DEVICE_EVENTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineFault {
@@ -34,6 +40,7 @@ pub enum EngineFault {
     InvalidState,
     PrivacyConfig(PrivacyConfigError),
     FalConnectConfig(FalConnectConfigError),
+    DeviceEventBacklogFull,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +102,7 @@ pub struct HciEngine {
     privacy_transaction: Option<PrivacyTransaction>,
     fal_connection_state: FalConnectionState,
     fal_connection_transaction: Option<FalConnectTransaction>,
+    deferred_device_events: VecDeque<DeviceEvent>,
 }
 
 impl HciEngine {
@@ -111,6 +119,7 @@ impl HciEngine {
             privacy_transaction: None,
             fal_connection_state: FalConnectionState::Idle,
             fal_connection_transaction: None,
+            deferred_device_events: VecDeque::new(),
         }
     }
 
@@ -172,6 +181,7 @@ impl HciEngine {
         if self.attach_state != OperationalAttachState::Ready
             || self.scan_state != PassiveScanState::Idle
             || self.privacy_transaction.is_some()
+            || self.fal_connection_transaction.is_some()
             || self.device.is_scanning()
             || self.device.is_le_connecting()
         {
@@ -192,6 +202,8 @@ impl HciEngine {
     pub fn begin_passive_extended_scan(&mut self) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.scan_state != PassiveScanState::Idle
+            || self.privacy_transaction.is_some()
+            || self.fal_connection_transaction.is_some()
         {
             return Err(EngineFault::InvalidState);
         }
@@ -316,6 +328,7 @@ impl HciEngine {
                 self.check_link_fault()?;
                 self.collect_scan_observations();
                 self.process_observations()?;
+                self.process_device_events()?;
                 self.check_link_fault()?;
                 self.refresh_attach_state();
                 return Ok(turns);
@@ -473,6 +486,78 @@ impl HciEngine {
             FalConnectAction::Ignored => {}
         }
         Ok(())
+    }
+
+    fn process_device_events(&mut self) -> Result<(), EngineFault> {
+        for event in self.device.take_device_events() {
+            if self.process_fal_connection_device_event(&event)? {
+                continue;
+            }
+
+            match event {
+                DeviceEvent::Flush
+                | DeviceEvent::Advertisement(_)
+                | DeviceEvent::AdvertisingReport(_)
+                | DeviceEvent::ExtendedAdvertisingReport(_) => {}
+                other => {
+                    if self.deferred_device_events.len()
+                        >= MAX_DEFERRED_DEVICE_EVENTS
+                    {
+                        return Err(EngineFault::DeviceEventBacklogFull);
+                    }
+                    self.deferred_device_events.push_back(other);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn process_fal_connection_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Result<bool, EngineFault> {
+        let connection_event = match event {
+            DeviceEvent::LeConnectionEstablished(info) => {
+                Some(ConnectionEvent::Established(
+                    LeConnectionSnapshot {
+                        connection_handle: info.connection_handle,
+                        role: info.role,
+                        peer_address_le: *info.peer_address.address_bytes(),
+                        peer_address_type:
+                            info.peer_address.address_type().0,
+                        connection_interval:
+                            info.parameters.connection_interval,
+                        peripheral_latency:
+                            info.parameters.peripheral_latency,
+                        supervision_timeout:
+                            info.parameters.supervision_timeout,
+                        encryption_enabled: info.encryption_enabled,
+                    },
+                ))
+            }
+            DeviceEvent::ConnectionFailed {
+                transport: DeviceConnectionTransport::Le,
+                status,
+                ..
+            } => Some(ConnectionEvent::Failed { status: *status }),
+            _ => None,
+        };
+
+        let Some(connection_event) = connection_event else {
+            return Ok(false);
+        };
+
+        let action = {
+            let Some(transaction) =
+                self.fal_connection_transaction.as_mut()
+            else {
+                return Ok(false);
+            };
+            transaction.on_connection_event(connection_event)
+        };
+
+        self.handle_fal_connection_action(action)?;
+        Ok(true)
     }
 
     fn process_scan_observation(
@@ -764,6 +849,101 @@ mod tests {
             &ControllerPrivacyState::Ready
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn engine_routes_bumble_connection_event_into_fal_cleanup() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+        engine.privacy_state = ControllerPrivacyState::Ready;
+
+        engine
+            .begin_fal_connection(
+                super::super::connection::FalConnectRequest {
+                    peer: super::super::connection::LePeerIdentity {
+                        address_le: [
+                            0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
+                        ],
+                        address_type: 0,
+                    },
+                    parameters:
+                        super::super::connection::LeInitiationParameters::default(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            0x200f
+        );
+
+        for (opcode, extra, next) in [
+            (0x200f, &[8][..], 0x2010),
+            (0x2010, &[][..], 0x2011),
+            (0x2011, &[][..], 0x2043),
+        ] {
+            engine.ingest(complete(opcode, 0, extra)).unwrap();
+            engine.poll_until_quiescent().unwrap();
+            assert_eq!(
+                command_opcode(rx.try_recv().unwrap()),
+                next
+            );
+        }
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x43, 0x20,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.fal_connection_state(),
+            &FalConnectionState::AwaitingConnection
+        );
+
+        // LE Connection Complete: status 0, handle 0x0800, central,
+        // random peer, interval 24, latency 0, timeout 42.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            0x2010
+        );
+        assert_eq!(
+            engine.fal_connection_state(),
+            &FalConnectionState::Cleaning
+        );
+
+        engine.ingest(complete(0x2010, 0, &[])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        match engine.fal_connection_state() {
+            FalConnectionState::Connected(connection) => {
+                assert_eq!(connection.connection_handle, 0x0800);
+                assert_eq!(connection.role, 0);
+                assert_eq!(connection.peer_address_type, 1);
+                assert_eq!(
+                    connection.peer_address_le,
+                    [1, 2, 3, 4, 5, 6]
+                );
+                assert_eq!(connection.connection_interval, 24);
+                assert_eq!(connection.supervision_timeout, 42);
+            }
+            other => panic!("expected Connected, got {other:?}"),
+        }
     }
 
     #[test]
