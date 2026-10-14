@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use bumble::{Address, AddressType};
 use bumble_hci::Command;
@@ -14,7 +14,7 @@ use bumble_hci::codes::{
 
 pub const DEFAULT_RPA_TIMEOUT_SECONDS: u16 = 900;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvingPeer {
     /// Bluetooth address bytes in HCI/wire order (little-endian).
     pub identity_address_le: [u8; 6],
@@ -24,11 +24,31 @@ pub struct ResolvingPeer {
     pub peer_irk: [u8; 16],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl fmt::Debug for ResolvingPeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvingPeer")
+            .field("identity_address_le", &self.identity_address_le)
+            .field("identity_address_type", &self.identity_address_type)
+            .field("peer_irk", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvingListConfig {
     pub peers: Vec<ResolvingPeer>,
     pub local_irk: [u8; 16],
     pub rpa_timeout_seconds: u16,
+}
+
+impl fmt::Debug for ResolvingListConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvingListConfig")
+            .field("peers", &self.peers)
+            .field("local_irk", &"<redacted>")
+            .field("rpa_timeout_seconds", &self.rpa_timeout_seconds)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +404,15 @@ mod tests {
             }
             other => panic!("expected Send({opcode:#06x}), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_controller_privacy_keys() {
+        let value = config(vec![peer(0x11)]);
+        let debug = format!("{value:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("[68, 68, 68"));
+        assert!(!debug.contains("[17, 17, 17"));
     }
 
     #[test]
