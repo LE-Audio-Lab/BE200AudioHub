@@ -29,6 +29,11 @@ use super::{
         FalConnectTransaction, FalConnectionState,
         LeConnectionSetSnapshot, LeConnectionSnapshot,
     },
+    gatt::{
+        GattAction, GattFailure, GattFailureKind, GattReport, GattRequest,
+        GattRequestId, GattResult, GattTransaction, GattValueEvent,
+        ATT_DEFAULT_MTU,
+    },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
@@ -45,6 +50,7 @@ use super::{
 
 const DEFAULT_POLL_BUDGET: usize = 64;
 const MAX_DEFERRED_DEVICE_EVENTS: usize = 64;
+const MAX_GATT_REPORTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineFault {
@@ -61,6 +67,8 @@ pub enum EngineFault {
         current_generation: Option<u64>,
     },
     AclCredit(AclCreditFault),
+    GattSendRejected { connection_handle: u16 },
+    GattReportBacklogFull,
     DeviceEventBacklogFull,
 }
 
@@ -145,6 +153,10 @@ pub struct HciEngine {
     connection_generations: BTreeMap<u16, u64>,
     next_connection_generation: u64,
     acl_credit_audit: AclCreditAudit,
+    gatt_transactions: BTreeMap<u16, GattTransaction>,
+    gatt_mtus: BTreeMap<u16, u16>,
+    gatt_poisoned: BTreeMap<u16, GattRequestId>,
+    gatt_reports: VecDeque<GattReport>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -172,6 +184,10 @@ impl HciEngine {
             connection_generations: BTreeMap::new(),
             next_connection_generation: 1,
             acl_credit_audit: AclCreditAudit::default(),
+            gatt_transactions: BTreeMap::new(),
+            gatt_mtus: BTreeMap::new(),
+            gatt_poisoned: BTreeMap::new(),
+            gatt_reports: VecDeque::new(),
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -246,6 +262,129 @@ impl HciEngine {
 
     pub fn stored_encryption_state(&self) -> &StoredEncryptionState {
         &self.stored_encryption_state
+    }
+
+    pub fn begin_gatt_request(
+        &mut self,
+        request: GattRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready {
+            return Err(EngineFault::InvalidState);
+        }
+
+        self.validate_connection_token(request.connection)?;
+        let handle = request.connection.connection_handle;
+        let request_id = request.request_id;
+        let connection = request.connection;
+
+        if self
+            .gatt_transactions
+            .values()
+            .any(|transaction| transaction.request_id() == request_id)
+        {
+            return self.push_gatt_report(GattReport::Failed(GattFailure {
+                request_id,
+                connection,
+                kind: GattFailureKind::DuplicateRequestId,
+            }));
+        }
+
+        if let Some(previous_request_id) =
+            self.gatt_poisoned.get(&handle).copied()
+        {
+            return self.push_gatt_report(GattReport::Failed(GattFailure {
+                request_id,
+                connection,
+                kind: GattFailureKind::BearerPoisoned {
+                    previous_request_id,
+                },
+            }));
+        }
+
+        if self.gatt_transactions.contains_key(&handle) {
+            return self.push_gatt_report(GattReport::Failed(GattFailure {
+                request_id,
+                connection,
+                kind: GattFailureKind::Busy,
+            }));
+        }
+
+        if !self.device.is_encrypted_on_handle(handle) {
+            return self.push_gatt_report(GattReport::Failed(GattFailure {
+                request_id,
+                connection,
+                kind: GattFailureKind::NotEncrypted,
+            }));
+        }
+
+        let mtu = self
+            .gatt_mtus
+            .get(&handle)
+            .copied()
+            .unwrap_or(ATT_DEFAULT_MTU);
+        let (transaction, first_pdu) =
+            match GattTransaction::begin(request, mtu) {
+                Ok(value) => value,
+                Err(failure) => {
+                    return self.push_gatt_report(
+                        GattReport::Failed(failure),
+                    )
+                }
+            };
+
+        self.gatt_transactions.insert(handle, transaction);
+        self.handle_gatt_action(handle, GattAction::Send(first_pdu))
+    }
+
+    pub fn cancel_gatt_request(
+        &mut self,
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    ) -> Result<(), EngineFault> {
+        self.validate_connection_token(connection)?;
+        let handle = connection.connection_handle;
+
+        let action = {
+            let transaction = self
+                .gatt_transactions
+                .get_mut(&handle)
+                .ok_or(EngineFault::InvalidState)?;
+            if transaction.request_id() != request_id
+                || transaction.connection() != connection
+            {
+                return Err(EngineFault::InvalidState);
+            }
+            transaction.cancel()
+        };
+
+        self.gatt_poisoned.insert(handle, request_id);
+        self.handle_gatt_action(handle, action)?;
+        self.push_gatt_report(GattReport::BearerPoisoned {
+            connection,
+            request_id,
+        })
+    }
+
+    pub fn take_gatt_reports(&mut self) -> Vec<GattReport> {
+        self.gatt_reports.drain(..).collect()
+    }
+
+    pub fn gatt_mtu(&self, connection: ConnectionToken) -> Option<u16> {
+        (self
+            .connection_generations
+            .get(&connection.connection_handle)
+            .copied()
+            == Some(connection.generation))
+        .then(|| {
+            self.gatt_mtus
+                .get(&connection.connection_handle)
+                .copied()
+                .unwrap_or(ATT_DEFAULT_MTU)
+        })
+    }
+
+    pub fn gatt_in_flight_count(&self) -> usize {
+        self.gatt_transactions.len()
     }
 
     pub fn begin_stored_encryption(
@@ -556,6 +695,7 @@ impl HciEngine {
                 self.check_link_fault()?;
                 self.collect_scan_observations();
                 self.process_observations()?;
+                self.process_gatt_inbox()?;
                 self.process_device_events()?;
                 self.check_link_fault()?;
                 self.refresh_attach_state()?;
@@ -946,12 +1086,196 @@ impl HciEngine {
         Ok(())
     }
 
+    fn process_gatt_inbox(&mut self) -> Result<(), EngineFault> {
+        let connections = self
+            .connection_generations
+            .iter()
+            .map(|(handle, generation)| {
+                (*handle, ConnectionToken {
+                    connection_handle: *handle,
+                    generation: *generation,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (handle, connection) in connections {
+            for pdu in self.device.take_inbox_on_handle(handle) {
+                match pdu {
+                    bumble_att::AttPdu::HandleValueNotification {
+                        attribute_handle,
+                        attribute_value,
+                    } => {
+                        self.push_gatt_report(GattReport::Value(
+                            GattValueEvent::Notification {
+                                connection,
+                                attribute_handle,
+                                value: attribute_value,
+                            },
+                        ))?;
+                    }
+                    bumble_att::AttPdu::HandleValueIndication {
+                        attribute_handle,
+                        attribute_value,
+                    } => {
+                        if !self.device.send_att_on_handle(
+                            &mut self.link,
+                            handle,
+                            &bumble_att::AttPdu::HandleValueConfirmation,
+                        ) {
+                            self.check_link_fault()?;
+                            return Err(EngineFault::GattSendRejected {
+                                connection_handle: handle,
+                            });
+                        }
+                        self.check_link_fault()?;
+                        self.push_gatt_report(GattReport::Value(
+                            GattValueEvent::Indication {
+                                connection,
+                                attribute_handle,
+                                value: attribute_value,
+                            },
+                        ))?;
+                    }
+                    other => {
+                        let action = if let Some(transaction) =
+                            self.gatt_transactions.get_mut(&handle)
+                        {
+                            Some(transaction.on_pdu(other))
+                        } else {
+                            None
+                        };
+
+                        if let Some(action) = action {
+                            self.handle_gatt_action(handle, action)?;
+                        } else {
+                            let opcode = other
+                                .to_bytes()
+                                .first()
+                                .copied()
+                                .unwrap_or(0);
+                            if let Some(request_id) =
+                                self.gatt_poisoned.get(&handle).copied()
+                            {
+                                self.push_gatt_report(
+                                    GattReport::LateResponseDropped {
+                                        connection,
+                                        request_id,
+                                        opcode,
+                                    },
+                                )?;
+                            } else {
+                                self.push_gatt_report(
+                                    GattReport::UnexpectedPdu {
+                                        connection,
+                                        opcode,
+                                    },
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn process_gatt_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Result<bool, EngineFault> {
+        let DeviceEvent::Disconnected {
+            connection_handle,
+            reason,
+        } = event
+        else {
+            return Ok(false);
+        };
+
+        let action = self
+            .gatt_transactions
+            .get_mut(connection_handle)
+            .map(|transaction| transaction.on_disconnect(*reason));
+        if let Some(action) = action {
+            self.handle_gatt_action(*connection_handle, action)?;
+        }
+
+        self.gatt_mtus.remove(connection_handle);
+        self.gatt_poisoned.remove(connection_handle);
+        Ok(action.is_some())
+    }
+
+    fn handle_gatt_action(
+        &mut self,
+        handle: u16,
+        mut action: GattAction,
+    ) -> Result<(), EngineFault> {
+        loop {
+            match action {
+                GattAction::Send(pdu) => {
+                    if !self.device.send_att_on_handle(
+                        &mut self.link,
+                        handle,
+                        &pdu,
+                    ) {
+                        self.check_link_fault()?;
+                        self.gatt_transactions.remove(&handle);
+                        return Err(EngineFault::GattSendRejected {
+                            connection_handle: handle,
+                        });
+                    }
+                    self.check_link_fault()?;
+                    action = self
+                        .gatt_transactions
+                        .get_mut(&handle)
+                        .map(GattTransaction::on_request_sent)
+                        .unwrap_or(GattAction::Ignored);
+                }
+                GattAction::Await | GattAction::Ignored => return Ok(()),
+                GattAction::Complete(result) => {
+                    let transaction = self
+                        .gatt_transactions
+                        .remove(&handle)
+                        .ok_or(EngineFault::InvalidState)?;
+                    let request_id = transaction.request_id();
+                    let connection = transaction.connection();
+                    if let GattResult::Mtu { mtu } = &result {
+                        self.gatt_mtus.insert(handle, *mtu);
+                    }
+                    self.push_gatt_report(GattReport::Complete {
+                        request_id,
+                        connection,
+                        result,
+                    })?;
+                    return Ok(());
+                }
+                GattAction::Failed(failure) => {
+                    self.gatt_transactions.remove(&handle);
+                    self.push_gatt_report(GattReport::Failed(failure))?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    fn push_gatt_report(
+        &mut self,
+        report: GattReport,
+    ) -> Result<(), EngineFault> {
+        if self.gatt_reports.len() >= MAX_GATT_REPORTS {
+            return Err(EngineFault::GattReportBacklogFull);
+        }
+        self.gatt_reports.push_back(report);
+        Ok(())
+    }
+
     fn process_device_events(&mut self) -> Result<(), EngineFault> {
         for event in self.device.take_device_events() {
             self.prepare_connection_generation(&event);
             let is_flush = matches!(&event, DeviceEvent::Flush);
 
             let mut consumed = false;
+            consumed |= self.process_gatt_device_event(&event)?;
             consumed |= self.process_disconnect_device_event(&event)?;
             consumed |=
                 self.process_stored_encryption_device_event(&event)?;
