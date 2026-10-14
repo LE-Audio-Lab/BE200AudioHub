@@ -271,9 +271,11 @@ impl HciEngine {
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
             let (opcode, status) = match observation {
-                HciObservation::CommandComplete { opcode, status } => {
-                    (opcode, status.unwrap_or(0xff))
-                }
+                HciObservation::CommandComplete {
+                    opcode,
+                    status,
+                    ..
+                } => (opcode, status.unwrap_or(0xff))
                 HciObservation::CommandStatus { opcode, status } => {
                     (opcode, status)
                 }
