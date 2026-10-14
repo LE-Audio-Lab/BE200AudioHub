@@ -27,6 +27,44 @@ impl Default for SmokeConfig {
     }
 }
 
+pub fn parse_smoke_args(args: &[String]) -> Result<SmokeConfig, String> {
+    let mut config = SmokeConfig::default();
+    let mut index = 0usize;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--seconds" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --seconds".to_string())?;
+                let seconds: u64 = value
+                    .parse()
+                    .map_err(|_| "--seconds must be an integer".to_string())?;
+                if !(1..=60).contains(&seconds) {
+                    return Err("--seconds must be in 1..=60".to_string());
+                }
+                config.scan_duration = Duration::from_secs(seconds);
+                index += 2;
+            }
+            "--name" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --name".to_string())?;
+                if value.is_empty() {
+                    return Err("--name must not be empty".to_string());
+                }
+                config.target_name = Some(value.clone());
+                index += 2;
+            }
+            unknown => {
+                return Err(format!("unknown hci-smoke argument: {unknown}"));
+            }
+        }
+    }
+
+    Ok(config)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmokeResult {
     pub capabilities_seen: bool,
@@ -166,6 +204,36 @@ mod tests {
             number_of_supported_advertising_sets: 0,
             maximum_advertising_data_length: 0,
         }
+    }
+
+    #[test]
+    fn smoke_args_default_to_eight_seconds_without_target() {
+        let config = parse_smoke_args(&[]).unwrap();
+        assert_eq!(config.scan_duration, Duration::from_secs(8));
+        assert_eq!(config.target_name, None);
+    }
+
+    #[test]
+    fn smoke_args_parse_bounded_duration_and_target_name() {
+        let args = vec![
+            "--seconds".to_string(),
+            "5".to_string(),
+            "--name".to_string(),
+            "Galaxy Buds3 Pro (2F23)".to_string(),
+        ];
+        let config = parse_smoke_args(&args).unwrap();
+        assert_eq!(config.scan_duration, Duration::from_secs(5));
+        assert_eq!(
+            config.target_name.as_deref(),
+            Some("Galaxy Buds3 Pro (2F23)")
+        );
+    }
+
+    #[test]
+    fn smoke_args_reject_unknown_or_unbounded_values() {
+        assert!(parse_smoke_args(&["--seconds".into(), "0".into()]).is_err());
+        assert!(parse_smoke_args(&["--seconds".into(), "61".into()]).is_err());
+        assert!(parse_smoke_args(&["--wat".into()]).is_err());
     }
 
     #[test]
