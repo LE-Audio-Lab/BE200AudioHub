@@ -10,17 +10,22 @@ use crate::{
     },
 };
 
-use super::engine::{ControllerCapabilities, OperationalAttachState};
+use super::engine::{
+    ControllerCapabilities, OperationalAttachState, PassiveScanState,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HciCommand {
     BeginOperationalAttach,
+    StartPassiveExtendedScan,
+    StopPassiveExtendedScan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HciReport {
     AttachState(OperationalAttachState),
     CapabilitiesReady(ControllerCapabilities),
+    PassiveScanState(PassiveScanState),
 }
 
 #[derive(Clone)]
@@ -84,6 +89,18 @@ impl HciControl {
     pub fn try_begin_operational_attach(&self) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::BeginOperationalAttach)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_start_passive_extended_scan(&self) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::StartPassiveExtendedScan)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_stop_passive_extended_scan(&self) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::StopPassiveExtendedScan)
             .map_err(map_send_error)
     }
 
