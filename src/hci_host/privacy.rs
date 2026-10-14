@@ -54,6 +54,14 @@ pub struct PrivacyFailure {
     pub rollback_clear_status: Option<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControllerPrivacyState {
+    Idle,
+    Configuring,
+    Ready,
+    Failed(PrivacyFailure),
+}
+
 #[derive(Debug)]
 pub enum PrivacyAction {
     Send(Command),
