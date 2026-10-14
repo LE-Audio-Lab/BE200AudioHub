@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use bumble_hci::{
     codes::{
@@ -135,6 +135,8 @@ pub struct HciEngine {
     disconnect_transaction: Option<DisconnectTransaction>,
     stored_encryption_state: StoredEncryptionState,
     stored_encryption_transaction: Option<StoredEncryptionTransaction>,
+    connection_generations: BTreeMap<u16, u64>,
+    next_connection_generation: u64,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -159,6 +161,8 @@ impl HciEngine {
             disconnect_transaction: None,
             stored_encryption_state: StoredEncryptionState::Idle,
             stored_encryption_transaction: None,
+            connection_generations: BTreeMap::new(),
+            next_connection_generation: 1,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -216,7 +220,13 @@ impl HciEngine {
             connections: self
                 .device
                 .le_connections()
-                .map(snapshot_le_connection)
+                .map(|info| {
+                    let generation = *self
+                        .connection_generations
+                        .get(&info.connection_handle)
+                        .expect("live LE connection missing generation");
+                    snapshot_le_connection(info, generation)
+                })
                 .collect(),
         }
     }
@@ -857,32 +867,63 @@ impl HciEngine {
 
     fn process_device_events(&mut self) -> Result<(), EngineFault> {
         for event in self.device.take_device_events() {
+            self.prepare_connection_generation(&event);
+
             let mut consumed = false;
             consumed |= self.process_disconnect_device_event(&event)?;
             consumed |=
                 self.process_stored_encryption_device_event(&event)?;
             consumed |= self.process_fal_connection_device_event(&event)?;
 
-            if consumed {
-                continue;
+            let retire_handle = match &event {
+                DeviceEvent::Disconnected {
+                    connection_handle,
+                    ..
+                } => Some(*connection_handle),
+                _ => None,
+            };
+
+            if !consumed {
+                match event {
+                    DeviceEvent::Flush
+                    | DeviceEvent::Advertisement(_)
+                    | DeviceEvent::AdvertisingReport(_)
+                    | DeviceEvent::ExtendedAdvertisingReport(_) => {}
+                    other => {
+                        if self.deferred_device_events.len()
+                            >= MAX_DEFERRED_DEVICE_EVENTS
+                        {
+                            return Err(EngineFault::DeviceEventBacklogFull);
+                        }
+                        self.deferred_device_events.push_back(other);
+                    }
+                }
             }
 
-            match event {
-                DeviceEvent::Flush
-                | DeviceEvent::Advertisement(_)
-                | DeviceEvent::AdvertisingReport(_)
-                | DeviceEvent::ExtendedAdvertisingReport(_) => {}
-                other => {
-                    if self.deferred_device_events.len()
-                        >= MAX_DEFERRED_DEVICE_EVENTS
-                    {
-                        return Err(EngineFault::DeviceEventBacklogFull);
-                    }
-                    self.deferred_device_events.push_back(other);
-                }
+            if let Some(handle) = retire_handle {
+                self.connection_generations.remove(&handle);
             }
         }
         Ok(())
+    }
+
+    fn prepare_connection_generation(&mut self, event: &DeviceEvent) {
+        let DeviceEvent::LeConnectionEstablished(info) = event else {
+            return;
+        };
+
+        if self
+            .connection_generations
+            .contains_key(&info.connection_handle)
+        {
+            return;
+        }
+
+        let generation = self.next_connection_generation;
+        self.next_connection_generation =
+            self.next_connection_generation.saturating_add(1);
+        self.connection_generations
+            .insert(info.connection_handle, generation);
     }
 
     fn process_stored_encryption_device_event(
@@ -977,8 +1018,12 @@ impl HciEngine {
     ) -> Result<bool, EngineFault> {
         let connection_event = match event {
             DeviceEvent::LeConnectionEstablished(info) => {
+                let generation = *self
+                    .connection_generations
+                    .get(&info.connection_handle)
+                    .expect("established LE connection missing generation");
                 Some(ConnectionEvent::Established(
-                    snapshot_le_connection(info),
+                    snapshot_le_connection(info, generation),
                 ))
             }
             DeviceEvent::ConnectionFailed {
@@ -1101,9 +1146,11 @@ impl HciEngine {
 
 fn snapshot_le_connection(
     info: &bumble_host::LeConnectionInfo,
+    generation: u64,
 ) -> LeConnectionSnapshot {
     LeConnectionSnapshot {
         connection_handle: info.connection_handle,
+        generation,
         role: info.role,
         peer_address_le: *info.peer_address.address_bytes(),
         peer_address_type: info.peer_address.address_type().0,
