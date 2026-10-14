@@ -276,6 +276,13 @@ fn process_command(
         HciCommand::BeginStoredEncryption(request) => {
             engine.begin_stored_encryption(request)
         }
+        HciCommand::BeginGatt(request) => {
+            engine.begin_gatt_request(request)
+        }
+        HciCommand::CancelGatt {
+            connection,
+            request_id,
+        } => engine.cancel_gatt_request(connection, request_id),
     }
 }
 
@@ -375,6 +382,12 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_connection_set = connection_set;
+    }
+
+    for report in engine.take_gatt_reports() {
+        report_tx
+            .try_send(HciReport::Gatt(report))
+            .map_err(map_report_error)?;
     }
 
     Ok(())
