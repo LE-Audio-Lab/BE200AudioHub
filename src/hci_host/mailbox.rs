@@ -14,14 +14,16 @@ use super::{
     engine::{
         ControllerCapabilities, OperationalAttachState, PassiveScanState,
     },
+    privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HciCommand {
     BeginOperationalAttach,
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
+    ConfigureControllerPrivacy(ResolvingListConfig),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +32,7 @@ pub enum HciReport {
     CapabilitiesReady(ControllerCapabilities),
     PassiveScanState(PassiveScanState),
     ScanComplete(ScanSummary),
+    ControllerPrivacyState(ControllerPrivacyState),
 }
 
 #[derive(Clone)]
@@ -105,6 +108,15 @@ impl HciControl {
     pub fn try_stop_passive_extended_scan(&self) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::StopPassiveExtendedScan)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_configure_controller_privacy(
+        &self,
+        config: ResolvingListConfig,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ConfigureControllerPrivacy(config))
             .map_err(map_send_error)
     }
 
