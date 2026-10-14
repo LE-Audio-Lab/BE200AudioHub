@@ -33,6 +33,7 @@ dependencies = [
  "bumble-host",
  "crossbeam-channel",
  "rusb",
+ "sha2",
 ]
 
 [[package]]
