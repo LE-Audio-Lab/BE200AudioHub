@@ -33,6 +33,7 @@ pub enum StoredEncryptionFailureKind {
     CommandStatus { status: u8 },
     EncryptionChangeStatus { status: u8 },
     EncryptionNotEnabled,
+    ConnectionLost { reason: u8 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,10 @@ pub enum EncryptionEvent {
         connection_handle: u16,
         encryption_enabled: u8,
         encryption_key_size: u8,
+    },
+    Disconnected {
+        connection_handle: u16,
+        reason: u8,
     },
 }
 
@@ -142,43 +147,61 @@ impl StoredEncryptionTransaction {
             return StoredEncryptionAction::Ignored;
         }
 
-        let EncryptionEvent::Change {
-            status,
-            connection_handle,
-            encryption_enabled,
-            encryption_key_size,
-        } = event;
+        match event {
+            EncryptionEvent::Change {
+                status,
+                connection_handle,
+                encryption_enabled,
+                encryption_key_size,
+            } => {
+                if connection_handle != self.connection_handle {
+                    return StoredEncryptionAction::Ignored;
+                }
 
-        if connection_handle != self.connection_handle {
-            return StoredEncryptionAction::Ignored;
-        }
-
-        self.terminal = true;
-        if status != 0 {
-            return StoredEncryptionAction::Failed(
-                StoredEncryptionFailure {
-                    connection_handle,
-                    kind:
-                        StoredEncryptionFailureKind::EncryptionChangeStatus {
-                            status,
+                self.terminal = true;
+                if status != 0 {
+                    return StoredEncryptionAction::Failed(
+                        StoredEncryptionFailure {
+                            connection_handle,
+                            kind:
+                                StoredEncryptionFailureKind::EncryptionChangeStatus {
+                                    status,
+                                },
                         },
-                },
-            );
-        }
+                    );
+                }
 
-        if encryption_enabled == 0 {
-            return StoredEncryptionAction::Failed(
-                StoredEncryptionFailure {
+                if encryption_enabled == 0 {
+                    return StoredEncryptionAction::Failed(
+                        StoredEncryptionFailure {
+                            connection_handle,
+                            kind:
+                                StoredEncryptionFailureKind::EncryptionNotEnabled,
+                        },
+                    );
+                }
+
+                StoredEncryptionAction::Encrypted {
                     connection_handle,
-                    kind:
-                        StoredEncryptionFailureKind::EncryptionNotEnabled,
-                },
-            );
-        }
+                    encryption_key_size,
+                }
+            }
+            EncryptionEvent::Disconnected {
+                connection_handle,
+                reason,
+            } => {
+                if connection_handle != self.connection_handle {
+                    return StoredEncryptionAction::Ignored;
+                }
 
-        StoredEncryptionAction::Encrypted {
-            connection_handle,
-            encryption_key_size,
+                self.terminal = true;
+                StoredEncryptionAction::Failed(StoredEncryptionFailure {
+                    connection_handle,
+                    kind: StoredEncryptionFailureKind::ConnectionLost {
+                        reason,
+                    },
+                })
+            }
         }
     }
 }
@@ -261,6 +284,39 @@ mod tests {
                 encryption_key_size: 16,
             }
         ));
+    }
+
+    #[test]
+    fn disconnect_while_waiting_for_encryption_is_terminal() {
+        let (mut tx, _command) =
+            StoredEncryptionTransaction::begin(
+                StoredEncryptionRequest {
+                    connection_handle: 0x0800,
+                    key: StoredLeKeyMaterial::secure_connections([0x66; 16]),
+                },
+            )
+            .unwrap();
+        let _ = tx.on_command_status(
+            bumble_hci::codes::HCI_LE_ENABLE_ENCRYPTION_COMMAND,
+            0,
+        );
+
+        match tx.on_event(EncryptionEvent::Disconnected {
+            connection_handle: 0x0800,
+            reason: 0x08,
+        }) {
+            StoredEncryptionAction::Failed(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    StoredEncryptionFailureKind::ConnectionLost {
+                        reason: 0x08,
+                    }
+                );
+            }
+            other => {
+                panic!("expected connection-lost failure, got {other:?}")
+            }
+        }
     }
 
     #[test]
