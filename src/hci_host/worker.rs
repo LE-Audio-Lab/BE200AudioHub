@@ -141,6 +141,7 @@ fn run_loop(
                 &mut engine,
                 &mut last_attach_state,
                 &mut last_scan_state,
+                &mut last_privacy_state,
                 &report_tx,
             ) {
                 return HciWorkerExit::Faulted(fault);
