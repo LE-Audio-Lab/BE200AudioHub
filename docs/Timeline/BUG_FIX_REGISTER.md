@@ -170,3 +170,30 @@ HIL 第三次的 Controller 实测：C→P PHY 2M，Transport Latency **63,210 �
 | [TIMELINE.md](./TIMELINE.md) | 里程碑状态、commit、证据索引以及 R5.3 接续点 |
 
 **最后状态**：四轮控制面到双 CIS/规范清理全部经真机验证；紧接着应研究 R5.3 HCI ISO Data Path 和 LC3 发包，不再反复解决已关闭的 R1–R5.2-B 问题。
+
+
+---
+
+## 9. Round 5 / Review — architecture and implementation corrections
+
+| ID | Symptom / wrong assumption | Root cause / final correction | Verification |
+|---|---|---|---|
+| **R5R-01** | R5.3 pitch glide and nominal 8 s audio taking ~9.9–10.8 s | Media/source production was coupled to controller credit/completion timing. Freeze rule: completions release transport capacity only; StreamClock owns media time | Experiment timing comparison + Review architecture |
+| **R5R-02** | Event/completion servicing latency changed when ACL read timeout changed | Event-IN and ACL bulk-IN were synchronously round-robin polled. Review L3/L2 uses concurrent pending async transfers | Review-1 48/48 software tests |
+| **R5R-03** | Intermediate async backend could free transfer in callback while backend retained raw pointer | Split ownership created cancel/completion UAF risk. Pending transfer table became sole owner; callback only records terminal state | callback ownership tests |
+| **R5R-04** | High-rate async path would allocate/free libusb transfer objects every completion | Allocation jitter risk. Reuse persistent RX slots and bounded per-class idle TX transfer pools | transfer reuse tests |
+| **R5R-05** | Bumble `ExternalHost` looked like easiest Review Host reuse | It owns a blocking reader thread and synchronous `send_command` waits, violating HciContext contract. Review uses `Device + HostTransport` substrate instead | source audit; HCI WIP |
+| **R5R-06** | Cargo dependency fetch appeared broken | Rule proxy did not cover Cargo/GitHub/crates.io; switch to global proxy | dependencies fetched; local compile reached 74 tests |
+| **R5R-07** | Async ToolHub run returned before result, initially impossible to verify exit status | MCP exposed only run creation. Added get/list/cancel run tools and process-tree cancellation | run_id/get_run/list_runs/cancel_run verified |
+| **R5R-08** | Third-block HCI WIP caused default test suite failures during Review-1 sealing | HCI attach/scan synthetic fixtures are not Review-1 acceptance criteria. Gate HCI WIP behind `hci-wip`; keep default Review-1 baseline green | default 48/48; hci-wip separately tracked |
+| **R5R-09** | Upstream research repeatedly required large source sweeps | No implementation-facing function index. Built `docs/reference-index/` with exact project/file/function/type anchors and test obligations | docs/reference-index complete |
+| **R5R-10** | Active `docs/Timeline/` disappeared during Review docs reorganization | Historical Timeline existed only in `deprecated/r5/docs/Timeline/`. Restore it byte-for-byte into main docs, preserve archive as immutable source, append Review as new rounds | Git blob reuse + Round5 append |
+
+### Open Review risks
+
+| ID | Risk | Current policy |
+|---|---|---|
+| **QR5-01** | `hci-wip` synthetic resetless attach does not yet reach Ready in six tests | Review-2A must fix fixtures/transaction assumptions before HCI Host becomes default |
+| **QR5-02** | Bumble-RS LE Read ISO TX Sync parser has 24-bit Time_Offset width bug | Do not trust current parser; patch/adapter plus golden test before controller-anchored clock |
+| **QR5-03** | Async transport is software-tested but not yet re-HILed as the active Review Host path | HIL after HCI Host substrate is green; do not reopen transport unless HIL/profiling disproves assumptions |
+| **QR5-04** | Exact controller-anchored StreamClock strategy remains future work | Initial scheduler uses local authoritative interval grid; controller anchor is pluggable future scheduler |
