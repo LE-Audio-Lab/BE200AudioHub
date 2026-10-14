@@ -141,6 +141,21 @@ pub fn load_verified_bond_set(
                 "no stored coordinated set named {target_name:?}"
             ))
         })?;
+    let set_size = set
+        .get("set_size")
+        .and_then(Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| {
+            BondInputError(
+                "bond set set_size must be a byte".into(),
+            )
+        })?;
+    if set_size != 2 {
+        return Err(BondInputError(format!(
+            "Review-2B dual-ACL HIL requires stored CSIS set_size=2; found {set_size}"
+        )));
+    }
+
     let members = set
         .get("members")
         .and_then(Value::as_array)
@@ -256,6 +271,13 @@ pub fn load_verified_bond_set(
     if output.is_empty() {
         return Err(BondInputError(format!(
             "stored set {target_name:?} has no CSIS-verified members"
+        )));
+    }
+
+    if output.len() != usize::from(set_size) {
+        return Err(BondInputError(format!(
+            "stored set {target_name:?} is incomplete: set_size={set_size}, CSIS-verified members={}",
+            output.len()
         )));
     }
 
@@ -565,6 +587,34 @@ mod tests {
         let after = fingerprint_bond_store(&root).unwrap();
 
         assert!(before != after);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loader_requires_dual_member_set_size_and_complete_verified_members() {
+        let root = fixture_root();
+        write_fixture(&root);
+
+        let path = root.join("bond-sets.json");
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["sets"]["Galaxy Buds3 Pro (2F23)"]["set_size"] =
+            Value::from(3);
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            load_verified_bond_set(
+                &root,
+                "Galaxy Buds3 Pro (2F23)"
+            ),
+            Err(BondInputError(message))
+                if message.contains("set_size=2")
+        ));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
