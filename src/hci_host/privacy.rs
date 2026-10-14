@@ -196,10 +196,7 @@ impl PrivacyTransaction {
                 self.pending_opcode = 0;
                 PrivacyAction::Complete
             }
-            Phase::Complete
-            | Phase::Failed
-            | Phase::RollbackDisable
-            | Phase::RollbackClear => PrivacyAction::Ignored,
+            Phase::Complete | Phase::Failed => PrivacyAction::Ignored,
         }
     }
 
