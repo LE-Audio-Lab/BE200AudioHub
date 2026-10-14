@@ -1,6 +1,17 @@
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    ptr::NonNull,
+    sync::{
+        atomic::AtomicU64,
+        Arc,
+    },
+    time::Duration,
+};
 
-use rusb::{Context, DeviceHandle, UsbContext};
+use rusb::{
+    Context, Device, DeviceHandle, Direction, Error as UsbError, TransferType,
+    UsbContext,
+};
 
 use super::{
     backend::{
@@ -16,30 +27,27 @@ use super::{
 pub const BE200_VID: u16 = 0x8087;
 pub const BE200_PID: u16 = 0x0036;
 
+const EVENT_TRANSFER_BYTES: usize = 4 * 1024;
+const BULK_TRANSFER_BYTES: usize = 65_539;
+const EVENT_PUMP_SLICE: Duration = Duration::from_millis(5);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Be200UsbLayout {
+    pub configuration: u8,
     pub interface: u8,
+    pub alternate: u8,
     pub event_in: u8,
     pub acl_in: u8,
     pub bulk_out: u8,
-}
-
-impl Default for Be200UsbLayout {
-    fn default() -> Self {
-        Self {
-            interface: 0,
-            event_in: 0x81,
-            acl_in: 0x82,
-            bulk_out: 0x02,
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum OpenError {
     UnsupportedPlatform,
     NotFound,
+    Ambiguous,
     Usb(rusb::Error),
+    UnsupportedLayout,
 }
 
 impl From<rusb::Error> for OpenError {
@@ -50,26 +58,18 @@ impl From<rusb::Error> for OpenError {
 
 #[cfg(windows)]
 mod imp {
-    use std::{
-        collections::{HashMap, VecDeque},
-        ffi::c_void,
-        sync::{
-            atomic::AtomicU64,
-            Arc,
-        },
-    };
-
-    use rusb::{constants, ffi};
-
     use super::*;
 
-    const EVENT_BUFFER_BYTES: usize = 1024;
-    const ACL_BUFFER_BYTES: usize = 4096;
-    const EVENT_WAIT_SLICE: Duration = Duration::from_millis(20);
-
     struct PendingTransfer {
-        transfer: usize,
+        raw: NonNull<rusb::ffi::libusb_transfer>,
         state: Box<CallbackState>,
+    }
+
+    impl PendingTransfer {
+        unsafe fn reclaim(self) {
+            rusb::ffi::libusb_free_transfer(self.raw.as_ptr());
+            drop(self.state);
+        }
     }
 
     pub struct WindowsBe200Backend {
@@ -77,52 +77,64 @@ mod imp {
         handle: DeviceHandle<Context>,
         layout: Be200UsbLayout,
         next_id: u64,
+        callback_order: Arc<AtomicU64>,
+        pending: HashMap<TransferId, PendingTransfer>,
         attached: bool,
-        completion_order: Arc<AtomicU64>,
-        completions: VecDeque<TransferCompletion>,
-        active: HashMap<TransferId, PendingTransfer>,
-        pending_reads: HashMap<RxEndpoint, TransferId>,
     }
 
     impl WindowsBe200Backend {
         pub fn open_default() -> Result<Self, OpenError> {
-            Self::open(BE200_VID, BE200_PID, Be200UsbLayout::default())
-        }
-
-        pub fn open(
-            vid: u16,
-            pid: u16,
-            layout: Be200UsbLayout,
-        ) -> Result<Self, OpenError> {
             let context = Context::new()?;
             let devices = context.devices()?;
-            let device = devices
-                .iter()
-                .find(|device| {
-                    device
-                        .device_descriptor()
-                        .map(|descriptor| {
-                            descriptor.vendor_id() == vid
-                                && descriptor.product_id() == pid
-                        })
-                        .unwrap_or(false)
-                })
-                .ok_or(OpenError::NotFound)?;
+            let mut selected: Option<Device<Context>> = None;
 
+            for device in devices.iter() {
+                let descriptor = match device.device_descriptor() {
+                    Ok(descriptor) => descriptor,
+                    Err(_) => continue,
+                };
+                if descriptor.vendor_id() != BE200_VID
+                    || descriptor.product_id() != BE200_PID
+                {
+                    continue;
+                }
+                if selected.is_some() {
+                    return Err(OpenError::Ambiguous);
+                }
+                selected = Some(device);
+            }
+
+            let device = selected.ok_or(OpenError::NotFound)?;
+            let layout = discover_layout(&device)?;
             let handle = device.open()?;
+
+            match handle.set_auto_detach_kernel_driver(true) {
+                Ok(()) | Err(UsbError::NotSupported) => {}
+                Err(error) => return Err(OpenError::Usb(error)),
+            }
+
+            if handle.active_configuration().ok() != Some(layout.configuration) {
+                handle.set_active_configuration(layout.configuration)?;
+            }
+
             handle.claim_interface(layout.interface)?;
+            if layout.alternate != 0 {
+                handle.set_alternate_setting(layout.interface, layout.alternate)?;
+            }
 
             Ok(Self {
                 context,
                 handle,
                 layout,
                 next_id: 1,
+                callback_order: Arc::new(AtomicU64::new(0)),
+                pending: HashMap::new(),
                 attached: true,
-                completion_order: Arc::new(AtomicU64::new(0)),
-                completions: VecDeque::new(),
-                active: HashMap::new(),
-                pending_reads: HashMap::new(),
             })
+        }
+
+        pub fn layout(&self) -> Be200UsbLayout {
+            self.layout
         }
 
         fn allocate_id(&mut self) -> TransferId {
@@ -131,181 +143,132 @@ mod imp {
             id
         }
 
-        fn allocate_transfer(&self) -> Result<*mut ffi::libusb_transfer, BackendError> {
-            let transfer = unsafe { ffi::libusb_alloc_transfer(0) };
-            if transfer.is_null() {
-                Err(BackendError::Failed)
-            } else {
-                Ok(transfer)
-            }
+        fn has_pending_read(&self, endpoint: RxEndpoint) -> bool {
+            self.pending
+                .values()
+                .any(|pending| pending.state.kind == AsyncTransferKind::Read(endpoint))
         }
 
         fn submit_read(
             &mut self,
             endpoint: RxEndpoint,
             usb_endpoint: u8,
-            transfer_type: u8,
-            buffer_len: usize,
+            transfer_type: TransferType,
+            capacity: usize,
         ) -> Result<TransferId, BackendError> {
-            if self.pending_reads.contains_key(&endpoint) {
+            if !self.attached {
+                return Err(BackendError::DeviceGone);
+            }
+            if self.has_pending_read(endpoint) {
                 return Err(BackendError::AlreadyPending(endpoint));
             }
 
             let id = self.allocate_id();
-            let transfer = self.allocate_transfer()?;
             let mut state = Box::new(CallbackState::new(
                 id,
                 AsyncTransferKind::Read(endpoint),
-                vec![0; buffer_len],
-                self.completion_order.clone(),
+                vec![0u8; capacity],
+                self.callback_order.clone(),
             ));
-
-            let buffer = state.buffer.as_mut_ptr();
-            let user_data = (&mut *state as *mut CallbackState).cast::<c_void>();
+            let raw = allocate_transfer()?;
 
             unsafe {
+                let user_data = (&mut *state as *mut CallbackState).cast();
                 match transfer_type {
-                    constants::LIBUSB_TRANSFER_TYPE_INTERRUPT => {
-                        ffi::libusb_fill_interrupt_transfer(
-                            transfer,
-                            self.handle.as_raw(),
-                            usb_endpoint,
-                            buffer,
-                            buffer_len as i32,
-                            transfer_callback,
-                            user_data,
-                            0,
-                        );
-                    }
-                    constants::LIBUSB_TRANSFER_TYPE_BULK => {
-                        ffi::libusb_fill_bulk_transfer(
-                            transfer,
-                            self.handle.as_raw(),
-                            usb_endpoint,
-                            buffer,
-                            buffer_len as i32,
-                            transfer_callback,
-                            user_data,
-                            0,
-                        );
-                    }
+                    TransferType::Interrupt => rusb::ffi::libusb_fill_interrupt_transfer(
+                        raw.as_ptr(),
+                        self.handle.as_raw(),
+                        usb_endpoint,
+                        state.buffer.as_mut_ptr(),
+                        state.buffer.len() as i32,
+                        transfer_callback,
+                        user_data,
+                        0,
+                    ),
+                    TransferType::Bulk => rusb::ffi::libusb_fill_bulk_transfer(
+                        raw.as_ptr(),
+                        self.handle.as_raw(),
+                        usb_endpoint,
+                        state.buffer.as_mut_ptr(),
+                        state.buffer.len() as i32,
+                        transfer_callback,
+                        user_data,
+                        0,
+                    ),
                     _ => {
-                        ffi::libusb_free_transfer(transfer);
+                        rusb::ffi::libusb_free_transfer(raw.as_ptr());
                         return Err(BackendError::Failed);
                     }
                 }
+
+                let rc = rusb::ffi::libusb_submit_transfer(raw.as_ptr());
+                if rc < 0 {
+                    rusb::ffi::libusb_free_transfer(raw.as_ptr());
+                    return Err(map_libusb_code(rc));
+                }
             }
 
-            let rc = unsafe { ffi::libusb_submit_transfer(transfer) };
-            if rc != 0 {
-                unsafe { ffi::libusb_free_transfer(transfer) };
-                return Err(map_submit_error(rc));
-            }
-
-            self.pending_reads.insert(endpoint, id);
-            self.active.insert(
-                id,
-                PendingTransfer {
-                    transfer: transfer as usize,
-                    state,
-                },
-            );
+            self.pending.insert(id, PendingTransfer { raw, state });
             Ok(id)
         }
 
-        fn submit_bulk_write(
+        fn submit_write_inner(
             &mut self,
             endpoint: TxEndpoint,
-            bytes: Vec<u8>,
+            buffer: Vec<u8>,
         ) -> Result<TransferId, BackendError> {
+            if !self.attached {
+                return Err(BackendError::DeviceGone);
+            }
+
             let id = self.allocate_id();
-            let transfer = self.allocate_transfer()?;
             let mut state = Box::new(CallbackState::new(
                 id,
                 AsyncTransferKind::Write(endpoint),
-                bytes,
-                self.completion_order.clone(),
-            ));
-            let buffer = state.buffer.as_mut_ptr();
-            let len = state.buffer.len();
-            let user_data = (&mut *state as *mut CallbackState).cast::<c_void>();
-
-            unsafe {
-                ffi::libusb_fill_bulk_transfer(
-                    transfer,
-                    self.handle.as_raw(),
-                    self.layout.bulk_out,
-                    buffer,
-                    len as i32,
-                    transfer_callback,
-                    user_data,
-                    0,
-                );
-            }
-
-            let rc = unsafe { ffi::libusb_submit_transfer(transfer) };
-            if rc != 0 {
-                unsafe { ffi::libusb_free_transfer(transfer) };
-                return Err(map_submit_error(rc));
-            }
-
-            self.active.insert(
-                id,
-                PendingTransfer {
-                    transfer: transfer as usize,
-                    state,
-                },
-            );
-            Ok(id)
-        }
-
-        fn submit_command(
-            &mut self,
-            payload: Vec<u8>,
-        ) -> Result<TransferId, BackendError> {
-            let id = self.allocate_id();
-            let transfer = self.allocate_transfer()?;
-            let buffer =
-                hci_command_control_buffer(&payload).map_err(|_| BackendError::Failed)?;
-            let mut state = Box::new(CallbackState::new(
-                id,
-                AsyncTransferKind::Write(TxEndpoint::Command),
                 buffer,
-                self.completion_order.clone(),
+                self.callback_order.clone(),
             ));
-            let buffer_ptr = state.buffer.as_mut_ptr();
-            let user_data = (&mut *state as *mut CallbackState).cast::<c_void>();
+            let raw = allocate_transfer()?;
 
             unsafe {
-                ffi::libusb_fill_control_transfer(
-                    transfer,
-                    self.handle.as_raw(),
-                    buffer_ptr,
-                    transfer_callback,
-                    user_data,
-                    0,
-                );
+                let user_data = (&mut *state as *mut CallbackState).cast();
+                match endpoint {
+                    TxEndpoint::Command => rusb::ffi::libusb_fill_control_transfer(
+                        raw.as_ptr(),
+                        self.handle.as_raw(),
+                        state.buffer.as_mut_ptr(),
+                        transfer_callback,
+                        user_data,
+                        0,
+                    ),
+                    TxEndpoint::Acl | TxEndpoint::Iso => {
+                        rusb::ffi::libusb_fill_bulk_transfer(
+                            raw.as_ptr(),
+                            self.handle.as_raw(),
+                            self.layout.bulk_out,
+                            state.buffer.as_mut_ptr(),
+                            state.buffer.len() as i32,
+                            transfer_callback,
+                            user_data,
+                            0,
+                        )
+                    }
+                }
+
+                let rc = rusb::ffi::libusb_submit_transfer(raw.as_ptr());
+                if rc < 0 {
+                    rusb::ffi::libusb_free_transfer(raw.as_ptr());
+                    return Err(map_libusb_code(rc));
+                }
             }
 
-            let rc = unsafe { ffi::libusb_submit_transfer(transfer) };
-            if rc != 0 {
-                unsafe { ffi::libusb_free_transfer(transfer) };
-                return Err(map_submit_error(rc));
-            }
-
-            self.active.insert(
-                id,
-                PendingTransfer {
-                    transfer: transfer as usize,
-                    state,
-                },
-            );
+            self.pending.insert(id, PendingTransfer { raw, state });
             Ok(id)
         }
 
-        fn harvest_completions(&mut self) {
-            let mut ready = self
-                .active
+        fn pop_completed(&mut self) -> Option<TransferCompletion> {
+            let id = self
+                .pending
                 .iter()
                 .filter_map(|(id, pending)| {
                     pending
@@ -313,49 +276,95 @@ mod imp {
                         .result()
                         .map(|result| (*id, result.order))
                 })
-                .collect::<Vec<_>>();
-            ready.sort_unstable_by_key(|(_, order)| *order);
+                .min_by_key(|(_, order)| *order)
+                .map(|(id, _)| id)?;
 
-            for (id, _) in ready {
-                let Some(pending) = self.active.remove(&id) else {
-                    continue;
-                };
-                let result = pending
-                    .state
-                    .result()
-                    .expect("ready transfer must have callback result");
+            let mut pending = self.pending.remove(&id)?;
+            let result = pending.state.result()?;
+            let kind = pending.state.kind;
+            let bytes = pending.state.completed_bytes().to_vec();
+            let _ = pending.state.take_result();
 
-                if let AsyncTransferKind::Read(endpoint) = pending.state.kind {
-                    if self.pending_reads.get(&endpoint) == Some(&id) {
-                        self.pending_reads.remove(&endpoint);
+            let completion = match result.status {
+                AsyncTransferStatus::Completed => match kind {
+                    AsyncTransferKind::Read(endpoint) => TransferCompletion::Read {
+                        id,
+                        endpoint,
+                        bytes,
+                    },
+                    AsyncTransferKind::Write(endpoint) => TransferCompletion::Write {
+                        id,
+                        endpoint,
+                        bytes: logical_write_length(
+                            endpoint,
+                            &pending.state.buffer,
+                            result.actual_length,
+                        ),
+                    },
+                },
+                AsyncTransferStatus::Cancelled => {
+                    TransferCompletion::Cancelled { id }
+                }
+                AsyncTransferStatus::NoDevice => {
+                    self.attached = false;
+                    TransferCompletion::DeviceGone
+                }
+                AsyncTransferStatus::TimedOut
+                    if matches!(kind, AsyncTransferKind::Read(_))
+                        && result.actual_length > 0 =>
+                {
+                    let AsyncTransferKind::Read(endpoint) = kind else {
+                        unreachable!()
+                    };
+                    TransferCompletion::Read {
+                        id,
+                        endpoint,
+                        bytes,
                     }
                 }
+                _ => TransferCompletion::Failed { id: Some(id) },
+            };
 
-                let completion = completion_from_callback(&pending.state, result);
-                if matches!(completion, TransferCompletion::DeviceGone) {
+            unsafe { pending.reclaim() };
+            Some(completion)
+        }
+
+        fn pump_events_once(&mut self) -> Result<(), BackendError> {
+            match self.context.handle_events(Some(EVENT_PUMP_SLICE)) {
+                Ok(()) | Err(UsbError::Interrupted) => Ok(()),
+                Err(UsbError::NoDevice) => {
                     self.attached = false;
+                    Err(BackendError::DeviceGone)
                 }
-                self.completions.push_back(completion);
+                Err(_) => Err(BackendError::Failed),
+            }
+        }
 
-                unsafe {
-                    ffi::libusb_free_transfer(
-                        pending.transfer as *mut ffi::libusb_transfer,
-                    );
+        fn reclaim_completed_without_delivery(&mut self) {
+            let ids = self
+                .pending
+                .iter()
+                .filter_map(|(id, pending)| pending.state.result().map(|_| *id))
+                .collect::<Vec<_>>();
+
+            for id in ids {
+                if let Some(pending) = self.pending.remove(&id) {
+                    unsafe { pending.reclaim() };
                 }
             }
         }
 
-        fn process_events(&mut self) -> Result<(), BackendError> {
-            let event_result = self.context.handle_events(Some(EVENT_WAIT_SLICE));
-            self.harvest_completions();
-
-            match event_result {
-                Ok(()) | Err(rusb::Error::Interrupted) => Ok(()),
-                Err(rusb::Error::NoDevice) => {
-                    self.attached = false;
-                    Ok(())
+        fn cancel_and_reclaim_all(&mut self) {
+            for pending in self.pending.values() {
+                unsafe {
+                    let _ =
+                        rusb::ffi::libusb_cancel_transfer(pending.raw.as_ptr());
                 }
-                Err(_) => Err(BackendError::Failed),
+            }
+
+            while !self.pending.is_empty() {
+                let _ = self.pump_events_once();
+                self.reclaim_completed_without_delivery();
             }
         }
     }
@@ -365,23 +374,21 @@ mod imp {
             &mut self,
             endpoint: RxEndpoint,
         ) -> Result<TransferId, BackendError> {
-            if !self.attached {
-                return Err(BackendError::DeviceGone);
-            }
-
             match endpoint {
                 RxEndpoint::Event => self.submit_read(
                     endpoint,
                     self.layout.event_in,
-                    constants::LIBUSB_TRANSFER_TYPE_INTERRUPT,
-                    EVENT_BUFFER_BYTES,
+                    TransferType::Interrupt,
+                    EVENT_TRANSFER_BYTES,
                 ),
                 RxEndpoint::Acl => self.submit_read(
                     endpoint,
                     self.layout.acl_in,
-                    constants::LIBUSB_TRANSFER_TYPE_BULK,
-                    ACL_BUFFER_BYTES,
+                    TransferType::Bulk,
+                    BULK_TRANSFER_BYTES,
                 ),
+                // Downlink-only product scope: no controller->host ISO RX path is
+                // enabled until native bulk-IN demultiplexing is explicitly defined.
                 RxEndpoint::Iso => Err(BackendError::Failed),
             }
         }
@@ -391,48 +398,36 @@ mod imp {
             endpoint: TxEndpoint,
             bytes: Vec<u8>,
         ) -> Result<TransferId, BackendError> {
-            if !self.attached {
-                return Err(BackendError::DeviceGone);
-            }
-
-            match endpoint {
-                TxEndpoint::Command => self.submit_command(bytes),
-                TxEndpoint::Acl | TxEndpoint::Iso => {
-                    self.submit_bulk_write(endpoint, bytes)
+            let buffer = match endpoint {
+                TxEndpoint::Command => {
+                    hci_command_control_buffer(&bytes)
+                        .map_err(|_| BackendError::Failed)?
                 }
-            }
+                TxEndpoint::Acl | TxEndpoint::Iso => bytes,
+            };
+            self.submit_write_inner(endpoint, buffer)
         }
 
         fn next_completion(&mut self) -> Option<TransferCompletion> {
-            if let Some(completion) = self.completions.pop_front() {
+            if let Some(completion) = self.pop_completed() {
                 return Some(completion);
             }
-
-            if !self.attached && self.active.is_empty() {
+            if self.pending.is_empty() {
                 return None;
             }
 
-            if self.process_events().is_err() {
-                return Some(TransferCompletion::Failed { id: None });
+            if let Err(error) = self.pump_events_once() {
+                return Some(match error {
+                    BackendError::DeviceGone => TransferCompletion::DeviceGone,
+                    _ => TransferCompletion::Failed { id: None },
+                });
             }
 
-            self.completions.pop_front()
+            self.pop_completed()
         }
 
         fn cancel_all(&mut self) {
-            let transfers = self
-                .active
-                .values()
-                .map(|pending| pending.transfer)
-                .collect::<Vec<_>>();
-
-            for transfer in transfers {
-                unsafe {
-                    let _ = ffi::libusb_cancel_transfer(
-                        transfer as *mut ffi::libusb_transfer,
-                    );
-                }
-            }
+            self.cancel_and_reclaim_all();
         }
 
         fn is_attached(&self) -> bool {
@@ -442,144 +437,153 @@ mod imp {
 
     impl Drop for WindowsBe200Backend {
         fn drop(&mut self) {
-            self.cancel_all();
-
-            // libusb requires cancelled transfers to reach a terminal callback
-            // before their allocations can be reclaimed safely.
-            for _ in 0..200 {
-                if self.active.is_empty() {
-                    break;
-                }
-                let _ = self.context.handle_events(Some(Duration::from_millis(5)));
-                self.harvest_completions();
-            }
-
-            if !self.active.is_empty() {
-                // A wedged driver/backend is already outside normal lifecycle.
-                // Leaking the still-owned callback/transfer allocations is safer
-                // than freeing memory libusb may still reference.
-                let leaked = std::mem::take(&mut self.active);
-                std::mem::forget(leaked);
-            }
-
+            self.cancel_and_reclaim_all();
             let _ = self.handle.release_interface(self.layout.interface);
         }
     }
 
-    fn completion_from_callback(
-        state: &CallbackState,
-        result: super::super::libusb_async::CallbackResult,
-    ) -> TransferCompletion {
-        match result.status {
-            AsyncTransferStatus::Completed => completed_transfer(state, result.actual_length),
-            AsyncTransferStatus::TimedOut
-                if matches!(state.kind, AsyncTransferKind::Read(_))
-                    && result.actual_length > 0 =>
-            {
-                // Preserve partial USB progress. The endpoint reassembler owns
-                // packet boundaries, so a timeout after bytes arrived is data,
-                // not a reason to discard those bytes.
-                completed_transfer(state, result.actual_length)
-            }
-            AsyncTransferStatus::Cancelled => {
-                TransferCompletion::Cancelled { id: state.id }
-            }
-            AsyncTransferStatus::NoDevice => TransferCompletion::DeviceGone,
-            AsyncTransferStatus::Error
-            | AsyncTransferStatus::TimedOut
-            | AsyncTransferStatus::Stall
-            | AsyncTransferStatus::Overflow
-            | AsyncTransferStatus::Unknown(_) => TransferCompletion::Failed {
-                id: Some(state.id),
-            },
-        }
-    }
+    fn discover_layout(
+        device: &Device<Context>,
+    ) -> Result<Be200UsbLayout, OpenError> {
+        let descriptor = device.device_descriptor()?;
 
-    fn completed_transfer(
-        state: &CallbackState,
-        actual_length: usize,
-    ) -> TransferCompletion {
-        match state.kind {
-            AsyncTransferKind::Read(endpoint) => {
-                let actual = actual_length.min(state.buffer.len());
-                TransferCompletion::Read {
-                    id: state.id,
-                    endpoint,
-                    bytes: state.buffer[..actual].to_vec(),
+        for config_index in 0..descriptor.num_configurations() {
+            let config = device.config_descriptor(config_index)?;
+            for interface in config.interfaces() {
+                for setting in interface.descriptors() {
+                    // USB Bluetooth HCI: Wireless Controller / RF Controller /
+                    // Bluetooth Programming Interface.
+                    if setting.class_code() != 0xe0
+                        || setting.sub_class_code() != 0x01
+                        || setting.protocol_code() != 0x01
+                    {
+                        continue;
+                    }
+
+                    let mut event_in = None;
+                    let mut acl_in = None;
+                    let mut bulk_out = None;
+
+                    for endpoint in setting.endpoint_descriptors() {
+                        match (endpoint.transfer_type(), endpoint.direction()) {
+                            (TransferType::Interrupt, Direction::In) => {
+                                event_in.get_or_insert(endpoint.address());
+                            }
+                            (TransferType::Bulk, Direction::In) => {
+                                acl_in.get_or_insert(endpoint.address());
+                            }
+                            (TransferType::Bulk, Direction::Out) => {
+                                bulk_out.get_or_insert(endpoint.address());
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let (Some(event_in), Some(acl_in), Some(bulk_out)) =
+                        (event_in, acl_in, bulk_out)
+                    {
+                        return Ok(Be200UsbLayout {
+                            configuration: config.number(),
+                            interface: setting.interface_number(),
+                            alternate: setting.setting_number(),
+                            event_in,
+                            acl_in,
+                            bulk_out,
+                        });
+                    }
                 }
             }
-            AsyncTransferKind::Write(endpoint) => TransferCompletion::Write {
-                id: state.id,
-                endpoint,
-                bytes: actual_length,
-            },
+        }
+
+        Err(OpenError::UnsupportedLayout)
+    }
+
+    fn allocate_transfer(
+    ) -> Result<NonNull<rusb::ffi::libusb_transfer>, BackendError> {
+        NonNull::new(unsafe { rusb::ffi::libusb_alloc_transfer(0) })
+            .ok_or(BackendError::Failed)
+    }
+
+    fn logical_write_length(
+        endpoint: TxEndpoint,
+        buffer: &[u8],
+        actual_length: usize,
+    ) -> usize {
+        match endpoint {
+            TxEndpoint::Command => actual_length.min(
+                buffer
+                    .len()
+                    .saturating_sub(
+                        rusb::ffi::constants::LIBUSB_CONTROL_SETUP_SIZE,
+                    ),
+            ),
+            TxEndpoint::Acl | TxEndpoint::Iso => {
+                actual_length.min(buffer.len())
+            }
         }
     }
 
-    fn map_submit_error(code: i32) -> BackendError {
-        if code == constants::LIBUSB_ERROR_NO_DEVICE {
-            BackendError::DeviceGone
-        } else {
-            BackendError::Failed
+    fn map_libusb_code(code: i32) -> BackendError {
+        match code {
+            rusb::ffi::constants::LIBUSB_ERROR_NO_DEVICE => {
+                BackendError::DeviceGone
+            }
+            _ => BackendError::Failed,
         }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::platform::libusb_async::{CallbackResult, CallbackState};
 
         #[test]
-        fn verified_be200_layout_matches_experiment_descriptor() {
-            let layout = Be200UsbLayout::default();
-            assert_eq!(layout.interface, 0);
-            assert_eq!(layout.event_in, 0x81);
-            assert_eq!(layout.acl_in, 0x82);
-            assert_eq!(layout.bulk_out, 0x02);
+        fn target_identity_is_stable() {
+            assert_eq!((BE200_VID, BE200_PID), (0x8087, 0x0036));
+        }
+
+        #[test]
+        fn command_write_length_excludes_control_setup_header() {
+            let buffer = hci_command_control_buffer(&[1, 2, 3]).unwrap();
+            assert_eq!(
+                logical_write_length(TxEndpoint::Command, &buffer, 3),
+                3
+            );
+            assert_eq!(
+                logical_write_length(TxEndpoint::Command, &buffer, 100),
+                3
+            );
+        }
+
+        #[test]
+        fn bulk_write_length_is_clamped_to_payload() {
+            let buffer = vec![1, 2, 3, 4];
+            assert_eq!(
+                logical_write_length(TxEndpoint::Iso, &buffer, 2),
+                2
+            );
+            assert_eq!(
+                logical_write_length(TxEndpoint::Iso, &buffer, 10),
+                4
+            );
         }
 
         #[test]
         fn submit_error_maps_device_loss_separately() {
             assert_eq!(
-                map_submit_error(constants::LIBUSB_ERROR_NO_DEVICE),
+                map_libusb_code(
+                    rusb::ffi::constants::LIBUSB_ERROR_NO_DEVICE
+                ),
                 BackendError::DeviceGone
             );
             assert_eq!(
-                map_submit_error(constants::LIBUSB_ERROR_BUSY),
+                map_libusb_code(rusb::ffi::constants::LIBUSB_ERROR_BUSY),
                 BackendError::Failed
-            );
-        }
-
-        #[test]
-        fn partial_timeout_read_becomes_progress_not_failure() {
-            let state = CallbackState::new(
-                TransferId(1),
-                AsyncTransferKind::Read(RxEndpoint::Event),
-                vec![1, 2, 3, 4],
-                Arc::new(AtomicU64::new(0)),
-            );
-            let completion = completion_from_callback(
-                &state,
-                CallbackResult {
-                    order: 0,
-                    status: AsyncTransferStatus::TimedOut,
-                    actual_length: 2,
-                },
-            );
-            assert_eq!(
-                completion,
-                TransferCompletion::Read {
-                    id: TransferId(1),
-                    endpoint: RxEndpoint::Event,
-                    bytes: vec![1, 2],
-                }
             );
         }
     }
 }
 
 #[cfg(windows)]
-#[allow(unused_imports)]
 pub use imp::WindowsBe200Backend;
 
 #[cfg(not(windows))]
