@@ -3,13 +3,11 @@ mod runtime;
 mod platform;
 mod transport;
 
-#[cfg(any(feature = "hci-wip", test))]
 mod hci_host;
-#[cfg(any(feature = "hci-wip", test))]
 mod review2;
 
 fn main() {
-    #[cfg(all(feature = "hci-wip", windows))]
+    #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.first().map(String::as_str) == Some("review2")
