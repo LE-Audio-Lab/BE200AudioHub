@@ -850,6 +850,8 @@ impl HciEngine {
                         supervision_timeout:
                             info.parameters.supervision_timeout,
                         encryption_enabled: info.encryption_enabled,
+                        encryption_key_size:
+                            info.encryption_key_size,
                     },
                 ))
             }
