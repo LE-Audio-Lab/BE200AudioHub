@@ -1,10 +1,22 @@
+use std::fmt;
+
 use bumble_hci::Command;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StoredLeKeyMaterial {
     pub long_term_key: [u8; 16],
     pub encrypted_diversifier: u16,
     pub random_number: [u8; 8],
+}
+
+impl fmt::Debug for StoredLeKeyMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredLeKeyMaterial")
+            .field("long_term_key", &"<redacted>")
+            .field("encrypted_diversifier", &self.encrypted_diversifier)
+            .field("random_number", &"<redacted>")
+            .finish()
+    }
 }
 
 impl StoredLeKeyMaterial {
@@ -209,6 +221,22 @@ impl StoredEncryptionTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_redacts_ltk_and_rand() {
+        let request = StoredEncryptionRequest {
+            connection_handle: 0x0800,
+            key: StoredLeKeyMaterial {
+                long_term_key: [0x5a; 16],
+                encrypted_diversifier: 0x1234,
+                random_number: [0xa5; 8],
+            },
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("[90, 90, 90"));
+        assert!(!debug.contains("[165, 165, 165"));
+    }
 
     #[test]
     fn secure_connections_key_uses_zero_ediv_and_rand() {
