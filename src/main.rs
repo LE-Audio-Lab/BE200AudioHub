@@ -7,11 +7,146 @@ mod hci_host;
 mod review2;
 mod review2_bond;
 mod review2_bond_smoke;
+mod review2_gatt_smoke;
 
 fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("review2")
+            && args.get(1).map(String::as_str) == Some("gatt-smoke")
+        {
+            let config = match review2_gatt_smoke::parse_gatt_smoke_args(
+                &args[2..],
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!(
+                        "Review-2C gatt-smoke argument error: {error}"
+                    );
+                    std::process::exit(2);
+                }
+            };
+
+            println!(
+                "Review-2C read-only GATT HIL: existing bond -> dual encrypted ACL -> MTU -> services -> PACS read -> cleanup"
+            );
+            println!("Target set: {}", config.bond.target_name);
+            println!(
+                "Connect timeout: {} s; GATT timeout: {} s",
+                config.bond.connect_timeout.as_secs(),
+                config.gatt_timeout.as_secs()
+            );
+            println!(
+                "Policy: read-only GATT; no SMP, no bond writes, no ASCS/CCCD writes"
+            );
+
+            match review2_gatt_smoke::execute_gatt_smoke(config) {
+                Ok(result) => {
+                    println!(
+                        "Firmware bypass: {:?}",
+                        result.bond.firmware
+                    );
+                    println!(
+                        "Controller identity guard: PASS ({})",
+                        result.bond.controller_identity
+                    );
+                    for member in &result.members {
+                        println!(
+                            "Member: identity={} handle=0x{:04X}@gen{} mtu={} services={} PACS=0x{:04X}..0x{:04X} ASCS=0x{:04X}..0x{:04X} CAS=0x{:04X}..0x{:04X}",
+                            member.identity_address,
+                            member.connection.connection_handle,
+                            member.connection.generation,
+                            member.mtu,
+                            member.service_count,
+                            member.pacs.start_handle,
+                            member.pacs.end_handle,
+                            member.ascs.start_handle,
+                            member.ascs.end_handle,
+                            member.cas.start_handle,
+                            member.cas.end_handle,
+                        );
+                        println!(
+                            "  PACS characteristics={} supported-contexts-handle=0x{:04X} value-bytes={}",
+                            member.pacs_characteristic_count,
+                            member.supported_contexts_handle,
+                            member.supported_contexts_value.len(),
+                        );
+                    }
+                    println!("Encrypted GATT service access: PASS");
+                    for (connection, reason) in
+                        &result.bond.cleanup.disconnected
+                    {
+                        println!(
+                            "Cleanup disconnect: handle=0x{:04X}@gen{} reason=0x{:02X}",
+                            connection.connection_handle,
+                            connection.generation,
+                            reason,
+                        );
+                    }
+                    println!(
+                        "Privacy cleanup: {}",
+                        result.bond.cleanup.privacy_cleared
+                    );
+                    println!(
+                        "Bond store unchanged: {}",
+                        result.bond.bond_unchanged
+                    );
+                    println!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        result.bond.exit.hci,
+                        result.bond.exit.transport
+                    );
+                    return;
+                }
+                Err(review2_gatt_smoke::GattSmokeExecuteError::Bond(
+                    error,
+                )) => {
+                    eprintln!(
+                        "Review-2C gatt-smoke bond/session FAILED: {error:?}"
+                    );
+                    std::process::exit(1);
+                }
+                Err(review2_gatt_smoke::GattSmokeExecuteError::Probe {
+                    detail,
+                    cleanup,
+                    bond_unchanged,
+                    exit,
+                }) => {
+                    eprintln!(
+                        "Review-2C gatt-smoke PROBE FAILED: {detail}"
+                    );
+                    for error in cleanup.errors {
+                        eprintln!("Cleanup issue: {error}");
+                    }
+                    eprintln!(
+                        "Privacy cleanup: {}; Bond store unchanged: {}",
+                        cleanup.privacy_cleared,
+                        bond_unchanged
+                    );
+                    eprintln!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        exit.hci, exit.transport
+                    );
+                    std::process::exit(1);
+                }
+                Err(
+                    review2_gatt_smoke::GattSmokeExecuteError::ProbeAndCleanup {
+                        detail,
+                        cleanup,
+                    },
+                ) => {
+                    eprintln!(
+                        "Review-2C gatt-smoke PROBE FAILED: {detail}"
+                    );
+                    eprintln!(
+                        "Review-2C cleanup also FAILED: {cleanup:?}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
         if args.first().map(String::as_str) == Some("review2")
             && args.get(1).map(String::as_str) == Some("bond-smoke")
         {
