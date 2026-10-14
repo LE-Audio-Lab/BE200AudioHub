@@ -272,7 +272,10 @@ mod tests {
             hci_mailbox(1, 2, 1);
 
         let request = StoredEncryptionRequest {
-            connection_handle: 0x0800,
+            connection: ConnectionToken {
+                connection_handle: 0x0800,
+                generation: 7,
+            },
             key: super::super::security::StoredLeKeyMaterial::
                 secure_connections([0x55; 16]),
         };
