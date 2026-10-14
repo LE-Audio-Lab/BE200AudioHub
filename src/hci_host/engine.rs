@@ -673,7 +673,7 @@ mod tests {
 
         // Test-only direct Device access is intentional here: production
         // Control will later call typed HciContext commands instead.
-        let HciEngine { device, link } = &mut engine;
+        let HciEngine { device, link, .. } = &mut engine;
         device.reset(link);
 
         assert_eq!(
@@ -692,7 +692,7 @@ mod tests {
     fn reset_complete_event_is_consumed_by_bumble_device_poll() {
         let (mut engine, _rx) = engine(8);
 
-        let HciEngine { device, link } = &mut engine;
+        let HciEngine { device, link, .. } = &mut engine;
         device.reset(link);
         assert!(!engine.device().controller_ready());
 
@@ -720,7 +720,7 @@ mod tests {
     fn transport_backpressure_fault_surfaces_from_device_command_path() {
         let (mut engine, _rx) = engine(1);
 
-        let HciEngine { device, link } = &mut engine;
+        let HciEngine { device, link, .. } = &mut engine;
         device.reset(link);
 
         assert_eq!(
