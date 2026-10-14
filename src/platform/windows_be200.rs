@@ -52,7 +52,6 @@ impl From<rusb::Error> for OpenError {
 mod imp {
     use std::{
         ffi::c_void,
-        ptr,
     };
 
     use rusb::{constants, ffi};
@@ -75,6 +74,7 @@ mod imp {
         buffer: Vec<u8>,
         completions: Arc<Mutex<VecDeque<TransferCompletion>>>,
         active: Arc<Mutex<HashMap<TransferId, usize>>>,
+        pending_reads: Arc<Mutex<HashMap<RxEndpoint, TransferId>>>,
     }
 
     pub struct WindowsBe200Backend {
@@ -112,7 +112,7 @@ mod imp {
                 })
                 .ok_or(OpenError::NotFound)?;
 
-            let mut handle = device.open()?;
+            let handle = device.open()?;
             handle.claim_interface(layout.interface)?;
 
             Ok(Self {
@@ -123,6 +123,7 @@ mod imp {
                 attached: true,
                 completions: Arc::new(Mutex::new(VecDeque::new())),
                 active: Arc::new(Mutex::new(HashMap::new())),
+                pending_reads: Arc::new(Mutex::new(HashMap::new())),
             })
         }
 
@@ -173,6 +174,7 @@ mod imp {
                 buffer: vec![0; buffer_len],
                 completions: self.completions.clone(),
                 active: self.active.clone(),
+                pending_reads: self.pending_reads.clone(),
             });
 
             let buffer = state.buffer.as_mut_ptr();
@@ -242,6 +244,7 @@ mod imp {
                 buffer: bytes,
                 completions: self.completions.clone(),
                 active: self.active.clone(),
+                pending_reads: self.pending_reads.clone(),
             });
             let buffer = state.buffer.as_mut_ptr();
             let len = state.buffer.len();
@@ -290,6 +293,7 @@ mod imp {
                 buffer: vec![0; setup_len + payload.len()],
                 completions: self.completions.clone(),
                 active: self.active.clone(),
+                pending_reads: self.pending_reads.clone(),
             });
 
             unsafe {
@@ -355,16 +359,17 @@ mod imp {
                 return Err(BackendError::DeviceGone);
             }
 
-            let already_pending = self
-                .active
-                .lock()
-                .map_err(|_| BackendError::Failed)?
-                .keys()
-                .copied()
-                .any(|_| false);
-            let _ = already_pending;
+            {
+                let pending = self
+                    .pending_reads
+                    .lock()
+                    .map_err(|_| BackendError::Failed)?;
+                if pending.contains_key(&endpoint) {
+                    return Err(BackendError::AlreadyPending(endpoint));
+                }
+            }
 
-            match endpoint {
+            let id = match endpoint {
                 RxEndpoint::Event => self.submit_read(
                     endpoint,
                     self.layout.event_in,
@@ -378,7 +383,13 @@ mod imp {
                     ACL_BUFFER_BYTES,
                 ),
                 RxEndpoint::Iso => Err(BackendError::Failed),
-            }
+            }?;
+
+            self.pending_reads
+                .lock()
+                .map_err(|_| BackendError::Failed)?
+                .insert(endpoint, id);
+            Ok(id)
         }
 
         fn submit_write(
@@ -422,6 +433,10 @@ mod imp {
                 .lock()
                 .map(|active| active.values().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
+
+            if let Ok(mut pending) = self.pending_reads.lock() {
+                pending.clear();
+            }
 
             for transfer in transfers {
                 unsafe {
@@ -470,6 +485,13 @@ mod imp {
             let state = Box::from_raw(user_data);
             if let Ok(mut active) = state.active.lock() {
                 active.remove(&state.id);
+            }
+            if let CallbackEndpoint::Read(endpoint) = state.endpoint {
+                if let Ok(mut pending) = state.pending_reads.lock() {
+                    if pending.get(&endpoint) == Some(&state.id) {
+                        pending.remove(&endpoint);
+                    }
+                }
             }
 
             let completion = match (*transfer).status {
