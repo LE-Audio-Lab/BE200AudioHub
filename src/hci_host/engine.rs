@@ -5,6 +5,7 @@ use bumble_hci::{
         HCI_DISCONNECT_COMMAND,
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
+        HCI_LE_ENABLE_ENCRYPTION_COMMAND,
         HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
     },
     Command,
@@ -31,6 +32,11 @@ use super::{
         PrivacyTransaction, ResolvingListConfig,
     },
     scan::{ScanAccumulator, ScanSummary},
+    security::{
+        EncryptionEvent, StoredEncryptionAction,
+        StoredEncryptionConfigError, StoredEncryptionRequest,
+        StoredEncryptionState, StoredEncryptionTransaction,
+    },
 };
 
 const DEFAULT_POLL_BUDGET: usize = 64;
@@ -44,6 +50,7 @@ pub enum EngineFault {
     PrivacyConfig(PrivacyConfigError),
     FalConnectConfig(FalConnectConfigError),
     DisconnectConfig(DisconnectConfigError),
+    StoredEncryptionConfig(StoredEncryptionConfigError),
     DeviceEventBacklogFull,
 }
 
@@ -108,6 +115,8 @@ pub struct HciEngine {
     fal_connection_transaction: Option<FalConnectTransaction>,
     disconnect_state: DisconnectState,
     disconnect_transaction: Option<DisconnectTransaction>,
+    stored_encryption_state: StoredEncryptionState,
+    stored_encryption_transaction: Option<StoredEncryptionTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -127,6 +136,8 @@ impl HciEngine {
             fal_connection_transaction: None,
             disconnect_state: DisconnectState::Idle,
             disconnect_transaction: None,
+            stored_encryption_state: StoredEncryptionState::Idle,
+            stored_encryption_transaction: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -157,6 +168,47 @@ impl HciEngine {
 
     pub fn disconnect_state(&self) -> &DisconnectState {
         &self.disconnect_state
+    }
+
+    pub fn stored_encryption_state(&self) -> &StoredEncryptionState {
+        &self.stored_encryption_state
+    }
+
+    pub fn begin_stored_encryption(
+        &mut self,
+        request: StoredEncryptionRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.stored_encryption_transaction.is_some()
+            || self.disconnect_transaction.is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let Some(connection) =
+            self.device.le_connection(request.connection_handle)
+        else {
+            return Err(EngineFault::InvalidState);
+        };
+
+        if self.device.is_encrypted_on_handle(request.connection_handle) {
+            self.stored_encryption_state = StoredEncryptionState::Encrypted {
+                connection_handle: request.connection_handle,
+                encryption_key_size: connection.encryption_key_size,
+            };
+            return Ok(());
+        }
+
+        let (transaction, command) =
+            StoredEncryptionTransaction::begin(request)
+                .map_err(EngineFault::StoredEncryptionConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.stored_encryption_transaction = Some(transaction);
+        self.stored_encryption_state = StoredEncryptionState::Submitting;
+        Ok(())
     }
 
     pub fn begin_disconnect(
@@ -419,6 +471,7 @@ impl HciEngine {
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
+            self.process_stored_encryption_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
         Ok(())
@@ -462,6 +515,65 @@ impl HciEngine {
                 self.privacy_state = ControllerPrivacyState::Failed(failure);
             }
             PrivacyAction::Ignored => {}
+        }
+        Ok(())
+    }
+
+    fn process_stored_encryption_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let HciObservation::CommandStatus { opcode, status } = observation else {
+            return Ok(());
+        };
+        if *opcode != HCI_LE_ENABLE_ENCRYPTION_COMMAND {
+            return Ok(());
+        }
+
+        let action = {
+            let Some(transaction) =
+                self.stored_encryption_transaction.as_mut()
+            else {
+                return Ok(());
+            };
+            transaction.on_command_status(*opcode, *status)
+        };
+
+        self.handle_stored_encryption_action(action)
+    }
+
+    fn handle_stored_encryption_action(
+        &mut self,
+        action: StoredEncryptionAction,
+    ) -> Result<(), EngineFault> {
+        match action {
+            StoredEncryptionAction::AwaitChange => {
+                self.stored_encryption_state =
+                    StoredEncryptionState::AwaitingChange;
+            }
+            StoredEncryptionAction::Encrypted {
+                connection_handle,
+                encryption_key_size,
+            } => {
+                if !self
+                    .device
+                    .is_encrypted_on_handle(connection_handle)
+                {
+                    return Err(EngineFault::InvalidState);
+                }
+                self.stored_encryption_transaction = None;
+                self.stored_encryption_state =
+                    StoredEncryptionState::Encrypted {
+                        connection_handle,
+                        encryption_key_size,
+                    };
+            }
+            StoredEncryptionAction::Failed(failure) => {
+                self.stored_encryption_transaction = None;
+                self.stored_encryption_state =
+                    StoredEncryptionState::Failed(failure);
+            }
+            StoredEncryptionAction::Ignored => {}
         }
         Ok(())
     }
@@ -604,10 +716,13 @@ impl HciEngine {
 
     fn process_device_events(&mut self) -> Result<(), EngineFault> {
         for event in self.device.take_device_events() {
-            if self.process_disconnect_device_event(&event)? {
-                continue;
-            }
-            if self.process_fal_connection_device_event(&event)? {
+            let mut consumed = false;
+            consumed |= self.process_disconnect_device_event(&event)?;
+            consumed |=
+                self.process_stored_encryption_device_event(&event)?;
+            consumed |= self.process_fal_connection_device_event(&event)?;
+
+            if consumed {
                 continue;
             }
 
@@ -627,6 +742,52 @@ impl HciEngine {
             }
         }
         Ok(())
+    }
+
+    fn process_stored_encryption_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Result<bool, EngineFault> {
+        let encryption_event = match event {
+            DeviceEvent::EncryptionChange {
+                status,
+                connection_handle,
+                encryption_enabled,
+                encryption_key_size,
+            } => Some(EncryptionEvent::Change {
+                status: *status,
+                connection_handle: *connection_handle,
+                encryption_enabled: *encryption_enabled,
+                encryption_key_size: *encryption_key_size,
+            }),
+            DeviceEvent::Disconnected {
+                connection_handle,
+                reason,
+            } => Some(EncryptionEvent::Disconnected {
+                connection_handle: *connection_handle,
+                reason: *reason,
+            }),
+            _ => None,
+        };
+
+        let Some(encryption_event) = encryption_event else {
+            return Ok(false);
+        };
+
+        let action = {
+            let Some(transaction) =
+                self.stored_encryption_transaction.as_mut()
+            else {
+                return Ok(false);
+            };
+            transaction.on_event(encryption_event)
+        };
+        if matches!(action, StoredEncryptionAction::Ignored) {
+            return Ok(false);
+        }
+
+        self.handle_stored_encryption_action(action)?;
+        Ok(true)
     }
 
     fn process_disconnect_device_event(
@@ -1100,6 +1261,91 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn engine_stored_ltk_encryption_tracks_bumble_encrypted_state() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_stored_encryption(
+                super::super::security::StoredEncryptionRequest {
+                    connection_handle: 0x0800,
+                    key: super::super::security::StoredLeKeyMaterial::
+                        secure_connections([0x5a; 16]),
+                },
+            )
+            .unwrap();
+
+        let HostPacket::Command(bytes) = rx.try_recv().unwrap() else {
+            panic!("expected LE Enable Encryption command");
+        };
+        assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 0x2019);
+        assert_eq!(bytes[2], 0x1c);
+        assert_eq!(&bytes[3..5], &[0x00, 0x08]);
+        assert_eq!(&bytes[5..13], &[0; 8]);
+        assert_eq!(&bytes[13..15], &[0; 2]);
+        assert_eq!(&bytes[15..31], &[0x5a; 16]);
+        assert_eq!(
+            engine.stored_encryption_state(),
+            &StoredEncryptionState::Submitting
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x19, 0x20,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.stored_encryption_state(),
+            &StoredEncryptionState::AwaitingChange
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x08, 0x04, 0x00, 0x00, 0x08, 0x01,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert!(engine.device().is_encrypted_on_handle(0x0800));
+        assert_eq!(
+            engine.stored_encryption_state(),
+            &StoredEncryptionState::Encrypted {
+                connection_handle: 0x0800,
+                encryption_key_size: 0,
+            }
+        );
+
+        // Idempotent repeat uses Bumble's existing encrypted state and emits
+        // no second LE Enable Encryption command.
+        engine
+            .begin_stored_encryption(
+                super::super::security::StoredEncryptionRequest {
+                    connection_handle: 0x0800,
+                    key: super::super::security::StoredLeKeyMaterial::
+                        secure_connections([0x5a; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
     #[test]
