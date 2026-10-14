@@ -321,6 +321,10 @@ mod tests {
 
     use crate::{
         hci_host::{
+            connection::{
+                FalConnectRequest, LeInitiationParameters,
+                LePeerIdentity,
+            },
             mailbox::hci_mailbox,
             privacy::{
                 ResolvingListConfig, ResolvingPeer,
@@ -535,6 +539,147 @@ mod tests {
                 ControllerPrivacyState::Ready,
             )
         );
+
+        control.request_stop().unwrap();
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
+    fn worker_routes_fal_connection_as_typed_transaction() {
+        let (control, ingress, reports, ports) = hci_mailbox(48, 8, 24);
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(48);
+        let join = spawn_hci_worker(ports, transport_tx);
+
+        // Minimal resetless attach to Ready.
+        control.try_begin_operational_attach().unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_report(&reports);
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        ingress
+            .try_send_controller(ControllerPacket::Event(supported))
+            .unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_host_packet(&transport_rx);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+        let _ = recv_report(&reports);
+        let _ = recv_report(&reports);
+
+        control
+            .try_begin_fal_connection(FalConnectRequest {
+                peer: LePeerIdentity {
+                    address_le: [
+                        0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
+                    ],
+                    address_type: 0,
+                },
+                parameters: LeInitiationParameters::default(),
+            })
+            .unwrap();
+
+        let opcode = |packet: HostPacket| {
+            let HostPacket::Command(bytes) = packet else {
+                panic!("expected HCI command");
+            };
+            u16::from_le_bytes([bytes[0], bytes[1]])
+        };
+
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x200f);
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::FalConnectionState(
+                FalConnectionState::Preparing,
+            )
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x05, 0x01, 0x0f, 0x20, 0x00, 0x08,
+            ]))
+            .unwrap();
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x2010);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x10, 0x20, 0x00,
+            ]))
+            .unwrap();
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x2011);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x11, 0x20, 0x00,
+            ]))
+            .unwrap();
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x2043);
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::FalConnectionState(
+                FalConnectionState::Initiating,
+            )
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x43, 0x20,
+            ]))
+            .unwrap();
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::FalConnectionState(
+                FalConnectionState::AwaitingConnection,
+            )
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x2010);
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::FalConnectionState(
+                FalConnectionState::Cleaning,
+            )
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x10, 0x20, 0x00,
+            ]))
+            .unwrap();
+
+        match recv_report(&reports) {
+            HciReport::FalConnectionState(
+                FalConnectionState::Connected(connection),
+            ) => {
+                assert_eq!(connection.connection_handle, 0x0800);
+                assert_eq!(connection.connection_interval, 24);
+            }
+            other => panic!("expected connected report, got {other:?}"),
+        }
 
         control.request_stop().unwrap();
         assert_eq!(join.join(), HciWorkerExit::Stopped);
