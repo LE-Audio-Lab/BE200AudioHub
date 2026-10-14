@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::{
+    connection::{FalConnectRequest, FalConnectionState},
     engine::{
         ControllerCapabilities, OperationalAttachState, PassiveScanState,
     },
@@ -24,6 +25,7 @@ pub enum HciCommand {
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
     ConfigureControllerPrivacy(ResolvingListConfig),
+    BeginFalConnection(FalConnectRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub enum HciReport {
     PassiveScanState(PassiveScanState),
     ScanComplete(ScanSummary),
     ControllerPrivacyState(ControllerPrivacyState),
+    FalConnectionState(FalConnectionState),
 }
 
 #[derive(Clone)]
@@ -117,6 +120,15 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::ConfigureControllerPrivacy(config))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_begin_fal_connection(
+        &self,
+        request: FalConnectRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BeginFalConnection(request))
             .map_err(map_send_error)
     }
 
