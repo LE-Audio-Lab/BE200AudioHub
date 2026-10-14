@@ -8,7 +8,9 @@ use crate::transport::{
 };
 
 use super::{
-    engine::{EngineFault, HciEngine, OperationalAttachState},
+    engine::{
+        EngineFault, HciEngine, OperationalAttachState, PassiveScanState,
+    },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
 };
 
@@ -67,6 +69,7 @@ fn run_loop(
 
     let mut engine = HciEngine::new(transport_tx);
     let mut last_attach_state = engine.attach_state();
+    let mut last_scan_state = engine.passive_scan_state();
 
     loop {
         match stop_rx.try_recv() {
@@ -89,6 +92,7 @@ fn run_loop(
                     if let Err(fault) = publish_attach_transition(
                         &engine,
                         &mut last_attach_state,
+                        &mut last_scan_state,
                         &report_tx,
                     ) {
                         return HciWorkerExit::Faulted(fault);
@@ -170,6 +174,7 @@ fn run_loop(
                 if let Err(fault) = publish_attach_transition(
                     &engine,
                     &mut last_attach_state,
+                    &mut last_scan_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -193,6 +198,7 @@ fn run_loop(
                 if let Err(fault) = publish_attach_transition(
                     &engine,
                     &mut last_attach_state,
+                    &mut last_scan_state,
                     &report_tx,
                 ) {
                     return HciWorkerExit::Faulted(fault);
@@ -210,12 +216,19 @@ fn process_command(
         HciCommand::BeginOperationalAttach => {
             engine.begin_operational_attach()
         }
+        HciCommand::StartPassiveExtendedScan => {
+            engine.begin_passive_extended_scan()
+        }
+        HciCommand::StopPassiveExtendedScan => {
+            engine.stop_passive_extended_scan()
+        }
     }
 }
 
 fn publish_attach_transition(
     engine: &HciEngine,
     last_state: &mut OperationalAttachState,
+    last_scan_state: &mut PassiveScanState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
     let state = engine.attach_state();
@@ -234,6 +247,14 @@ fn publish_attach_transition(
                 .try_send(HciReport::CapabilitiesReady(capabilities))
                 .map_err(map_report_error)?;
         }
+    }
+
+    let scan_state = engine.passive_scan_state();
+    if scan_state != *last_scan_state {
+        report_tx
+            .try_send(HciReport::PassiveScanState(scan_state))
+            .map_err(map_report_error)?;
+        *last_scan_state = scan_state;
     }
 
     Ok(())
