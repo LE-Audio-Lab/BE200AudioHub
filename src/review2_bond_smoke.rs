@@ -15,8 +15,10 @@ use crate::{
             ControllerIdentity, ControllerIdentityFailure,
             OperationalAttachState,
         },
-        mailbox::{HciReport, HciReportInbox},
-        stack::HciStackExit,
+        mailbox::{HciControl, HciReport, HciReportInbox},
+        stack::{
+            spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
+        },
         privacy::{
             ControllerPrivacyState, ResolvingListConfig, ResolvingPeer,
             DEFAULT_RPA_TIMEOUT_SECONDS,
@@ -26,9 +28,15 @@ use crate::{
             StoredLeKeyMaterial,
         },
     },
-    platform::be200_firmware_loader::FirmwareLoadOutcome,
-    review2_bond::{ReviewBondMaterial, ReviewBondMember},
-    runtime::mailbox::RecvError,
+    platform::{
+        be200_firmware_loader::FirmwareLoadOutcome,
+        be200_firmware_port,
+    },
+    review2_bond::{
+        fingerprint_bond_store, load_verified_bond_set, ReviewBondMaterial,
+        ReviewBondMember,
+    },
+    runtime::mailbox::{RecvError, SendError},
 };
 
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 12;
@@ -274,6 +282,9 @@ pub enum BondSmokeRunError {
         detail: String,
     },
     PrivacyCleanupFailed(String),
+    CleanupIncomplete,
+    BondStoreChanged,
+    BondFingerprint(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -601,6 +612,343 @@ fn wait_disconnected(
             _ => None,
         },
     )
+}
+
+fn send_control(
+    result: Result<(), SendError>,
+    stage: &str,
+) -> Result<(), BondSmokeRunError> {
+    result.map_err(|_| {
+        BondSmokeRunError::ControlBackpressure(stage.to_string())
+    })
+}
+
+fn remember_connection(
+    known: &mut Vec<ConnectionToken>,
+    connection: ConnectionToken,
+) {
+    if !known.contains(&connection) {
+        known.push(connection);
+    }
+}
+
+fn run_member(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+    index: usize,
+    connect_timeout: Duration,
+    known_connections: &mut Vec<ConnectionToken>,
+) -> Result<BondSmokeMemberResult, BondSmokeRunError> {
+    let member = &plan.members[index];
+
+    send_control(
+        stack
+            .control()
+            .try_begin_fal_connection(plan.connect_request(index)),
+        &format!("begin FAL connection for {}", member.identity_address),
+    )?;
+
+    let connection = match wait_connected(
+        stack.reports(),
+        tracker,
+        connect_timeout,
+        &member.identity_address,
+    ) {
+        Ok(connection) => connection,
+        Err(BondSmokeRunError::Timeout(_)) => {
+            send_control(
+                stack.control().try_cancel_fal_connection(),
+                &format!(
+                    "cancel FAL connection for {}",
+                    member.identity_address
+                ),
+            )?;
+
+            if let Some(late_connection) = wait_cancel_terminal(
+                stack.reports(),
+                tracker,
+                Duration::from_secs(5),
+            )? {
+                remember_connection(
+                    known_connections,
+                    late_connection.token(),
+                );
+                let _ = drain_reports(stack.reports(), tracker);
+            }
+
+            return Err(BondSmokeRunError::ConnectTimeout {
+                member: member.identity_address.clone(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+
+    let token = connection.token();
+    remember_connection(known_connections, token);
+
+    send_control(
+        stack.control().try_begin_stored_encryption(
+            plan.encryption_request(index, token),
+        ),
+        &format!("begin stored encryption for {}", member.identity_address),
+    )?;
+
+    let encryption_key_size = wait_encrypted(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+        &member.identity_address,
+        token,
+    )?;
+
+    // EncryptionState is published before the derived ConnectionSet update.
+    // Drain that update so the next stage sees current per-handle truth.
+    drain_reports(stack.reports(), tracker)?;
+
+    Ok(BondSmokeMemberResult {
+        identity_address: member.identity_address.clone(),
+        connection: token,
+        encryption_key_size,
+    })
+}
+
+fn cleanup_stack(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> BondSmokeCleanupSummary {
+    let mut summary = BondSmokeCleanupSummary::default();
+
+    if let Err(error) = drain_reports(stack.reports(), tracker) {
+        summary
+            .errors
+            .push(format!("pre-cleanup report drain: {error:?}"));
+    }
+
+    let mut live: Vec<ConnectionToken> = tracker
+        .connection_set
+        .connections
+        .iter()
+        .map(|connection| connection.token())
+        .collect();
+    live.reverse();
+
+    for connection in live {
+        if let Err(error) = stack.control().try_disconnect(connection) {
+            summary.errors.push(format!(
+                "disconnect submit {connection:?}: {error:?}"
+            ));
+            continue;
+        }
+
+        match wait_disconnected(
+            stack.reports(),
+            tracker,
+            Duration::from_secs(5),
+            connection,
+        ) {
+            Ok(reason) => summary.disconnected.push((connection, reason)),
+            Err(error) => summary.errors.push(format!(
+                "disconnect {connection:?}: {error:?}"
+            )),
+        }
+
+        if let Err(error) = drain_reports(stack.reports(), tracker) {
+            summary.errors.push(format!(
+                "post-disconnect report drain: {error:?}"
+            ));
+        }
+    }
+
+    // Privacy mutation is only valid after resetless attach reached Ready.
+    if tracker.attach == Some(OperationalAttachState::Ready) {
+        match stack.control().try_clear_controller_privacy() {
+            Ok(()) => match wait_privacy_idle(
+                stack.reports(),
+                tracker,
+                Duration::from_secs(5),
+            ) {
+                Ok(()) => summary.privacy_cleared = true,
+                Err(error) => summary
+                    .errors
+                    .push(format!("privacy cleanup: {error:?}")),
+            },
+            Err(error) => summary.errors.push(format!(
+                "privacy cleanup submit: {error:?}"
+            )),
+        }
+    }
+
+    summary
+}
+
+#[cfg(windows)]
+pub fn execute_bond_smoke(
+    config: BondSmokeConfig,
+) -> Result<BondSmokeResult, BondSmokeExecuteError> {
+    let before = fingerprint_bond_store(&config.bond_root)
+        .map_err(|error| {
+            BondSmokeExecuteError::Preflight(format!(
+                "cannot fingerprint bond store before HIL: {}",
+                error.0
+            ))
+        })?;
+
+    let material =
+        load_verified_bond_set(&config.bond_root, &config.target_name)
+            .map_err(|error| {
+                BondSmokeExecuteError::Preflight(format!(
+                    "cannot load verified stored bond: {}",
+                    error.0
+                ))
+            })?;
+    let plan = BondSmokePlan::from_material(material)
+        .map_err(BondSmokeExecuteError::Preflight)?;
+
+    let firmware = be200_firmware_port::ensure_operational(
+        &config.sfi,
+        &config.ddc,
+    )
+    .map_err(|error| {
+        BondSmokeExecuteError::Preflight(format!(
+            "firmware bypass failed: {error:?}"
+        ))
+    })?;
+
+    let controller_identity = format_address_le(plan.controller_identity_le);
+    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let mut tracker = BondSmokeTracker::default();
+    let mut known_connections = Vec::new();
+    let mut members = Vec::new();
+
+    let primary = (|| -> Result<(), BondSmokeRunError> {
+        send_control(
+            stack.control().try_begin_operational_attach(),
+            "begin resetless attach",
+        )?;
+        wait_attach(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
+
+        send_control(
+            stack.control().try_read_controller_identity(),
+            "read controller identity",
+        )?;
+        let identity = wait_controller_identity(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
+        if !plan.identity_matches(identity) {
+            return Err(BondSmokeRunError::ControllerIdentityMismatch {
+                expected: plan.controller_identity_le,
+                actual: identity.public_address_le,
+            });
+        }
+
+        send_control(
+            stack
+                .control()
+                .try_configure_controller_privacy(plan.privacy_config()),
+            "configure controller privacy",
+        )?;
+        wait_privacy_ready(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+        )?;
+
+        let first = run_member(
+            &stack,
+            &mut tracker,
+            &plan,
+            0,
+            config.connect_timeout,
+            &mut known_connections,
+        )?;
+        members.push(first);
+
+        let second = run_member(
+            &stack,
+            &mut tracker,
+            &plan,
+            1,
+            config.connect_timeout,
+            &mut known_connections,
+        )?;
+        members.push(second);
+
+        wait_dual_encrypted(
+            stack.reports(),
+            &mut tracker,
+            Duration::from_secs(5),
+            [
+                members[0].connection,
+                members[1].connection,
+            ],
+        )?;
+
+        Ok(())
+    })();
+
+    // Cleanup runs even after the first failing stage. It derives live handles
+    // from the latest ConnectionSet report rather than from intended state.
+    let mut cleanup = cleanup_stack(&stack, &mut tracker);
+    let exit = stack.shutdown();
+
+    let after = fingerprint_bond_store(&config.bond_root);
+    let (bond_unchanged, fingerprint_error) = match after {
+        Ok(after) => (after == before, None),
+        Err(error) => (
+            false,
+            Some(format!(
+                "cannot fingerprint bond store after HIL: {}",
+                error.0
+            )),
+        ),
+    };
+
+    let mut final_error = primary.err();
+    if let Some(error) = fingerprint_error {
+        if final_error.is_none() {
+            final_error =
+                Some(BondSmokeRunError::BondFingerprint(error));
+        } else {
+            cleanup.errors.push(error);
+        }
+    } else if !bond_unchanged {
+        if final_error.is_none() {
+            final_error = Some(BondSmokeRunError::BondStoreChanged);
+        } else {
+            cleanup
+                .errors
+                .push("bond store fingerprint changed".into());
+        }
+    }
+
+    if final_error.is_none() && !cleanup.errors.is_empty() {
+        final_error = Some(BondSmokeRunError::CleanupIncomplete);
+    }
+
+    if let Some(primary) = final_error {
+        return Err(BondSmokeExecuteError::Runtime {
+            primary,
+            cleanup,
+            bond_unchanged,
+            exit,
+        });
+    }
+
+    Ok(BondSmokeResult {
+        firmware,
+        controller_identity,
+        members,
+        bond_unchanged,
+        cleanup,
+        exit,
+    })
 }
 
 pub fn format_address_le(address: [u8; 6]) -> String {
