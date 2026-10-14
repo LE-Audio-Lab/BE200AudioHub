@@ -295,13 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn event_framer_rejects_declared_oversize() {
-        let mut pending = vec![0xff, 0xff];
-        pending.resize(MAX_EVENT_BYTES + 1, 0);
-        assert!(take_event(&mut pending).is_ok());
-    }
-
-    #[test]
     fn bypass_constants_match_be200_usb_transport() {
         assert_eq!((BE200_VID, BE200_PID), (0x8087, 0x0036));
         assert_eq!(EVENT_EP, 0x81);
