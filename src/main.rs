@@ -6,6 +6,7 @@ mod transport;
 mod hci_host;
 mod review2;
 mod review2_bond;
+mod review2_bond_smoke;
 
 fn main() {
     #[cfg(windows)]
