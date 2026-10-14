@@ -1,4 +1,10 @@
-use bumble_hci::Command;
+use bumble_hci::{
+    codes::{
+        HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
+        HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
+    },
+    Command,
+};
 use bumble_host::{Device, HostTransport};
 
 use crate::transport::{
@@ -7,6 +13,10 @@ use crate::transport::{
 };
 
 use super::{
+    connection::{
+        FalConnectAction, FalConnectConfigError, FalConnectRequest,
+        FalConnectTransaction, FalConnectionState,
+    },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyConfigError,
@@ -23,6 +33,7 @@ pub enum EngineFault {
     PollBudgetExceeded,
     InvalidState,
     PrivacyConfig(PrivacyConfigError),
+    FalConnectConfig(FalConnectConfigError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +93,8 @@ pub struct HciEngine {
     completed_scan: Option<ScanSummary>,
     privacy_state: ControllerPrivacyState,
     privacy_transaction: Option<PrivacyTransaction>,
+    fal_connection_state: FalConnectionState,
+    fal_connection_transaction: Option<FalConnectTransaction>,
 }
 
 impl HciEngine {
@@ -96,6 +109,8 @@ impl HciEngine {
             completed_scan: None,
             privacy_state: ControllerPrivacyState::Idle,
             privacy_transaction: None,
+            fal_connection_state: FalConnectionState::Idle,
+            fal_connection_transaction: None,
         }
     }
 
@@ -117,6 +132,37 @@ impl HciEngine {
 
     pub fn controller_privacy_state(&self) -> &ControllerPrivacyState {
         &self.privacy_state
+    }
+
+    pub fn fal_connection_state(&self) -> &FalConnectionState {
+        &self.fal_connection_state
+    }
+
+    pub fn begin_fal_connection(
+        &mut self,
+        request: FalConnectRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.scan_state != PassiveScanState::Idle
+            || self.privacy_transaction.is_some()
+            || self.privacy_state != ControllerPrivacyState::Ready
+            || self.fal_connection_transaction.is_some()
+            || self.device.is_scanning()
+            || self.device.is_le_connecting()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) =
+            FalConnectTransaction::begin(request)
+                .map_err(EngineFault::FalConnectConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.fal_connection_transaction = Some(transaction);
+        self.fal_connection_state = FalConnectionState::Preparing;
+        Ok(())
     }
 
     pub fn begin_controller_privacy(
@@ -308,6 +354,7 @@ impl HciEngine {
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
             self.process_privacy_observation(&observation)?;
+            self.process_fal_connection_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
         Ok(())
@@ -351,6 +398,79 @@ impl HciEngine {
                 self.privacy_state = ControllerPrivacyState::Failed(failure);
             }
             PrivacyAction::Ignored => {}
+        }
+        Ok(())
+    }
+
+    fn process_fal_connection_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let action = {
+            let Some(transaction) =
+                self.fal_connection_transaction.as_mut()
+            else {
+                return Ok(());
+            };
+
+            match observation {
+                HciObservation::CommandComplete {
+                    opcode,
+                    status,
+                    parameters_after_status,
+                } => transaction.on_command_complete(
+                    *opcode,
+                    status.unwrap_or(0xff),
+                    parameters_after_status,
+                ),
+                HciObservation::CommandStatus { opcode, status } => {
+                    transaction.on_command_status(*opcode, *status)
+                }
+            }
+        };
+
+        self.handle_fal_connection_action(action)
+    }
+
+    fn handle_fal_connection_action(
+        &mut self,
+        action: FalConnectAction,
+    ) -> Result<(), EngineFault> {
+        match action {
+            FalConnectAction::Send(command) => {
+                let opcode = command.op_code();
+                if opcode == HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND {
+                    self.fal_connection_state =
+                        FalConnectionState::Initiating;
+                } else if opcode == HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND
+                    && matches!(
+                        self.fal_connection_state,
+                        FalConnectionState::Initiating
+                            | FalConnectionState::AwaitingConnection
+                    )
+                {
+                    self.fal_connection_state =
+                        FalConnectionState::Cleaning;
+                }
+
+                self.link.handle_command(0, command);
+                self.check_link_fault()?;
+            }
+            FalConnectAction::AwaitConnection => {
+                self.fal_connection_state =
+                    FalConnectionState::AwaitingConnection;
+            }
+            FalConnectAction::Connected(connection) => {
+                self.fal_connection_transaction = None;
+                self.fal_connection_state =
+                    FalConnectionState::Connected(connection);
+            }
+            FalConnectAction::Failed(failure) => {
+                self.fal_connection_transaction = None;
+                self.fal_connection_state =
+                    FalConnectionState::Failed(failure);
+            }
+            FalConnectAction::Ignored => {}
         }
         Ok(())
     }
