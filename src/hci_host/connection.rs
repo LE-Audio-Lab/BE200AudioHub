@@ -227,7 +227,7 @@ pub struct LeConnectionSnapshot {
 impl LeConnectionSnapshot {
     pub const fn token(&self) -> ConnectionToken {
         ConnectionToken {
-            connection: self.connection,
+            connection_handle: self.connection_handle,
             generation: self.generation,
         }
     }
