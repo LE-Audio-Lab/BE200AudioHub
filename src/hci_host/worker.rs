@@ -154,6 +154,7 @@ fn run_loop(
                 &mut last_privacy_state,
                 &mut last_fal_connection_state,
                 &mut last_disconnect_state,
+                &mut last_stored_encryption_state,
                 &report_tx,
             ) {
                 return HciWorkerExit::Faulted(fault);
