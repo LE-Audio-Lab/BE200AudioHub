@@ -1,6 +1,143 @@
 use bumble::{Address, AddressType};
 use bumble_hci::Command;
 
+pub const DISCONNECT_REASON_REMOTE_USER_TERMINATED: u8 = 0x13;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisconnectConfigError {
+    InvalidConnectionHandle(u16),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisconnectFailureKind {
+    CommandStatus { status: u8 },
+    DisconnectionEventStatus { status: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisconnectFailure {
+    pub connection_handle: u16,
+    pub kind: DisconnectFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisconnectState {
+    Submitting,
+    AwaitingEvent,
+    Disconnected {
+        connection_handle: u16,
+        event_reason: u8,
+    },
+    Failed(DisconnectFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DisconnectEvent {
+    Complete {
+        connection_handle: u16,
+        status: u8,
+        reason: u8,
+    },
+}
+
+#[derive(Debug)]
+pub enum DisconnectAction {
+    AwaitEvent,
+    Disconnected {
+        connection_handle: u16,
+        event_reason: u8,
+    },
+    Failed(DisconnectFailure),
+    Ignored,
+}
+
+pub struct DisconnectTransaction {
+    connection_handle: u16,
+    awaiting_event: bool,
+    terminal: bool,
+}
+
+impl DisconnectTransaction {
+    pub fn begin(
+        connection_handle: u16,
+    ) -> Result<(Self, Command), DisconnectConfigError> {
+        if connection_handle > 0x0eff {
+            return Err(DisconnectConfigError::InvalidConnectionHandle(
+                connection_handle,
+            ));
+        }
+
+        Ok((
+            Self {
+                connection_handle,
+                awaiting_event: false,
+                terminal: false,
+            },
+            Command::Disconnect {
+                connection_handle,
+                reason: DISCONNECT_REASON_REMOTE_USER_TERMINATED,
+            },
+        ))
+    }
+
+    pub fn on_command_status(
+        &mut self,
+        opcode: u16,
+        status: u8,
+    ) -> DisconnectAction {
+        if self.terminal
+            || opcode != bumble_hci::codes::HCI_DISCONNECT_COMMAND
+        {
+            return DisconnectAction::Ignored;
+        }
+
+        if status != 0 {
+            self.terminal = true;
+            return DisconnectAction::Failed(DisconnectFailure {
+                connection_handle: self.connection_handle,
+                kind: DisconnectFailureKind::CommandStatus { status },
+            });
+        }
+
+        self.awaiting_event = true;
+        DisconnectAction::AwaitEvent
+    }
+
+    pub fn on_event(
+        &mut self,
+        event: DisconnectEvent,
+    ) -> DisconnectAction {
+        if self.terminal || !self.awaiting_event {
+            return DisconnectAction::Ignored;
+        }
+
+        let DisconnectEvent::Complete {
+            connection_handle,
+            status,
+            reason,
+        } = event;
+
+        if connection_handle != self.connection_handle {
+            return DisconnectAction::Ignored;
+        }
+
+        self.terminal = true;
+        if status != 0 {
+            return DisconnectAction::Failed(DisconnectFailure {
+                connection_handle,
+                kind: DisconnectFailureKind::DisconnectionEventStatus {
+                    status,
+                },
+            });
+        }
+
+        DisconnectAction::Disconnected {
+            connection_handle,
+            event_reason: reason,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LePeerIdentity {
     /// Bluetooth address bytes in HCI/wire order.
@@ -474,6 +611,84 @@ mod tests {
                 command
             }
             other => panic!("expected Send({opcode:#06x}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disconnect_command_reason_is_fixed_to_0x13() {
+        let (_tx, command) =
+            DisconnectTransaction::begin(0x0800).unwrap();
+        match command {
+            Command::Disconnect {
+                connection_handle,
+                reason,
+            } => {
+                assert_eq!(connection_handle, 0x0800);
+                assert_eq!(
+                    reason,
+                    DISCONNECT_REASON_REMOTE_USER_TERMINATED
+                );
+                assert_eq!(reason, 0x13);
+            }
+            other => panic!("expected Disconnect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_0x16_event_reason_is_result_not_command_parameter() {
+        let (mut tx, _command) =
+            DisconnectTransaction::begin(0x0800).unwrap();
+
+        assert!(matches!(
+            tx.on_command_status(
+                bumble_hci::codes::HCI_DISCONNECT_COMMAND,
+                0,
+            ),
+            DisconnectAction::AwaitEvent
+        ));
+
+        match tx.on_event(DisconnectEvent::Complete {
+            connection_handle: 0x0800,
+            status: 0,
+            reason: 0x16,
+        }) {
+            DisconnectAction::Disconnected {
+                connection_handle,
+                event_reason,
+            } => {
+                assert_eq!(connection_handle, 0x0800);
+                assert_eq!(event_reason, 0x16);
+                assert_ne!(
+                    event_reason,
+                    DISCONNECT_REASON_REMOTE_USER_TERMINATED
+                );
+            }
+            other => panic!("expected disconnected result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disconnect_rejects_invalid_handle_and_nonzero_status() {
+        assert!(matches!(
+            DisconnectTransaction::begin(0x0f00),
+            Err(DisconnectConfigError::InvalidConnectionHandle(0x0f00))
+        ));
+
+        let (mut tx, _command) =
+            DisconnectTransaction::begin(0x0800).unwrap();
+        match tx.on_command_status(
+            bumble_hci::codes::HCI_DISCONNECT_COMMAND,
+            0x12,
+        ) {
+            DisconnectAction::Failed(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    DisconnectFailureKind::CommandStatus {
+                        status: 0x12,
+                    }
+                );
+            }
+            other => panic!("expected disconnect failure, got {other:?}"),
         }
     }
 
