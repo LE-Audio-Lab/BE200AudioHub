@@ -21,6 +21,7 @@ use crate::transport::{
 };
 
 use super::{
+    acl_credit::{AclCreditAudit, AclCreditFault},
     connection::{
         ConnectionEvent, ConnectionToken, DisconnectAction, DisconnectConfigError,
         DisconnectEvent, DisconnectState, DisconnectTransaction,
@@ -59,6 +60,7 @@ pub enum EngineFault {
         requested_generation: u64,
         current_generation: Option<u64>,
     },
+    AclCredit(AclCreditFault),
     DeviceEventBacklogFull,
 }
 
@@ -142,6 +144,7 @@ pub struct HciEngine {
     stored_encryption_transaction: Option<StoredEncryptionTransaction>,
     connection_generations: BTreeMap<u16, u64>,
     next_connection_generation: u64,
+    acl_credit_audit: AclCreditAudit,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -168,6 +171,7 @@ impl HciEngine {
             stored_encryption_transaction: None,
             connection_generations: BTreeMap::new(),
             next_connection_generation: 1,
+            acl_credit_audit: AclCreditAudit::default(),
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -554,7 +558,7 @@ impl HciEngine {
                 self.process_observations()?;
                 self.process_device_events()?;
                 self.check_link_fault()?;
-                self.refresh_attach_state();
+                self.refresh_attach_state()?;
                 return Ok(turns);
             }
 
@@ -590,12 +594,51 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
+            self.process_acl_credit_observation(&observation)?;
             self.process_controller_identity_observation(&observation);
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
             self.process_stored_encryption_observation(&observation)?;
             self.process_scan_observation(&observation)?;
+        }
+        Ok(())
+    }
+
+    fn process_acl_credit_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        match observation {
+            HciObservation::AclSubmitted {
+                connection_handle,
+            } => {
+                if !self
+                    .connection_generations
+                    .contains_key(connection_handle)
+                {
+                    return Err(EngineFault::AclCredit(
+                        AclCreditFault::UnknownCompletion {
+                            connection_handle: *connection_handle,
+                            completed: 0,
+                        },
+                    ));
+                }
+                self.acl_credit_audit
+                    .submitted(*connection_handle)
+                    .map_err(EngineFault::AclCredit)?;
+            }
+            HciObservation::CompletedPackets { completions } => {
+                for (connection_handle, completed) in completions {
+                    self.acl_credit_audit
+                        .completed(
+                            *connection_handle,
+                            usize::from(*completed),
+                        )
+                        .map_err(EngineFault::AclCredit)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -834,6 +877,10 @@ impl HciEngine {
                 HciObservation::CommandStatus { opcode, status } => {
                     transaction.on_command_status(*opcode, *status)
                 }
+                HciObservation::AclSubmitted { .. }
+                | HciObservation::CompletedPackets { .. } => {
+                    FalConnectAction::Ignored
+                }
             }
         };
 
@@ -935,7 +982,12 @@ impl HciEngine {
             }
 
             if let Some(handle) = retire_handle {
+                self.acl_credit_audit.flush(handle);
                 self.connection_generations.remove(&handle);
+            }
+
+            if matches!(event, DeviceEvent::Flush) {
+                self.acl_credit_audit.flush_all();
             }
         }
         Ok(())
@@ -1098,6 +1150,8 @@ impl HciEngine {
             HciObservation::CommandStatus { opcode, status } => {
                 (*opcode, *status)
             }
+            HciObservation::AclSubmitted { .. }
+            | HciObservation::CompletedPackets { .. } => return Ok(()),
         };
 
         if self.scan_pending_opcode != Some(opcode) {
@@ -1140,9 +1194,9 @@ impl HciEngine {
         Ok(())
     }
 
-    fn refresh_attach_state(&mut self) {
+    fn refresh_attach_state(&mut self) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Discovering {
-            return;
+            return Ok(());
         }
 
         if let Some(status) = self.device.local_supported_commands_status() {
@@ -1150,19 +1204,23 @@ impl HciEngine {
                 self.attach_state = OperationalAttachState::Failed(
                     OperationalAttachFailure::SupportedCommandsStatus(status),
                 );
-                return;
+                return Ok(());
             }
         }
 
         if self.device.host_initialization_complete() {
-            self.attach_state = if self.device.host_initialization_succeeded() {
-                OperationalAttachState::Ready
+            if self.device.host_initialization_succeeded() {
+                self.acl_credit_audit
+                    .configure(self.device.le_acl_max_in_flight())
+                    .map_err(EngineFault::AclCredit)?;
+                self.attach_state = OperationalAttachState::Ready;
             } else {
-                OperationalAttachState::Failed(
+                self.attach_state = OperationalAttachState::Failed(
                     OperationalAttachFailure::HostInitializationFailed,
-                )
-            };
+                );
+            }
         }
+        Ok(())
     }
 
     pub(crate) fn device(&self) -> &Device {
@@ -1770,6 +1828,57 @@ mod tests {
             }
         );
         assert!(!engine.device().is_connected_on_handle(0x0800));
+    }
+
+    #[test]
+    fn acl_credit_audit_faults_on_over_completion_per_handle() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert!(engine.link_mut().send_acl_packet(
+            0,
+            bumble_hci::AclDataPacket {
+                connection_handle: 0x0800,
+                pb_flag: 0,
+                bc_flag: 0,
+                data_total_length: 4,
+                data: vec![0, 0, 4, 0],
+            },
+        ));
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(engine.acl_credit_audit.in_flight_on(0x0800), 1);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x13, 0x05, 0x01,
+                0x00, 0x08, 0x02, 0x00,
+            ]))
+            .unwrap();
+        assert_eq!(
+            engine.poll_until_quiescent(),
+            Err(EngineFault::AclCredit(
+                AclCreditFault::CompletionOverflow {
+                    connection_handle: 0x0800,
+                    completed: 2,
+                    in_flight: 1,
+                }
+            ))
+        );
     }
 
     #[test]
