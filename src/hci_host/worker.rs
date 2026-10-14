@@ -242,6 +242,9 @@ fn process_command(
         HciCommand::BeginFalConnection(request) => {
             engine.begin_fal_connection(request)
         }
+        HciCommand::CancelFalConnection => {
+            engine.cancel_fal_connection()
+        }
     }
 }
 
