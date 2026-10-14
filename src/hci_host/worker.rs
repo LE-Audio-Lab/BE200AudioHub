@@ -90,7 +90,7 @@ fn run_loop(
                         );
                     }
                     if let Err(fault) = publish_state_transitions(
-                        &engine,
+                        &mut engine,
                         &mut last_attach_state,
                         &mut last_scan_state,
                         &report_tx,
@@ -135,7 +135,7 @@ fn run_loop(
                 );
             }
             if let Err(fault) = publish_state_transitions(
-                &engine,
+                &mut engine,
                 &mut last_attach_state,
                 &mut last_scan_state,
                 &report_tx,
@@ -173,7 +173,7 @@ fn run_loop(
                     );
                 }
                 if let Err(fault) = publish_state_transitions(
-                    &engine,
+                    &mut engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
                     &report_tx,
@@ -197,7 +197,7 @@ fn run_loop(
                     );
                 }
                 if let Err(fault) = publish_state_transitions(
-                    &engine,
+                    &mut engine,
                     &mut last_attach_state,
                     &mut last_scan_state,
                     &report_tx,
@@ -227,7 +227,7 @@ fn process_command(
 }
 
 fn publish_state_transitions(
-    engine: &HciEngine,
+    engine: &mut HciEngine,
     last_state: &mut OperationalAttachState,
     last_scan_state: &mut PassiveScanState,
     report_tx: &crossbeam_channel::Sender<HciReport>,
@@ -254,6 +254,12 @@ fn publish_state_transitions(
             .try_send(HciReport::PassiveScanState(scan_state))
             .map_err(map_report_error)?;
         *last_scan_state = scan_state;
+    }
+
+    if let Some(summary) = engine.take_completed_scan() {
+        report_tx
+            .try_send(HciReport::ScanComplete(summary))
+            .map_err(map_report_error)?;
     }
 
     Ok(())
