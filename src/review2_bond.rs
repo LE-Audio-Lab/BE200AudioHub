@@ -20,6 +20,7 @@ pub struct ReviewBondMember {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReviewBondMaterial {
     pub controller_identity: String,
+    pub controller_identity_le: [u8; 6],
     pub local_irk: [u8; 16],
     pub members: Vec<ReviewBondMember>,
 }
@@ -51,6 +52,17 @@ pub fn load_verified_bond_set(
             "controller identity is empty".into(),
         ));
     }
+
+    let controller_address = Address::parse(
+        &controller_identity,
+        AddressType::PUBLIC_DEVICE,
+    )
+    .map_err(|error| {
+        BondInputError(format!(
+            "invalid controller identity {controller_identity:?}: {error}"
+        ))
+    })?;
+    let controller_identity_le = *controller_address.address_bytes();
 
     let local_identity = read_json(
         &root.join("local-identity.json"),
@@ -207,6 +219,7 @@ pub fn load_verified_bond_set(
 
     Ok(ReviewBondMaterial {
         controller_identity,
+        controller_identity_le,
         local_irk,
         members: output,
     })
@@ -467,6 +480,10 @@ mod tests {
         assert_eq!(
             material.controller_identity,
             "44:A3:BB:36:94:1A"
+        );
+        assert_eq!(
+            material.controller_identity_le,
+            [0x1a, 0x94, 0x36, 0xbb, 0xa3, 0x44]
         );
         assert_eq!(material.local_irk, [0x22; 16]);
         assert_eq!(material.members.len(), 2);
