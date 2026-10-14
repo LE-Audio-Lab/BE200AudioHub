@@ -24,7 +24,8 @@ use super::{
         ConnectionEvent, DisconnectAction, DisconnectConfigError,
         DisconnectEvent, DisconnectState, DisconnectTransaction,
         FalConnectAction, FalConnectConfigError, FalConnectRequest,
-        FalConnectTransaction, FalConnectionState, LeConnectionSnapshot,
+        FalConnectTransaction, FalConnectionState,
+        LeConnectionSetSnapshot, LeConnectionSnapshot,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
