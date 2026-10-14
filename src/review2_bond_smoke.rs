@@ -858,7 +858,6 @@ pub(crate) fn cleanup_stack(
 pub(crate) struct DualEncryptedBondSession {
     pub(crate) firmware: FirmwareLoadOutcome,
     pub(crate) controller_identity: String,
-    pub(crate) plan: BondSmokePlan,
     pub(crate) stack: HciStack,
     pub(crate) tracker: BondSmokeTracker,
     pub(crate) members: Vec<BondSmokeMemberResult>,
@@ -868,22 +867,6 @@ pub(crate) struct DualEncryptedBondSession {
 
 #[cfg(windows)]
 impl DualEncryptedBondSession {
-    pub(crate) fn parts(
-        &mut self,
-    ) -> (
-        &HciStack,
-        &mut BondSmokeTracker,
-        &BondSmokePlan,
-        &[BondSmokeMemberResult],
-    ) {
-        (
-            &self.stack,
-            &mut self.tracker,
-            &self.plan,
-            &self.members,
-        )
-    }
-
     pub(crate) fn finish(
         mut self,
     ) -> Result<BondSmokeResult, BondSmokeExecuteError> {
@@ -1027,7 +1010,6 @@ pub(crate) fn open_dual_encrypted_bond_session(
     Ok(DualEncryptedBondSession {
         firmware,
         controller_identity,
-        plan,
         stack,
         tracker,
         members,
