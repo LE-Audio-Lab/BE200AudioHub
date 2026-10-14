@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use bumble_hci::{
     codes::{
@@ -42,6 +42,7 @@ pub struct QueueHostTransport {
     tx: TransportTx,
     inbound: VecDeque<HciPacket>,
     observations: VecDeque<HciObservation>,
+    suppress_command_complete_once: BTreeSet<u16>,
     fault: Option<LinkFault>,
 }
 
@@ -51,6 +52,7 @@ impl QueueHostTransport {
             tx,
             inbound: VecDeque::new(),
             observations: VecDeque::new(),
+            suppress_command_complete_once: BTreeSet::new(),
             fault: None,
         }
     }
@@ -73,8 +75,16 @@ impl QueueHostTransport {
 
         let parsed = HciPacket::from_bytes(&h4)
             .map_err(|_| LinkFault::InvalidControllerPacket)?;
-        self.inbound
-            .push_back(normalize_status_only_command_complete(parsed));
+
+        let suppress = matches!(
+            self.observations.back(),
+            Some(HciObservation::CommandComplete { opcode, .. })
+                if self.suppress_command_complete_once.remove(opcode)
+        );
+        if !suppress {
+            self.inbound
+                .push_back(normalize_status_only_command_complete(parsed));
+        }
         Ok(())
     }
 
@@ -84,6 +94,10 @@ impl QueueHostTransport {
 
     pub fn take_observations(&mut self) -> Vec<HciObservation> {
         self.observations.drain(..).collect()
+    }
+
+    pub fn suppress_next_command_complete(&mut self, opcode: u16) {
+        self.suppress_command_complete_once.insert(opcode);
     }
 
     fn send_native(&mut self, packet_type: u8, bytes: Vec<u8>) -> bool {
@@ -315,6 +329,37 @@ mod tests {
                 parameters_after_status: vec![0x10],
             }]
         );
+    }
+
+    #[test]
+    fn one_shot_suppressed_completion_is_journaled_but_not_delivered() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+        link.suppress_next_command_complete(0x1009);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x0a, 0x01, 0x09, 0x10, 0x00,
+            1, 2, 3, 4, 5, 6,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::CommandComplete {
+                opcode: 0x1009,
+                status: Some(0),
+                parameters_after_status: vec![1, 2, 3, 4, 5, 6],
+            }]
+        );
+        assert!(link.drain_host_events(0).is_empty());
+
+        // Suppression is one-shot: the next completion reaches Bumble.
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x0a, 0x01, 0x09, 0x10, 0x00,
+            6, 5, 4, 3, 2, 1,
+        ]))
+        .unwrap();
+        assert_eq!(link.drain_host_events(0).len(), 1);
     }
 
     #[test]
