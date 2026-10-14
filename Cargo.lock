@@ -30,6 +30,7 @@ name = "be200audiohub"
 version = "0.2.0"
 dependencies = [
  "bumble",
+ "bumble-att",
  "bumble-hci",
  "bumble-host",
  "crossbeam-channel",
