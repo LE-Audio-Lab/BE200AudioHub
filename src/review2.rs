@@ -1,12 +1,41 @@
 use std::path::PathBuf;
 
-use crate::hci_host::smoke::{parse_smoke_args, SmokeConfig};
+use crate::{
+    hci_host::smoke::{parse_smoke_args, SmokeConfig, SmokeError, SmokeResult},
+    platform::be200_firmware_loader::{FirmwareLoadError, FirmwareLoadOutcome},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HciSmokeConfig {
     pub sfi: PathBuf,
     pub ddc: PathBuf,
     pub smoke: SmokeConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HciSmokeResult {
+    pub firmware: FirmwareLoadOutcome,
+    pub hci: SmokeResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HciSmokeError {
+    Firmware(FirmwareLoadError),
+    Hci(SmokeError),
+}
+
+#[cfg(windows)]
+pub fn execute_hci_smoke(config: HciSmokeConfig) -> Result<HciSmokeResult, HciSmokeError> {
+    let firmware = crate::platform::be200_firmware_port::ensure_operational(
+        &config.sfi,
+        &config.ddc,
+    )
+    .map_err(HciSmokeError::Firmware)?;
+
+    let hci = crate::hci_host::smoke::run_be200_smoke(config.smoke)
+        .map_err(HciSmokeError::Hci)?;
+
+    Ok(HciSmokeResult { firmware, hci })
 }
 
 pub fn parse_hci_smoke_args(args: &[String]) -> Result<HciSmokeConfig, String> {
