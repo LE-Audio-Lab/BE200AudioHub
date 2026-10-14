@@ -25,11 +25,12 @@ pub enum LinkFault {
     InvalidControllerPacket,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HciObservation {
     CommandComplete {
         opcode: u16,
         status: Option<u8>,
+        parameters_after_status: Vec<u8>,
     },
     CommandStatus {
         opcode: u16,
@@ -156,6 +157,7 @@ fn observe_native_event(bytes: &[u8]) -> Option<HciObservation> {
         0x0e if bytes.len() >= 5 => Some(HciObservation::CommandComplete {
             opcode: u16::from_le_bytes([bytes[3], bytes[4]]),
             status: bytes.get(5).copied(),
+            parameters_after_status: bytes.get(6..).unwrap_or(&[]).to_vec(),
         }),
 
         // HCI Command Status:
@@ -288,9 +290,31 @@ mod tests {
             vec![HciObservation::CommandComplete {
                 opcode: 0x0c03,
                 status: Some(0),
+                parameters_after_status: Vec::new(),
             }]
         );
         assert_eq!(link.drain_host_events(0).len(), 1);
+    }
+
+    #[test]
+    fn command_complete_journals_payload_after_status() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        // LE Read Resolving List Size, status=0, capacity=0x10.
+        link.ingest(ControllerPacket::Event(vec![
+            0x0e, 0x05, 0x01, 0x2a, 0x20, 0x00, 0x10,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::CommandComplete {
+                opcode: 0x202a,
+                status: Some(0),
+                parameters_after_status: vec![0x10],
+            }]
+        );
     }
 
     #[test]
