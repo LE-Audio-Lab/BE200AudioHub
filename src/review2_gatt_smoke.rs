@@ -26,6 +26,7 @@ use crate::{
 pub const PACS_UUID: u16 = 0x1850;
 pub const ASCS_UUID: u16 = 0x184E;
 pub const CAS_UUID: u16 = 0x1853;
+pub const CSIS_UUID: u16 = 0x1846;
 pub const PACS_SUPPORTED_AUDIO_CONTEXTS_UUID: u16 = 0x2BCE;
 
 const DEFAULT_GATT_TIMEOUT_SECONDS: u64 = 5;
@@ -118,6 +119,10 @@ pub struct GattSmokeMemberResult {
     pub ascs: GattServiceRange,
     pub cas: GattServiceRange,
     pub pacs_characteristic_count: usize,
+    pub ascs_characteristic_count: usize,
+    pub cas_included_service_count: usize,
+    pub cas_includes_csis: bool,
+    pub descriptor_probe_count: usize,
     pub supported_contexts_handle: u16,
     pub supported_contexts_value: Vec<u8>,
 }
@@ -351,6 +356,59 @@ fn inspect_member(
         }
     };
 
+    let ascs_chars_request = *next_request_id;
+    *next_request_id += 1;
+    let ascs_characteristics = match execute_gatt(
+        stack,
+        tracker,
+        connection,
+        ascs_chars_request,
+        GattOperation::DiscoverCharacteristics {
+            service_handle: ascs.start_handle,
+            end_group_handle: ascs.end_handle,
+        },
+        timeout,
+    )? {
+        GattResult::Characteristics(values) => values,
+        other => {
+            return Err(format!(
+                "unexpected ASCS characteristic result: {other:?}"
+            ))
+        }
+    };
+
+    if ascs_characteristics.is_empty() {
+        return Err("ASCS characteristic discovery returned empty".into());
+    }
+
+    let include_request = *next_request_id;
+    *next_request_id += 1;
+    let included_services = match execute_gatt(
+        stack,
+        tracker,
+        connection,
+        include_request,
+        GattOperation::DiscoverIncludedServices {
+            service_handle: cas.start_handle,
+            end_group_handle: cas.end_handle,
+        },
+        timeout,
+    )? {
+        GattResult::IncludedServices(values) => values,
+        other => {
+            return Err(format!(
+                "unexpected CAS included-service result: {other:?}"
+            ))
+        }
+    };
+
+    let cas_includes_csis = included_services
+        .iter()
+        .any(|service| service.uuid == Uuid::from_16_bits(CSIS_UUID));
+    if !cas_includes_csis {
+        return Err("CAS does not include CSIS".into());
+    }
+
     let supported = characteristic_with_uuid(
         &characteristics,
         PACS_SUPPORTED_AUDIO_CONTEXTS_UUID,
@@ -389,6 +447,35 @@ fn inspect_member(
         );
     }
 
+    let descriptor_probe_count = if let Some(characteristic) =
+        ascs_characteristics.iter().find(|characteristic| {
+            characteristic.handle < characteristic.end_group_handle
+        })
+    {
+        let descriptor_request = *next_request_id;
+        *next_request_id += 1;
+        match execute_gatt(
+            stack,
+            tracker,
+            connection,
+            descriptor_request,
+            GattOperation::DiscoverDescriptors {
+                starting_handle: characteristic.handle + 1,
+                ending_handle: characteristic.end_group_handle,
+            },
+            timeout,
+        )? {
+            GattResult::Descriptors(values) => values.len(),
+            other => {
+                return Err(format!(
+                    "unexpected descriptor discovery result: {other:?}"
+                ))
+            }
+        }
+    } else {
+        0
+    };
+
     Ok(GattSmokeMemberResult {
         identity_address: identity_address.to_string(),
         connection,
@@ -398,6 +485,10 @@ fn inspect_member(
         ascs,
         cas,
         pacs_characteristic_count: characteristics.len(),
+        ascs_characteristic_count: ascs_characteristics.len(),
+        cas_included_service_count: included_services.len(),
+        cas_includes_csis,
+        descriptor_probe_count,
         supported_contexts_handle: supported.handle,
         supported_contexts_value,
     })
