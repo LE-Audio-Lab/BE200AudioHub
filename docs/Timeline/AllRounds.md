@@ -1,10 +1,10 @@
 # BE200AudioHub — Round 1–4 全量合并档案
 
-> **性质：原文汇编，不是新的技术判定。** 下方依 Round1 → Round4 按顺序收录四份经 SHA 验证的原始文档。各轮“当前状态”“下一步”仅反映其**历史截止点**，不可覆盖后续 Round 的新结果。
+> **性质：Round1–4 原文汇编，不是新的技术判定。** 下方依 Round1 → Round4 按顺序收录四份经 SHA 验证的原始文档。各轮“当前状态”“下一步”仅反映其**历史截止点**，不可覆盖后续 Round 的新结果。
 >
-> **截至 Round4 最新已证实状态**：R5.2-B 双耳 CIS 建立、显式断开、双 ASE 回 Idle、Remove CIG、Bond 不变；R5.3 ISO Data Path / LC3 音频仍未 HIL。
+> **本文件截止点仍是 Round4 历史状态。** 后续 Experiment 封板 / Review-1 见 [Round5.md](./Round5.md)；Review-2A/2B HCI Host 与 dual encrypted ACL HIL 见 [Round6.md](./Round6.md)。不要用本合订版顶部的旧截止状态覆盖 Round5/6。
 >
-> 速读请看 [README.md](./README.md)、[TIMELINE.md](./TIMELINE.md)；所有故障和修复见 [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)。
+> 当前速读请看 [README.md](./README.md)、[TIMELINE.md](./TIMELINE.md)、[Round6.md](./Round6.md)；所有故障和修复见 [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)。
 
 ## 原文目录
 
