@@ -714,7 +714,78 @@ fn run_member(
     })
 }
 
-fn cleanup_stack(
+pub(crate) fn establish_dual_encrypted_session(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+    connect_timeout: Duration,
+) -> Result<Vec<BondSmokeMemberResult>, BondSmokeRunError> {
+    send_control(
+        stack.control().try_begin_operational_attach(),
+        "begin resetless attach",
+    )?;
+    wait_attach(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+    )?;
+
+    send_control(
+        stack.control().try_read_controller_identity(),
+        "read controller identity",
+    )?;
+    let identity = wait_controller_identity(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+    )?;
+    if !plan.identity_matches(identity) {
+        return Err(BondSmokeRunError::ControllerIdentityMismatch {
+            expected: plan.controller_identity_le,
+            actual: identity.public_address_le,
+        });
+    }
+
+    send_control(
+        stack
+            .control()
+            .try_configure_controller_privacy(plan.privacy_config()),
+        "configure controller privacy",
+    )?;
+    wait_privacy_ready(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+    )?;
+
+    let mut known_connections = Vec::new();
+    let mut members = Vec::with_capacity(2);
+
+    for index in 0..2 {
+        members.push(run_member(
+            stack,
+            tracker,
+            plan,
+            index,
+            connect_timeout,
+            &mut known_connections,
+        )?);
+    }
+
+    wait_dual_encrypted(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+        [
+            members[0].connection,
+            members[1].connection,
+        ],
+    )?;
+
+    Ok(members)
+}
+
+pub(crate) fn cleanup_stack(
     stack: &HciStack,
     tracker: &mut BondSmokeTracker,
 ) -> BondSmokeCleanupSummary {
@@ -819,80 +890,15 @@ pub fn execute_bond_smoke(
     let controller_identity = format_address_le(plan.controller_identity_le);
     let stack = spawn_be200_hci_stack(HciStackConfig::default());
     let mut tracker = BondSmokeTracker::default();
-    let mut known_connections = Vec::new();
-    let mut members = Vec::new();
 
-    let primary = (|| -> Result<(), BondSmokeRunError> {
-        send_control(
-            stack.control().try_begin_operational_attach(),
-            "begin resetless attach",
-        )?;
-        wait_attach(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-
-        send_control(
-            stack.control().try_read_controller_identity(),
-            "read controller identity",
-        )?;
-        let identity = wait_controller_identity(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-        if !plan.identity_matches(identity) {
-            return Err(BondSmokeRunError::ControllerIdentityMismatch {
-                expected: plan.controller_identity_le,
-                actual: identity.public_address_le,
-            });
-        }
-
-        send_control(
-            stack
-                .control()
-                .try_configure_controller_privacy(plan.privacy_config()),
-            "configure controller privacy",
-        )?;
-        wait_privacy_ready(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-        )?;
-
-        let first = run_member(
-            &stack,
-            &mut tracker,
-            &plan,
-            0,
-            config.connect_timeout,
-            &mut known_connections,
-        )?;
-        members.push(first);
-
-        let second = run_member(
-            &stack,
-            &mut tracker,
-            &plan,
-            1,
-            config.connect_timeout,
-            &mut known_connections,
-        )?;
-        members.push(second);
-
-        wait_dual_encrypted(
-            stack.reports(),
-            &mut tracker,
-            Duration::from_secs(5),
-            [
-                members[0].connection,
-                members[1].connection,
-            ],
-        )?;
-
-        Ok(())
-    })();
+    let session = establish_dual_encrypted_session(
+        &stack,
+        &mut tracker,
+        &plan,
+        config.connect_timeout,
+    );
+    let primary = session.as_ref().map(|_| ()).map_err(Clone::clone);
+    let members = session.unwrap_or_default();
 
     // Cleanup runs even after the first failing stage. It derives live handles
     // from the latest ConnectionSet report rather than from intended state.
