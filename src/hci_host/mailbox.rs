@@ -10,8 +10,11 @@ use crate::{
     },
 };
 
-use super::engine::{
-    ControllerCapabilities, OperationalAttachState, PassiveScanState,
+use super::{
+    engine::{
+        ControllerCapabilities, OperationalAttachState, PassiveScanState,
+    },
+    scan::ScanSummary,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +29,7 @@ pub enum HciReport {
     AttachState(OperationalAttachState),
     CapabilitiesReady(ControllerCapabilities),
     PassiveScanState(PassiveScanState),
+    ScanComplete(ScanSummary),
 }
 
 #[derive(Clone)]
