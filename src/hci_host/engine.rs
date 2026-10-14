@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use bumble_hci::{
     codes::{
+        HCI_DISCONNECT_COMMAND,
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
         HCI_LE_EXTENDED_CREATE_CONNECTION_COMMAND,
@@ -19,9 +20,10 @@ use crate::transport::{
 
 use super::{
     connection::{
-        ConnectionEvent, FalConnectAction, FalConnectConfigError,
-        FalConnectRequest, FalConnectTransaction, FalConnectionState,
-        LeConnectionSnapshot,
+        ConnectionEvent, DisconnectAction, DisconnectConfigError,
+        DisconnectEvent, DisconnectState, DisconnectTransaction,
+        FalConnectAction, FalConnectConfigError, FalConnectRequest,
+        FalConnectTransaction, FalConnectionState, LeConnectionSnapshot,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
@@ -41,6 +43,7 @@ pub enum EngineFault {
     InvalidState,
     PrivacyConfig(PrivacyConfigError),
     FalConnectConfig(FalConnectConfigError),
+    DisconnectConfig(DisconnectConfigError),
     DeviceEventBacklogFull,
 }
 
@@ -103,6 +106,8 @@ pub struct HciEngine {
     privacy_transaction: Option<PrivacyTransaction>,
     fal_connection_state: FalConnectionState,
     fal_connection_transaction: Option<FalConnectTransaction>,
+    disconnect_state: DisconnectState,
+    disconnect_transaction: Option<DisconnectTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -120,6 +125,8 @@ impl HciEngine {
             privacy_transaction: None,
             fal_connection_state: FalConnectionState::Idle,
             fal_connection_transaction: None,
+            disconnect_state: DisconnectState::Idle,
+            disconnect_transaction: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -146,6 +153,33 @@ impl HciEngine {
 
     pub fn fal_connection_state(&self) -> &FalConnectionState {
         &self.fal_connection_state
+    }
+
+    pub fn disconnect_state(&self) -> &DisconnectState {
+        &self.disconnect_state
+    }
+
+    pub fn begin_disconnect(
+        &mut self,
+        connection_handle: u16,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.disconnect_transaction.is_some()
+            || !self.device.is_connected_on_handle(connection_handle)
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) =
+            DisconnectTransaction::begin(connection_handle)
+                .map_err(EngineFault::DisconnectConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.disconnect_transaction = Some(transaction);
+        self.disconnect_state = DisconnectState::Submitting;
+        Ok(())
     }
 
     pub fn cancel_fal_connection(&mut self) -> Result<(), EngineFault> {
@@ -384,6 +418,7 @@ impl HciEngine {
         for observation in self.link.take_observations() {
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
+            self.process_disconnect_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
         Ok(())
@@ -427,6 +462,53 @@ impl HciEngine {
                 self.privacy_state = ControllerPrivacyState::Failed(failure);
             }
             PrivacyAction::Ignored => {}
+        }
+        Ok(())
+    }
+
+    fn process_disconnect_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let HciObservation::CommandStatus { opcode, status } = observation else {
+            return Ok(());
+        };
+        if *opcode != HCI_DISCONNECT_COMMAND {
+            return Ok(());
+        }
+
+        let action = {
+            let Some(transaction) = self.disconnect_transaction.as_mut() else {
+                return Ok(());
+            };
+            transaction.on_command_status(*opcode, *status)
+        };
+        self.handle_disconnect_action(action)
+    }
+
+    fn handle_disconnect_action(
+        &mut self,
+        action: DisconnectAction,
+    ) -> Result<(), EngineFault> {
+        match action {
+            DisconnectAction::AwaitEvent => {
+                self.disconnect_state = DisconnectState::AwaitingEvent;
+            }
+            DisconnectAction::Disconnected {
+                connection_handle,
+                event_reason,
+            } => {
+                self.disconnect_transaction = None;
+                self.disconnect_state = DisconnectState::Disconnected {
+                    connection_handle,
+                    event_reason,
+                };
+            }
+            DisconnectAction::Failed(failure) => {
+                self.disconnect_transaction = None;
+                self.disconnect_state = DisconnectState::Failed(failure);
+            }
+            DisconnectAction::Ignored => {}
         }
         Ok(())
     }
@@ -522,6 +604,9 @@ impl HciEngine {
 
     fn process_device_events(&mut self) -> Result<(), EngineFault> {
         for event in self.device.take_device_events() {
+            if self.process_disconnect_device_event(&event)? {
+                continue;
+            }
             if self.process_fal_connection_device_event(&event)? {
                 continue;
             }
@@ -542,6 +627,46 @@ impl HciEngine {
             }
         }
         Ok(())
+    }
+
+    fn process_disconnect_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Result<bool, EngineFault> {
+        let disconnect_event = match event {
+            DeviceEvent::Disconnected {
+                connection_handle,
+                reason,
+            } => Some(DisconnectEvent::Disconnected {
+                connection_handle: *connection_handle,
+                reason: *reason,
+            }),
+            DeviceEvent::DisconnectionFailed {
+                connection_handle,
+                status,
+            } => Some(DisconnectEvent::Failed {
+                connection_handle: *connection_handle,
+                status: *status,
+            }),
+            _ => None,
+        };
+
+        let Some(disconnect_event) = disconnect_event else {
+            return Ok(false);
+        };
+
+        let action = {
+            let Some(transaction) = self.disconnect_transaction.as_mut() else {
+                return Ok(false);
+            };
+            transaction.on_event(disconnect_event)
+        };
+        if matches!(action, DisconnectAction::Ignored) {
+            return Ok(false);
+        }
+
+        self.handle_disconnect_action(action)?;
+        Ok(true)
     }
 
     fn process_fal_connection_device_event(
@@ -975,6 +1100,75 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn engine_disconnect_uses_0x13_and_accepts_0x16_event_reason() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        // Establish an unsolicited synthetic LE ACL so Bumble owns the
+        // connection-handle state before the disconnect request.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x13, 0x01, 0x00,
+                0x00, 0x08,
+                0x00,
+                0x01,
+                1, 2, 3, 4, 5, 6,
+                0x18, 0x00,
+                0x00, 0x00,
+                0x2a, 0x00,
+                0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(engine.device().is_connected_on_handle(0x0800));
+
+        assert_eq!(
+            engine.begin_disconnect(0x0801),
+            Err(EngineFault::InvalidState)
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+
+        engine.begin_disconnect(0x0800).unwrap();
+        let command = rx.try_recv().unwrap();
+        let HostPacket::Command(bytes) = command else {
+            panic!("expected HCI Disconnect command");
+        };
+        assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 0x0406);
+        assert_eq!(bytes, vec![0x06, 0x04, 0x03, 0x00, 0x08, 0x13]);
+        assert_eq!(
+            engine.disconnect_state(),
+            &DisconnectState::Submitting
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x06, 0x04,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.disconnect_state(),
+            &DisconnectState::AwaitingEvent
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x08, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.disconnect_state(),
+            &DisconnectState::Disconnected {
+                connection_handle: 0x0800,
+                event_reason: 0x16,
+            }
+        );
+        assert!(!engine.device().is_connected_on_handle(0x0800));
     }
 
     #[test]
