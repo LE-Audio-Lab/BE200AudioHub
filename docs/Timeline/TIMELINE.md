@@ -123,3 +123,67 @@ Round4 文档核对过的 Git 比较：R3 基线 `a80cf1e8` → Round4 最终 HI
 **待做/不能冒充成功**：ISO Data Path 和 LE HCI ISO Bulk-Out 发送均未硬件验证；LC3 Windows Encoder 未实际接到耳机；实测 Transport Latency `63,210 µs` 与 Presentation Delay `40,000 µs` 的时基关系仍需专门分析；最终 HEAD 的完整 `cargo test` 尚缺留档；长稳、异常单耳恢复、B3P 以外泛化均未验收。不得自动清除 Bond 或因清理失败直接热复位硬件。
 
 **推荐下一轮阅读顺序**：`README.md → TIMELINE.md → BUG_FIX_REGISTER.md → Round4.md → Round3.md`，遇 R1/R2 的旧假设再回原文。
+
+---
+
+## 7. Round 5 / Review continuation — 2026-10-14 to 2026-10-15
+
+> Round1–4 above remain historical snapshots. This section advances the active project view beyond the old R5.2-B cutoff.
+
+| Stage | Status | Evidence / decision |
+|---|---|---|
+| R5.3 ISO Data Path | **Experiment PASS** | Setup/Remove ISO Data Path proven; bounded dual-CIS stream can complete |
+| R5.3 LC3 First Sound | **Experiment PASS** | 48 kHz / 10 ms / 100 B mono per ear; 440 Hz L / 880 Hz R acoustically decoded by Buds3 Pro |
+| R5.3 sustained realtime quality | **Known limitation** | pitch glide / timing drift traced to synchronous USB servicing + clock/credit coupling |
+| Experiment architecture | **SEALED** | final investigation baseline `34f46809105567259f9614f648eadd0451c46b72` |
+| Experiment source | **Archived** | complete tree under `deprecated/r5/` |
+| Review architecture contract | **Frozen** | L0 Lifecycle; L1 Control/Media/HCI; IsoTxBridge; StreamClock; L2 Transport; L3 Platform |
+| Execution model | **Frozen** | Core / HCI / Media RT / Capture / USB Reactor execution domains |
+| Review-1 Runtime Kernel | **COMPLETE** | generation, bounded mailbox, cancellation, request/reply, serial context, fault propagation |
+| Review-1 Async Transport | **COMPLETE** | concurrent Event+ACL pending RX, reassembly, cancellation, libusb async backend, persistent transfer reuse |
+| Review-1 validation | **PASS** | `cargo test --workspace`: 48/48; `cargo check --workspace`: PASS; `cargo build --workspace`: PASS |
+| HCI Host | **WIP** | gated behind `hci-wip`; synthetic resetless attach/scan fixtures still need repair |
+| Reference Index | **COMPLETE** | `docs/reference-index/` provides file/function/type-level upstream oracle map |
+
+### Round5 architecture pivot
+
+The project no longer optimizes for “make the next HIL command work once”. Review code is accepted when:
+
+1. ownership is explicit;
+2. timing responsibility is explicit;
+3. queues/backlogs are bounded;
+4. deterministic behavior is covered by Cargo tests;
+5. HIL is reserved for real Windows/USB/controller/earbud assumptions.
+
+### Current implementation sequence
+
+```text
+Review-1 Runtime + Async Transport      ✅
+        ↓
+Review-2A HCI attach/capabilities/scan 🟡
+        ↓
+Review-2B ACL/privacy/stored LTK
+        ↓
+Review-2C ATT/GATT
+        ↓
+Review-2D CIG/CIS/ISO Host
+        ↓
+Control semantic migration
+        ↓
+StreamClock + IsoTxBridge
+        ↓
+Synthetic realtime First Sound
+        ↓
+WASAPI + ASRC
+        ↓
+Lifecycle / Recovery
+        ↓
+Profiling / HIL hardening
+```
+
+### New active references
+
+- [Round5.md](./Round5.md)
+- [../../docs/design/REVIEW1_RUNTIME_TRANSPORT.md](../design/REVIEW1_RUNTIME_TRANSPORT.md)
+- [../../docs/reference-index/README.md](../reference-index/README.md)
+
