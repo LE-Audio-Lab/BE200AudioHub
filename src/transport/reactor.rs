@@ -5,7 +5,7 @@ use crate::{
 };
 
 use super::{
-    packet::{ControllerPacket, ControllerPacketKind, HostPacket},
+    packet::{ControllerPacketKind, HostPacket},
     reassembly::{PacketReassembler, ReassemblyError},
     sink::{ControllerPacketSink, PacketSinkError},
 };
@@ -173,6 +173,7 @@ mod tests {
     use crate::{
         platform::test_backend::TestBackend,
         runtime::mailbox,
+        transport::packet::ControllerPacket,
     };
 
     fn reactor(
