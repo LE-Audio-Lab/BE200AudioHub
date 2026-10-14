@@ -24,17 +24,6 @@ fn main() {
             };
 
             println!("Review-2A firmware bypass: probe -> optional one-shot load -> release");
-            match platform::be200_firmware_port::ensure_operational(
-                &config.sfi,
-                &config.ddc,
-            ) {
-                Ok(outcome) => println!("Firmware bypass: {outcome:?}"),
-                Err(error) => {
-                    eprintln!("Review-2A firmware bypass FAILED: {error:?}");
-                    std::process::exit(1);
-                }
-            }
-
             println!(
                 "Review-2A HCI smoke: resetless attach -> capabilities -> passive scan"
             );
@@ -43,16 +32,17 @@ fn main() {
                 println!("Target name: {name}");
             }
 
-            match hci_host::smoke::run_be200_smoke(config.smoke) {
+            match review2::execute_hci_smoke(config) {
                 Ok(result) => {
+                    println!("Firmware bypass: {:?}", result.firmware);
                     println!("Capabilities: PASS");
                     println!(
                         "Scan: PASS reports={} observations={} truncated={}",
-                        result.scan.reports_seen,
-                        result.scan.observations.len(),
-                        result.scan.truncated
+                        result.hci.scan.reports_seen,
+                        result.hci.scan.observations.len(),
+                        result.hci.scan.truncated
                     );
-                    for observation in &result.scan.observations {
+                    for observation in &result.hci.scan.observations {
                         println!(
                             "  addr={} type={} rssi={} name={}",
                             observation.address,
@@ -61,13 +51,13 @@ fn main() {
                             observation.name.as_deref().unwrap_or("<none>")
                         );
                     }
-                    println!("Target seen: {}", result.target_seen);
+                    println!("Target seen: {}", result.hci.target_seen);
                     println!(
                         "Shutdown: hci={:?} transport={:?}",
-                        result.exit.hci, result.exit.transport
+                        result.hci.exit.hci, result.hci.exit.transport
                     );
 
-                    if !result.target_seen {
+                    if !result.hci.target_seen {
                         std::process::exit(3);
                     }
                     return;
