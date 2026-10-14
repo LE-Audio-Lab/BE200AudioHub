@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -14,7 +15,8 @@ use crate::{
             ControllerIdentity, ControllerIdentityFailure,
             OperationalAttachState,
         },
-        mailbox::HciReport,
+        mailbox::{HciReport, HciReportInbox},
+        stack::HciStackExit,
         privacy::{
             ControllerPrivacyState, ResolvingListConfig, ResolvingPeer,
             DEFAULT_RPA_TIMEOUT_SECONDS,
@@ -24,7 +26,9 @@ use crate::{
             StoredLeKeyMaterial,
         },
     },
+    platform::be200_firmware_loader::FirmwareLoadOutcome,
     review2_bond::{ReviewBondMaterial, ReviewBondMember},
+    runtime::mailbox::RecvError,
 };
 
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 12;
@@ -241,6 +245,353 @@ impl BondSmokeTracker {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BondSmokeRunError {
+    Timeout(String),
+    ReportDisconnected,
+    ControlBackpressure(String),
+    AttachFailed(String),
+    ControllerIdentity(ControllerIdentityFailure),
+    ControllerIdentityMismatch {
+        expected: [u8; 6],
+        actual: [u8; 6],
+    },
+    PrivacyFailed(String),
+    ConnectFailed {
+        member: String,
+        detail: String,
+    },
+    ConnectTimeout {
+        member: String,
+    },
+    EncryptionFailed {
+        member: String,
+        detail: String,
+    },
+    DualAclNotEncrypted,
+    DisconnectFailed {
+        connection: ConnectionToken,
+        detail: String,
+    },
+    PrivacyCleanupFailed(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BondSmokeCleanupSummary {
+    pub disconnected: Vec<(ConnectionToken, u8)>,
+    pub privacy_cleared: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondSmokeMemberResult {
+    pub identity_address: String,
+    pub connection: ConnectionToken,
+    pub encryption_key_size: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondSmokeResult {
+    pub firmware: FirmwareLoadOutcome,
+    pub controller_identity: String,
+    pub members: Vec<BondSmokeMemberResult>,
+    pub bond_unchanged: bool,
+    pub cleanup: BondSmokeCleanupSummary,
+    pub exit: HciStackExit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BondSmokeExecuteError {
+    Preflight(String),
+    Runtime {
+        primary: BondSmokeRunError,
+        cleanup: BondSmokeCleanupSummary,
+        bond_unchanged: bool,
+        exit: HciStackExit,
+    },
+}
+
+fn wait_for_report<T>(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    stage: &str,
+    mut predicate: impl FnMut(
+        &HciReport,
+        &BondSmokeTracker,
+    ) -> Option<Result<T, BondSmokeRunError>>,
+) -> Result<T, BondSmokeRunError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match reports.try_recv() {
+            Ok(report) => {
+                tracker.observe(&report);
+                if let Some(result) = predicate(&report, tracker) {
+                    return result;
+                }
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return Err(BondSmokeRunError::Timeout(
+                        stage.to_string(),
+                    ));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err(BondSmokeRunError::ReportDisconnected)
+            }
+        }
+    }
+}
+
+fn drain_reports(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+) -> Result<(), BondSmokeRunError> {
+    loop {
+        match reports.try_recv() {
+            Ok(report) => tracker.observe(&report),
+            Err(RecvError::Empty) => return Ok(()),
+            Err(RecvError::Disconnected) => {
+                return Err(BondSmokeRunError::ReportDisconnected)
+            }
+        }
+    }
+}
+
+fn wait_attach(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(reports, tracker, timeout, "attach", |report, _| {
+        match report {
+            HciReport::CapabilitiesReady(_) => Some(Ok(())),
+            HciReport::AttachState(
+                OperationalAttachState::Failed(failure),
+            ) => Some(Err(BondSmokeRunError::AttachFailed(
+                format!("{failure:?}"),
+            ))),
+            _ => None,
+        }
+    })
+}
+
+fn wait_controller_identity(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<ControllerIdentity, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "controller identity",
+        |report, _| match report {
+            HciReport::ControllerIdentity(Ok(identity)) => {
+                Some(Ok(*identity))
+            }
+            HciReport::ControllerIdentity(Err(failure)) => {
+                Some(Err(BondSmokeRunError::ControllerIdentity(*failure)))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn wait_privacy_ready(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "controller privacy",
+        |report, _| match report {
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            ) => Some(Ok(())),
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Failed(failure),
+            ) => Some(Err(BondSmokeRunError::PrivacyFailed(
+                format!("{failure:?}"),
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn wait_privacy_idle(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "privacy cleanup",
+        |report, _| match report {
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Idle,
+            ) => Some(Ok(())),
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Failed(failure),
+            ) => Some(Err(BondSmokeRunError::PrivacyCleanupFailed(
+                format!("{failure:?}"),
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn wait_connected(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    member: &str,
+) -> Result<crate::hci_host::connection::LeConnectionSnapshot, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        &format!("connect {member}"),
+        |report, _| match report {
+            HciReport::FalConnectionState(
+                FalConnectionState::Connected(connection)
+                | FalConnectionState::ConnectedAfterCancel(connection),
+            ) => Some(Ok(connection.clone())),
+            HciReport::FalConnectionState(
+                FalConnectionState::Failed(failure),
+            ) => Some(Err(BondSmokeRunError::ConnectFailed {
+                member: member.to_string(),
+                detail: format!("{failure:?}"),
+            })),
+            _ => None,
+        },
+    )
+}
+
+fn wait_cancel_terminal(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<Option<crate::hci_host::connection::LeConnectionSnapshot>, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "connection cancel terminal",
+        |report, _| match report {
+            HciReport::FalConnectionState(
+                FalConnectionState::Connected(connection)
+                | FalConnectionState::ConnectedAfterCancel(connection),
+            ) => Some(Ok(Some(connection.clone()))),
+            HciReport::FalConnectionState(
+                FalConnectionState::Failed(_),
+            ) => Some(Ok(None)),
+            _ => None,
+        },
+    )
+}
+
+fn wait_encrypted(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    member: &str,
+    connection: ConnectionToken,
+) -> Result<u8, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        &format!("encrypt {member}"),
+        |report, _| match report {
+            HciReport::StoredEncryptionState(
+                StoredEncryptionState::Encrypted {
+                    connection: actual,
+                    encryption_key_size,
+                },
+            ) if *actual == connection => Some(Ok(*encryption_key_size)),
+            HciReport::StoredEncryptionState(
+                StoredEncryptionState::Failed(failure),
+            ) if failure.connection == connection => {
+                Some(Err(BondSmokeRunError::EncryptionFailed {
+                    member: member.to_string(),
+                    detail: format!("{failure:?}"),
+                }))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn wait_dual_encrypted(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    expected: [ConnectionToken; 2],
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "dual encrypted ACL",
+        |report, tracker| match report {
+            HciReport::ConnectionSet(snapshot)
+                if snapshot.connections.len() == 2
+                    && expected
+                        .iter()
+                        .all(|token| tracker.is_encrypted(*token)) =>
+            {
+                Some(Ok(()))
+            }
+            _ => None,
+        },
+    )
+    .map_err(|error| match error {
+        BondSmokeRunError::Timeout(_) => {
+            BondSmokeRunError::DualAclNotEncrypted
+        }
+        other => other,
+    })
+}
+
+fn wait_disconnected(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    connection: ConnectionToken,
+) -> Result<u8, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "disconnect",
+        |report, _| match report {
+            HciReport::DisconnectState(
+                DisconnectState::Disconnected {
+                    connection: actual,
+                    event_reason,
+                },
+            ) if *actual == connection => Some(Ok(*event_reason)),
+            HciReport::DisconnectState(
+                DisconnectState::Failed(failure),
+            ) if failure.connection == connection => {
+                Some(Err(BondSmokeRunError::DisconnectFailed {
+                    connection,
+                    detail: format!("{failure:?}"),
+                }))
+            }
+            _ => None,
+        },
+    )
+}
+
 pub fn format_address_le(address: [u8; 6]) -> String {
     address
         .iter()
@@ -353,6 +704,30 @@ mod tests {
         ));
         assert!(tracker.contains_connection(token));
         assert!(tracker.is_encrypted(token));
+    }
+
+    #[test]
+    fn queued_report_wait_updates_tracker_before_matching() {
+        let (_control, _ingress, reports, ports) =
+            crate::hci_host::mailbox::hci_mailbox(2, 2, 4);
+        ports
+            .report_tx
+            .try_send(HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            ))
+            .unwrap();
+
+        let mut tracker = BondSmokeTracker::default();
+        wait_privacy_ready(
+            &reports,
+            &mut tracker,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(
+            tracker.privacy,
+            Some(ControllerPrivacyState::Ready)
+        );
     }
 
     #[test]
