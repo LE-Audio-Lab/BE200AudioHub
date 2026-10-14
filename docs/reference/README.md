@@ -17,3 +17,10 @@ Primary references currently available in the project resource set:
 ## Adoption rule
 
 Prefer an existing precedent. If multiple references disagree, preserve the disagreement explicitly and choose based on the BE200AudioHub system boundary. A behavior with no reference precedent is marked unresolved until it has either a compelling system-level reason or HIL evidence.
+
+
+## Function-level index
+
+For implementation work, use [`docs/reference-index/README.md`](../reference-index/README.md).
+
+That library maps each BE200AudioHub domain to exact upstream files and functions/types, records what may or may not be copied, and lists the deterministic `cargo test` obligations expected before HIL.
