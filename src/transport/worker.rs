@@ -34,6 +34,23 @@ pub struct TransportTx {
 }
 
 impl TransportTx {
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        capacity: usize,
+    ) -> (
+        Self,
+        BoundedReceiver<HostPacket>,
+    ) {
+        let (tx, rx) = mailbox::bounded(capacity);
+        (
+            Self {
+                tx,
+                cancel: CancellationToken::new(),
+            },
+            rx,
+        )
+    }
+
     pub fn try_send(&self, packet: HostPacket) -> Result<(), SendError> {
         self.tx.try_send(packet)
     }
