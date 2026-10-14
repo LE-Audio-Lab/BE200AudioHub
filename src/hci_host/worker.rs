@@ -299,7 +299,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::{
-        hci_host::mailbox::hci_mailbox,
+        hci_host::{
+            mailbox::hci_mailbox,
+            privacy::{
+                ResolvingListConfig, ResolvingPeer,
+                DEFAULT_RPA_TIMEOUT_SECONDS,
+            },
+        },
         runtime::mailbox::RecvError,
         transport::{
             packet::HostPacket,
@@ -407,6 +413,107 @@ mod tests {
             recv_report(&reports),
             HciReport::CapabilitiesReady(_)
         ));
+
+        control.request_stop().unwrap();
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
+    fn worker_routes_controller_privacy_as_typed_transaction() {
+        let (control, ingress, reports, ports) = hci_mailbox(32, 8, 16);
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(32);
+        let join = spawn_hci_worker(ports, transport_tx);
+
+        // Minimal resetless attach to Ready.
+        control.try_begin_operational_attach().unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_report(&reports);
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        ingress
+            .try_send_controller(ControllerPacket::Event(supported))
+            .unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_host_packet(&transport_rx);
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
+            ]))
+            .unwrap();
+        let _ = recv_report(&reports);
+        let _ = recv_report(&reports);
+
+        control
+            .try_configure_controller_privacy(ResolvingListConfig {
+                peers: vec![ResolvingPeer {
+                    identity_address_le: [
+                        0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
+                    ],
+                    identity_address_type: 0,
+                    peer_irk: [0x11; 16],
+                }],
+                local_irk: [0x22; 16],
+                rpa_timeout_seconds: DEFAULT_RPA_TIMEOUT_SECONDS,
+            })
+            .unwrap();
+
+        let opcode = |packet: HostPacket| {
+            let HostPacket::Command(bytes) = packet else {
+                panic!("expected HCI command");
+            };
+            u16::from_le_bytes([bytes[0], bytes[1]])
+        };
+
+        assert_eq!(opcode(recv_host_packet(&transport_rx)), 0x202d);
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Configuring,
+            )
+        );
+
+        for (current, extra, next) in [
+            (0x202d, &[][..], 0x2029),
+            (0x2029, &[][..], 0x202a),
+            (0x202a, &[1][..], 0x2027),
+            (0x2027, &[][..], 0x202e),
+            (0x202e, &[][..], 0x202d),
+        ] {
+            let mut event = vec![
+                0x0e,
+                (4 + extra.len()) as u8,
+                0x01,
+                current as u8,
+                (current >> 8) as u8,
+                0x00,
+            ];
+            event.extend_from_slice(extra);
+            ingress
+                .try_send_controller(ControllerPacket::Event(event))
+                .unwrap();
+            assert_eq!(opcode(recv_host_packet(&transport_rx)), next);
+        }
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x2d, 0x20, 0x00,
+            ]))
+            .unwrap();
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            )
+        );
 
         control.request_stop().unwrap();
         assert_eq!(join.join(), HciWorkerExit::Stopped);
