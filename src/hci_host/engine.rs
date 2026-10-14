@@ -422,21 +422,24 @@ mod tests {
         assert!(matches!(second, HostPacket::Command(_)));
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
 
-        // Set Event Mask complete, status 0.
+        // Complete the two mandatory host-initialization commands as
+        // independent controller events. Device::poll() drains every event
+        // currently queued, so each injected completion needs only one
+        // quiescent drive; a second poll is expected to observe no work.
         engine
             .ingest(ControllerPacket::Event(vec![
                 0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
             ]))
             .unwrap();
-        // LE Set Event Mask complete, status 0.
+        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+
         engine
             .ingest(ControllerPacket::Event(vec![
                 0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
             ]))
             .unwrap();
-
         assert_eq!(engine.poll_until_quiescent(), Ok(1));
-        assert_eq!(engine.poll_until_quiescent(), Ok(1));
+        assert_eq!(engine.poll_until_quiescent(), Ok(0));
         assert_eq!(engine.attach_state(), OperationalAttachState::Ready);
         assert_eq!(engine.device().reset_status(), None);
 
@@ -470,6 +473,8 @@ mod tests {
                 0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00,
             ]))
             .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
         engine
             .ingest(ControllerPacket::Event(vec![
                 0x0e, 0x04, 0x01, 0x01, 0x20, 0x00,
