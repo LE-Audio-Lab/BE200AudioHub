@@ -30,6 +30,7 @@ pub const BE200_PID: u16 = 0x0036;
 const EVENT_TRANSFER_BYTES: usize = 4 * 1024;
 const BULK_TRANSFER_BYTES: usize = 65_539;
 const EVENT_PUMP_SLICE: Duration = Duration::from_millis(5);
+const MAX_IDLE_WRITE_TRANSFERS_PER_CLASS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Be200UsbLayout {
@@ -80,6 +81,7 @@ mod imp {
         callback_order: Arc<AtomicU64>,
         pending: HashMap<TransferId, PendingTransfer>,
         idle_reads: HashMap<RxEndpoint, PendingTransfer>,
+        idle_writes: HashMap<TxEndpoint, Vec<PendingTransfer>>,
         attached: bool,
     }
 
@@ -131,6 +133,7 @@ mod imp {
                 callback_order: Arc::new(AtomicU64::new(0)),
                 pending: HashMap::new(),
                 idle_reads: HashMap::new(),
+                idle_writes: HashMap::new(),
                 attached: true,
             })
         }
@@ -239,16 +242,30 @@ mod imp {
             }
 
             let id = self.allocate_id();
-            let mut state = Box::new(CallbackState::new(
-                id,
-                AsyncTransferKind::Write(endpoint),
-                buffer,
-                self.callback_order.clone(),
-            ));
-            let raw = allocate_transfer()?;
+            let mut reusable = self
+                .idle_writes
+                .get_mut(&endpoint)
+                .and_then(|pool| pool.pop())
+                .unwrap_or(PendingTransfer {
+                    raw: allocate_transfer()?,
+                    state: Box::new(CallbackState::new(
+                        id,
+                        AsyncTransferKind::Write(endpoint),
+                        Vec::new(),
+                        self.callback_order.clone(),
+                    )),
+                });
+
+            debug_assert!(reusable.state.result().is_none());
+            reusable.state.id = id;
+            reusable.state.kind = AsyncTransferKind::Write(endpoint);
+            reusable.state.buffer = buffer;
+
+            let raw = reusable.raw;
+            let state = &mut reusable.state;
 
             unsafe {
-                let user_data = (&mut *state as *mut CallbackState).cast();
+                let user_data = (&mut **state as *mut CallbackState).cast();
                 match endpoint {
                     TxEndpoint::Command => rusb::ffi::libusb_fill_control_transfer(
                         raw.as_ptr(),
@@ -279,7 +296,7 @@ mod imp {
                 }
             }
 
-            self.pending.insert(id, PendingTransfer { raw, state });
+            self.pending.insert(id, reusable);
             Ok(id)
         }
 
@@ -348,7 +365,14 @@ mod imp {
                     let old = self.idle_reads.insert(endpoint, pending);
                     debug_assert!(old.is_none(), "duplicate idle read transfer slot");
                 }
-                AsyncTransferKind::Write(_) => unsafe { pending.reclaim() },
+                AsyncTransferKind::Write(endpoint) => {
+                    let pool = self.idle_writes.entry(endpoint).or_default();
+                    if pool.len() < MAX_IDLE_WRITE_TRANSFERS_PER_CLASS {
+                        pool.push(pending);
+                    } else {
+                        unsafe { pending.reclaim() };
+                    }
+                }
             }
             Some(completion)
         }
@@ -393,6 +417,11 @@ mod imp {
 
             for (_, idle) in self.idle_reads.drain() {
                 unsafe { idle.reclaim() };
+            }
+            for (_, pool) in self.idle_writes.drain() {
+                for idle in pool {
+                    unsafe { idle.reclaim() };
+                }
             }
         }
     }
@@ -593,6 +622,17 @@ mod imp {
                 logical_write_length(TxEndpoint::Iso, &buffer, 10),
                 4
             );
+        }
+
+        #[test]
+        fn write_pool_is_explicitly_bounded_per_transport_class() {
+            let mut pools = HashMap::<TxEndpoint, Vec<usize>>::new();
+            let pool = pools.entry(TxEndpoint::Iso).or_default();
+            for i in 0..MAX_IDLE_WRITE_TRANSFERS_PER_CLASS {
+                pool.push(i);
+            }
+            assert_eq!(pool.len(), MAX_IDLE_WRITE_TRANSFERS_PER_CLASS);
+            assert_eq!(pool.pop(), Some(MAX_IDLE_WRITE_TRANSFERS_PER_CLASS - 1));
         }
 
         #[test]
