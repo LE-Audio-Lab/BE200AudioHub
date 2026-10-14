@@ -26,6 +26,7 @@ pub enum HciCommand {
     StopPassiveExtendedScan,
     ConfigureControllerPrivacy(ResolvingListConfig),
     BeginFalConnection(FalConnectRequest),
+    CancelFalConnection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +130,12 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::BeginFalConnection(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_cancel_fal_connection(&self) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::CancelFalConnection)
             .map_err(map_send_error)
     }
 
