@@ -1544,4 +1544,84 @@ mod tests {
             GattFailureKind::InvalidRequest(_)
         ));
     }
+
+    #[test]
+    fn write_request_waits_for_response_and_unsubscribe_writes_zero_cccd() {
+        let (mut write, first) = GattTransaction::begin(
+            request(
+                13,
+                GattOperation::WriteRequest {
+                    attribute_handle: 0x0043,
+                    value: vec![0xAA, 0x55],
+                },
+            ),
+            23,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            AttPdu::WriteRequest {
+                attribute_handle: 0x0043,
+                attribute_value: vec![0xAA, 0x55],
+            }
+        );
+        assert!(matches!(write.on_request_sent(), GattAction::Await));
+        assert!(matches!(
+            write.on_pdu(AttPdu::WriteResponse),
+            GattAction::Complete(GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            })
+        ));
+
+        let (mut unsubscribe, first) = GattTransaction::begin(
+            request(
+                14,
+                GattOperation::Unsubscribe {
+                    value_handle: 0x0046,
+                    cccd_handle: 0x0047,
+                },
+            ),
+            23,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            AttPdu::WriteRequest {
+                attribute_handle: 0x0047,
+                attribute_value: vec![0x00, 0x00],
+            }
+        );
+        assert!(matches!(
+            unsubscribe.on_pdu(AttPdu::WriteResponse),
+            GattAction::Complete(GattResult::Subscription {
+                value_handle: 0x0046,
+                cccd_handle: 0x0047,
+                enabled: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn malformed_discovery_entry_list_is_protocol_failure() {
+        let (mut tx, _) = GattTransaction::begin(
+            request(15, GattOperation::DiscoverServices),
+            23,
+        )
+        .unwrap();
+
+        let failed = tx.on_pdu(AttPdu::ReadByGroupTypeResponse {
+            length: 6,
+            attribute_data_list: vec![1, 0, 5, 0, 0x50],
+        });
+        assert!(matches!(
+            failed,
+            GattAction::Failed(GattFailure {
+                kind: GattFailureKind::Protocol(_),
+                ..
+            })
+        ));
+    }
+
 }
