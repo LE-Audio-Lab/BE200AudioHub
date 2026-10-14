@@ -1,8 +1,8 @@
-# BE200AudioHub — Round 1–4 Bug / Fix / Quirk Register
+# BE200AudioHub — Round 1–6 Bug / Fix / Quirk Register
 
-> 归档时间：2026-10-14。独立汇总四份 Round 纪要中明确记录的 Bug、错误修复过程、架构误判和未解决 Quirk。源文可直接查 [Round1](./Round1.md)、[Round2](./Round2.md)、[Round3](./Round3.md)、[Round4](./Round4.md)，全量汇编见 [AllRounds](./AllRounds.md)。
+> 活动总账：Round1–4 历史 Experiment + Round5–6 Review continuation。源文可查 [Round1](./Round1.md)–[Round6](./Round6.md)；Round1–4 原文全量汇编仍见 [AllRounds](./AllRounds.md)。
 >
-> **证据原则**：HIL = 真实 BE200/B3P 或工具执行器实际结果；Code = 编译或字节/单元级；Review = 静态审查；Hypothesis = 未经证实或后来被推翻；Open = 尚未解决。最终受验证的 Audio Host 代码基线为 `eac486691fd4d7181d36bb09a620e942d0026936`。R5.2-B 双 CIS 建立与清理 **HIL PASS**；R5.3 ISO 数据和 First Sound **没有发生**。
+> **证据原则**：HIL = 真实 BE200/B3P 或工具执行器实际结果；Code = 编译或字节/单元级；Review = 静态审查；Hypothesis = 未经证实或后来被推翻；Open = 尚未解决。Experiment historical baselines 与当前 Review baselines 分开记录。Round6 已完成 Review-2A/2B software + HIL；当前软件 gate 为 151/151 tests、cargo check/build PASS。
 >
 > 每项 ID 是本归档新增的检索编号，不代表仓库 Issue ID。一个问题若经历数次失败，会保留中间失败和最终解法，避免只留下“修好了”。
 
@@ -193,7 +193,45 @@ HIL 第三次的 Controller 实测：C→P PHY 2M，Transport Latency **63,210 �
 
 | ID | Risk | Current policy |
 |---|---|---|
-| **QR5-01** | `hci-wip` synthetic resetless attach does not yet reach Ready in six tests | Review-2A must fix fixtures/transaction assumptions before HCI Host becomes default |
+| **QR5-01** | `hci-wip` synthetic resetless attach does not yet reach Ready in six tests | **CLOSED in Round6**：status-only host-init completion normalization；HCI Host promoted；Review-2A HIL PASS |
 | **QR5-02** | Bumble-RS LE Read ISO TX Sync parser has 24-bit Time_Offset width bug | Do not trust current parser; patch/adapter plus golden test before controller-anchored clock |
-| **QR5-03** | Async transport is software-tested but not yet re-HILed as the active Review Host path | HIL after HCI Host substrate is green; do not reopen transport unless HIL/profiling disproves assumptions |
+| **QR5-03** | Async transport is software-tested but not yet re-HILed as the active Review Host path | **CLOSED in Round6**：Review-2A and Review-2B both passed real BE200/B3P HIL on the async Review path |
 | **QR5-04** | Exact controller-anchored StreamClock strategy remains future work | Initial scheduler uses local authoritative interval grid; controller anchor is pluggable future scheduler |
+
+---
+
+## 10. Round 6 / Review-2A + Review-2B corrections
+
+| ID | Symptom / wrong assumption | Root cause / final correction | Verification |
+|---|---|---|---|
+| **R6R-01** | HCI WIP had 6 synthetic attach/scan failures; host-init stalled | Pinned Bumble parsed several status-only Command Complete packets as Raw while Device init expected Status. Add narrow opcode allowlist normalization at Review adapter boundary; unknown Raw remains Raw | **Code**; default HCI tests green; Review-2A HIL PASS |
+| **R6R-02** | Cold BE200 cannot be assumed Operational when async Transport opens | Firmware bootstrap is a separate short-lived L3 owner: FC05 probe, optional guarded one-shot Intel load, release interface, then async Transport reopen | **Code + HIL**; Review-2A cold path Booted PASS and Review-2B AlreadyOperational PASS |
+| **R6R-03** | Firmware/bootstrap logic risked leaking into HCI Host/Transport ownership | Create `FirmwareBypassPort` + pure `Be200FirmwareLoader` + pinned planner; no retries/reset/power-cycle fallback | **Code + HIL** |
+| **R6R-04** | Controller Resolving List mutation could leave partial state on failure | Typed privacy transaction with disable→clear→capacity→add→timeout→enable and mandatory disable+clear rollback; explicit cleanup transaction attempts clear even if disable fails | **Code 151/151 + Review-2B HIL** |
+| **R6R-05** | Reimplementation might drift from R5-proven FAL connection parameters | Static audit against frozen `connection_manager.rs`; keep filter_policy=1, own public, ANY peer, 1M, scan 0x10/0x10, interval 24–40, latency0, supervision42 | **Static audit + Review-2B HIL** |
+| **R6R-06** | Timeout handling inside HCI worker would violate requester-owned timer contract | HCI transaction has explicit cancel event only; requester timeout triggers LE Create Connection Cancel. Accepted/rejected/late-success races modeled explicitly | **Code tests** |
+| **R6R-07** | Historical disconnect bug could recur by using event reason 0x16 as command parameter | Disconnect API accepts only ConnectionToken; command reason fixed 0x13, event reason 0x16 recorded only as result | **Code + HIL** |
+| **R6R-08** | Stored-LTK restore could be mis-modeled as local command success | Success requires Command Status + real Encryption Change + Bumble encrypted state; connection loss while waiting is terminal | **Code + Review-2B HIL** |
+| **R6R-09** | Controller may reuse ACL handle; stale work could hit a new connection | Add `ConnectionToken { handle, generation }`; reused handle increments generation; stale disconnect/encrypt rejected | **Code regression test** |
+| **R6R-10** | Pinned Bumble may swallow ACL over-completion accounting errors | Add non-scheduling audit ledger: only successful enqueue counts submitted; per-handle completions retire exact capacity; unknown/overflow completion = EngineFault | **Code regression tests** |
+| **R6R-11** | DeviceEvent single-consumer routing could hide one event from another active transaction | Change to typed fan-out; unconsumed high-level events use bounded deferred queue cap64; overflow=fault | **Code tests** |
+| **R6R-12** | Read BD_ADDR through Bumble could trigger upstream key-store/privacy refresh and violate Review ownership | One-shot journal-only completion suppression for controller identity probe; Bumble does not see the completion | **Code test + Review-2B identity HIL** |
+| **R6R-13** | Reusing old BondStore implementation would reintroduce write/reseed/pairing surface | Add L0-only read-only loader for four existing bond files; use pinned JsonKeyStore schema; no mutation API | **Code + bond fingerprint HIL** |
+| **R6R-14** | Review-2B HIL could run against incomplete stored coordinated-set metadata | Preflight requires stored `set_size=2` and exactly two CSIS-verified members; pure local JSON check, zero RF time | **Code test + HIL preflight** |
+| **R6R-15** | IRK/LTK/RAND could leak through derived Debug output in HIL logs | Custom redacted Debug for privacy/security key material | **Code tests** |
+| **R6R-16** | Temporary Review encryption wait was 5 s, shorter than R5 proven success budget | Restore stored-LTK wait to R5 baseline 10 s to avoid false HIL timeout | **Static audit + final HIL PASS** |
+| **R6R-17** | Adding new worker state repeatedly caused a branch to miss the new publisher argument | Cargo exhaustive typecheck caught every omission. Future refactor should bundle last-published states instead of linearly growing function parameters | **Compile-time catches** |
+| **R6R-18** | Long-chat resume caused a duplicate HIL executor/helper draft | Full-file reread showed existing executor; remove duplicate rather than patching conflicts. Cargo duplicate-definition errors prevented merge | **Code + final 151/151** |
+| **R6R-19** | `Cargo.lock` was immediately redirtied after restore, blocking ff-only pull | Cargo/rust-analyzer regenerated lock for new direct dependencies. Commit canonical lock remotely, then reset local branch to origin after confirming Cargo.lock was the only local diff | **Local Git verification** |
+| **R6R-20** | New set_size guard broke an old test fixture | Production guard was correct; fixture lacked `set_size`. Add `set_size: 2` to fixture; no production relaxation | **151/151 tests** |
+
+### Round6 closed gates
+
+```text
+Review-2A attach/capabilities/scan     software + HIL PASS
+Review-2B privacy/dual ACL/stored LTK software + HIL PASS
+Bond mutation                         NONE; fingerprint unchanged
+Next                                  Review-2C ACL/L2CAP/ATT/GATT
+```
+
+See [Round6.md](./Round6.md) for the complete implementation and HIL chronology.
