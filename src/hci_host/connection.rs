@@ -34,10 +34,13 @@ pub enum DisconnectState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisconnectEvent {
-    Complete {
+    Disconnected {
+        connection_handle: u16,
+        reason: u8,
+    },
+    Failed {
         connection_handle: u16,
         status: u8,
-        reason: u8,
     },
 }
 
@@ -112,29 +115,35 @@ impl DisconnectTransaction {
             return DisconnectAction::Ignored;
         }
 
-        let DisconnectEvent::Complete {
-            connection_handle,
-            status,
-            reason,
-        } = event;
-
-        if connection_handle != self.connection_handle {
-            return DisconnectAction::Ignored;
-        }
-
-        self.terminal = true;
-        if status != 0 {
-            return DisconnectAction::Failed(DisconnectFailure {
+        match event {
+            DisconnectEvent::Disconnected {
                 connection_handle,
-                kind: DisconnectFailureKind::DisconnectionEventStatus {
-                    status,
-                },
-            });
-        }
-
-        DisconnectAction::Disconnected {
-            connection_handle,
-            event_reason: reason,
+                reason,
+            } => {
+                if connection_handle != self.connection_handle {
+                    return DisconnectAction::Ignored;
+                }
+                self.terminal = true;
+                DisconnectAction::Disconnected {
+                    connection_handle,
+                    event_reason: reason,
+                }
+            }
+            DisconnectEvent::Failed {
+                connection_handle,
+                status,
+            } => {
+                if connection_handle != self.connection_handle {
+                    return DisconnectAction::Ignored;
+                }
+                self.terminal = true;
+                DisconnectAction::Failed(DisconnectFailure {
+                    connection_handle,
+                    kind: DisconnectFailureKind::DisconnectionEventStatus {
+                        status,
+                    },
+                })
+            }
         }
     }
 }
@@ -648,9 +657,8 @@ mod tests {
             DisconnectAction::AwaitEvent
         ));
 
-        match tx.on_event(DisconnectEvent::Complete {
+        match tx.on_event(DisconnectEvent::Disconnected {
             connection_handle: 0x0800,
-            status: 0,
             reason: 0x16,
         }) {
             DisconnectAction::Disconnected {
