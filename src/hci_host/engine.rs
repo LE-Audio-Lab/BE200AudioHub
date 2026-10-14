@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use bumble_hci::{
     codes::{
         HCI_DISCONNECT_COMMAND,
+        HCI_READ_BD_ADDR_COMMAND,
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
         HCI_LE_ENABLE_ENCRYPTION_COMMAND,
@@ -103,6 +104,17 @@ pub struct ControllerCapabilities {
     pub maximum_advertising_data_length: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControllerIdentity {
+    pub public_address_le: [u8; 6],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllerIdentityFailure {
+    Status(u8),
+    MalformedResponse,
+}
+
 pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
@@ -111,6 +123,9 @@ pub struct HciEngine {
     scan_pending_opcode: Option<u16>,
     scan_accumulator: ScanAccumulator,
     completed_scan: Option<ScanSummary>,
+    controller_identity_pending: bool,
+    controller_identity_result:
+        Option<Result<ControllerIdentity, ControllerIdentityFailure>>,
     privacy_state: ControllerPrivacyState,
     privacy_transaction: Option<PrivacyTransaction>,
     privacy_clear_transaction: Option<PrivacyClearTransaction>,
@@ -133,6 +148,8 @@ impl HciEngine {
             scan_pending_opcode: None,
             scan_accumulator: ScanAccumulator::default(),
             completed_scan: None,
+            controller_identity_pending: false,
+            controller_identity_result: None,
             privacy_state: ControllerPrivacyState::Idle,
             privacy_transaction: None,
             privacy_clear_transaction: None,
@@ -160,6 +177,30 @@ impl HciEngine {
 
     pub fn take_completed_scan(&mut self) -> Option<ScanSummary> {
         self.completed_scan.take()
+    }
+
+    pub fn begin_controller_identity_probe(
+        &mut self,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.controller_identity_pending
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        self.controller_identity_result = None;
+        self.link
+            .suppress_next_command_complete(HCI_READ_BD_ADDR_COMMAND);
+        self.link.handle_command(0, Command::ReadBdAddr);
+        self.check_link_fault()?;
+        self.controller_identity_pending = true;
+        Ok(())
+    }
+
+    pub fn take_controller_identity_result(
+        &mut self,
+    ) -> Option<Result<ControllerIdentity, ControllerIdentityFailure>> {
+        self.controller_identity_result.take()
     }
 
     pub fn controller_privacy_state(&self) -> &ControllerPrivacyState {
@@ -506,6 +547,7 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
+            self.process_controller_identity_observation(&observation);
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
@@ -513,6 +555,39 @@ impl HciEngine {
             self.process_scan_observation(&observation)?;
         }
         Ok(())
+    }
+
+    fn process_controller_identity_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) {
+        if !self.controller_identity_pending {
+            return;
+        }
+
+        let HciObservation::CommandComplete {
+            opcode,
+            status,
+            parameters_after_status,
+        } = observation
+        else {
+            return;
+        };
+        if *opcode != HCI_READ_BD_ADDR_COMMAND {
+            return;
+        }
+
+        self.controller_identity_pending = false;
+        self.controller_identity_result = Some(match status {
+            Some(0) if parameters_after_status.len() == 6 => {
+                let mut public_address_le = [0u8; 6];
+                public_address_le.copy_from_slice(parameters_after_status);
+                Ok(ControllerIdentity { public_address_le })
+            }
+            Some(0) => Err(ControllerIdentityFailure::MalformedResponse),
+            Some(status) => Err(ControllerIdentityFailure::Status(*status)),
+            None => Err(ControllerIdentityFailure::MalformedResponse),
+        });
     }
 
     fn process_privacy_observation(
@@ -1234,6 +1309,39 @@ mod tests {
         assert_eq!(
             engine.controller_privacy_state(),
             &ControllerPrivacyState::Ready
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn controller_identity_probe_is_journal_only_and_has_no_bumble_side_effect() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+        assert_eq!(engine.device().public_address(), None);
+
+        engine.begin_controller_identity_probe().unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x1009);
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x0a, 0x01, 0x09, 0x10, 0x00,
+                0x1a, 0x94, 0x36, 0xbb, 0xa3, 0x44,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.take_controller_identity_result(),
+            Some(Ok(ControllerIdentity {
+                public_address_le: [
+                    0x1a, 0x94, 0x36, 0xbb, 0xa3, 0x44,
+                ],
+            }))
+        );
+        assert_eq!(
+            engine.device().public_address(),
+            None,
+            "journal-only identity probe must not trigger Bumble key-store/privacy side effects"
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
