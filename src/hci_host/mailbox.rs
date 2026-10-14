@@ -45,7 +45,7 @@ pub(crate) struct HciWorkerPorts {
     pub report_tx: Sender<HciReport>,
 }
 
-pub fn hci_mailbox(
+pub(crate) fn hci_mailbox(
     controller_capacity: usize,
     control_capacity: usize,
     report_capacity: usize,
