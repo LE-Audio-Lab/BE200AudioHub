@@ -200,7 +200,6 @@ enum Phase {
 
 #[derive(Clone, Debug)]
 struct PendingIncluded {
-    declaration_handle: u16,
     handle: u16,
     end_group_handle: u16,
     uuid: Option<Uuid>,
@@ -375,10 +374,6 @@ impl GattTransaction {
 
     pub fn connection(&self) -> ConnectionToken {
         self.connection
-    }
-
-    pub fn mtu(&self) -> u16 {
-        self.mtu
     }
 
     pub fn on_request_sent(&mut self) -> GattAction {
@@ -569,7 +564,6 @@ impl GattTransaction {
                         };
                         self.pending_includes.push_back(
                             PendingIncluded {
-                                declaration_handle,
                                 handle,
                                 end_group_handle,
                                 uuid,
@@ -1416,6 +1410,57 @@ mod tests {
             tx.on_request_sent(),
             GattAction::Complete(GattResult::WriteComplete {
                 with_response: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn write_request_and_unsubscribe_are_typed_transactions() {
+        let (mut write, first) = GattTransaction::begin(
+            request(
+                30,
+                GattOperation::WriteRequest {
+                    attribute_handle: 0x0043,
+                    value: vec![1, 2],
+                },
+            ),
+            23,
+        )
+        .unwrap();
+        assert!(matches!(first, AttPdu::WriteRequest { .. }));
+        assert!(matches!(
+            write.on_pdu(AttPdu::WriteResponse),
+            GattAction::Complete(GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            })
+        ));
+
+        let (mut unsubscribe, first) = GattTransaction::begin(
+            request(
+                31,
+                GattOperation::Unsubscribe {
+                    value_handle: 0x0046,
+                    cccd_handle: 0x0047,
+                },
+            ),
+            23,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            AttPdu::WriteRequest {
+                attribute_handle: 0x0047,
+                attribute_value: vec![0, 0],
+            }
+        );
+        assert!(matches!(
+            unsubscribe.on_pdu(AttPdu::WriteResponse),
+            GattAction::Complete(GattResult::Subscription {
+                value_handle: 0x0046,
+                cccd_handle: 0x0047,
+                enabled: false,
                 ..
             })
         ));
