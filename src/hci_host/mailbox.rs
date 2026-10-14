@@ -16,7 +16,8 @@ use super::{
         LeConnectionSetSnapshot,
     },
     engine::{
-        ControllerCapabilities, OperationalAttachState, PassiveScanState,
+        ControllerCapabilities, ControllerIdentity,
+        ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
@@ -28,6 +29,7 @@ pub enum HciCommand {
     BeginOperationalAttach,
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
+    ReadControllerIdentity,
     ConfigureControllerPrivacy(ResolvingListConfig),
     ClearControllerPrivacy,
     BeginFalConnection(FalConnectRequest),
@@ -40,6 +42,9 @@ pub enum HciCommand {
 pub enum HciReport {
     AttachState(OperationalAttachState),
     CapabilitiesReady(ControllerCapabilities),
+    ControllerIdentity(
+        Result<ControllerIdentity, ControllerIdentityFailure>,
+    ),
     PassiveScanState(PassiveScanState),
     ScanComplete(ScanSummary),
     ControllerPrivacyState(ControllerPrivacyState),
@@ -122,6 +127,12 @@ impl HciControl {
     pub fn try_stop_passive_extended_scan(&self) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::StopPassiveExtendedScan)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_controller_identity(&self) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadControllerIdentity)
             .map_err(map_send_error)
     }
 
@@ -229,6 +240,18 @@ mod tests {
 
         assert_eq!(control.request_stop(), Ok(()));
         assert_eq!(control.request_stop(), Ok(()));
+    }
+
+    #[test]
+    fn controller_identity_probe_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        control.try_read_controller_identity().unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::ReadControllerIdentity
+        );
     }
 
     #[test]
