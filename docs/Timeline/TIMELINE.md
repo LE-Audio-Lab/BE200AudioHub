@@ -1,8 +1,8 @@
 # BE200AudioHub — 跨 Round 工程时间线 / Timeline
 
-> **归档日期：2026-10-14** · 范围：Round 1–4 · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
+> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–6 Review continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。最终验证基线：`eac486691fd4d7181d36bb09a620e942d0026936`（R5.2-B HIL PASS）；其后的 Timeline 文档提交不代表新功能或新 HIL。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；当前 Review 状态以 Round6 的 software/HIL 证据为准。
 
 ## 阅读入口
 
@@ -14,7 +14,9 @@
 | [Round2.md](./Round2.md) | Bumble-RS Host 引入、无 Reset attach、扫描、首条 ACL；后续 Pairing 的**设计** | R2.1–R2.3 |
 | [Round3.md](./Round3.md) | R2.4 两成员 SMP/Bond/CSIS 落地、Stored Verify、R3 双 ACL + Audio Service discovery | R2.4、R3 |
 | [Round4.md](./Round4.md) | Codec/QoS/CIG/CIS 全控制面；三次 R5.2-B HIL | R4.1–R5.2-B |
-| [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨四轮独立 Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
+| [Round5.md](./Round5.md) | R5.3 First Sound、Experiment sealed、Review-1 Runtime/Async Transport | R5.3 / Review-1 |
+| [Round6.md](./Round6.md) | Review-2A/2B HCI Host、Privacy/FAL、stored-LTK、dual ACL HIL | Review-2A / 2B |
+| [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）
 
@@ -142,7 +144,7 @@ Round4 文档核对过的 Git 比较：R3 基线 `a80cf1e8` → Round4 最终 HI
 | Review-1 Runtime Kernel | **COMPLETE** | generation, bounded mailbox, cancellation, request/reply, serial context, fault propagation |
 | Review-1 Async Transport | **COMPLETE** | concurrent Event+ACL pending RX, reassembly, cancellation, libusb async backend, persistent transfer reuse |
 | Review-1 validation | **PASS** | `cargo test --workspace`: 48/48; `cargo check --workspace`: PASS; `cargo build --workspace`: PASS |
-| HCI Host | **Review-2A COMPLETE** | default main component; resetless attach/capabilities/passive scan software + HIL PASS |
+| HCI Host | **WIP at Round5 cutoff** | `hci-wip`; synthetic resetless attach/scan still unresolved at the end of Round5 |
 | Reference Index | **COMPLETE** | `docs/reference-index/` provides file/function/type-level upstream oracle map |
 
 ### Round5 architecture pivot
@@ -155,6 +157,74 @@ The project no longer optimizes for “make the next HIL command work once”. R
 4. deterministic behavior is covered by Cargo tests;
 5. HIL is reserved for real Windows/USB/controller/earbud assumptions.
 
+### Round5 cutoff implementation sequence
+
+```text
+Review-1 Runtime + Async Transport      ✅
+        ↓
+Review-2A HCI attach/capabilities/scan ← NEXT at Round5 cutoff
+        ↓
+Review-2B ACL/privacy/stored LTK
+        ↓
+Review-2C ATT/GATT
+        ↓
+Review-2D CIG/CIS/ISO Host
+```
+
+### Round5 active references
+
+- [Round5.md](./Round5.md)
+- [../../docs/design/REVIEW1_RUNTIME_TRANSPORT.md](../design/REVIEW1_RUNTIME_TRANSPORT.md)
+- [../../docs/reference-index/README.md](../reference-index/README.md)
+
+---
+
+## 8. Round 6 / Review-2A + Review-2B completion — 2026-10-15
+
+> Round6 owns all Review-2A/2B implementation, static-audit and HIL changes from this development session. Round5 remains the Review-1 historical cutoff.
+
+| Stage | Status | Evidence / decision |
+|---|---|---|
+| Review-2A HCI Host promotion | **COMPLETE** | HCI Host moved into default build; status-only Bumble host-init completion normalization covered by deterministic tests |
+| Review-2A Firmware Bypass | **COMPLETE** | isolated L3 one-shot firmware owner; Bootloader→Operational or true AlreadyOperational no-op |
+| Review-2A HIL | **PASS** | resetless attach, capabilities, passive extended scan, clean shutdown |
+| Review-2B Privacy / Resolving List | **COMPLETE** | typed transaction + rollback + explicit cleanup |
+| Review-2B FAL connect / cancel / disconnect | **COMPLETE** | R5-proven FAL parameters; requester-owned cancel; 0x13 command vs 0x16 event rule |
+| Review-2B stored-LTK | **COMPLETE** | existing bond only; no SMP; Encryption Change is success gate |
+| Review-2B connection generation | **COMPLETE** | handle reuse invalidates stale `ConnectionToken` |
+| Review-2B ACL completion audit | **COMPLETE** | per-handle submitted/completed accounting; unknown/over-completion = fault |
+| Review-2B dual ACL projection | **COMPLETE** | Bumble connection map remains sole mutable truth |
+| Review-2B bond guard | **COMPLETE** | controller identity, set_size=2, 2 verified members, key presence, before/after SHA-256 fingerprint |
+| Review-2B HIL | **PASS** | two existing-bond encrypted ACLs, reverse disconnect, privacy cleanup, bond unchanged |
+| Review-2B final software gate | **PASS** | 151/151 tests; cargo check PASS; cargo build PASS |
+
+### Review-2A HIL evidence
+
+```text
+Firmware bypass: Booted
+Capabilities: PASS
+Scan: PASS reports=2 observations=2 truncated=false
+Target seen: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+### Review-2B HIL evidence
+
+```text
+Firmware bypass: AlreadyOperational
+Controller identity guard: PASS (44:A3:BB:36:94:1B)
+Member 1: identity=E8:C9:13:EF:2F:23 handle=0x0800@gen1 encrypted=true key_size=0
+Member 2: identity=E8:C9:13:F6:5C:E0 handle=0x0801@gen2 encrypted=true key_size=0
+Dual encrypted ACL: PASS
+Cleanup disconnect: handle=0x0801@gen2 reason=0x16
+Cleanup disconnect: handle=0x0800@gen1 reason=0x16
+Privacy cleanup: PASS
+Bond store unchanged: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+`key_size=0` is not interpreted as a zero-byte encryption key; the Review success gate is the controller/Bumble encrypted connection state.
+
 ### Current implementation sequence
 
 ```text
@@ -162,9 +232,9 @@ Review-1 Runtime + Async Transport      ✅
         ↓
 Review-2A HCI attach/capabilities/scan ✅
         ↓
-Review-2B ACL/privacy/stored LTK       ← NEXT
+Review-2B ACL/privacy/stored LTK       ✅
         ↓
-Review-2C ATT/GATT
+Review-2C ACL/L2CAP/ATT/GATT           ← NEXT
         ↓
 Review-2D CIG/CIS/ISO Host
         ↓
@@ -181,31 +251,9 @@ Lifecycle / Recovery
 Profiling / HIL hardening
 ```
 
-### Review-2A HIL evidence
+### Round6 active references
 
-Review-2A real-device acceptance completed after adding an isolated L3 firmware bypass:
-
-```text
-Firmware bypass: Booted
-Capabilities: PASS
-Scan: PASS reports=2 observations=2 truncated=false
-Target seen: true
-Shutdown: hci=Stopped transport=Cancelled
-```
-
-The bypass independently claims/releases BE200 interface 0 before the normal async Transport reopens it. It is not part of HCI Host or the async Transport adapter. HCI Host was then promoted out of the `hci-wip` feature gate into the default build.
-
-Default validation after promotion:
-
-```text
-cargo test  -> 91 passed, 0 failed
-cargo check -> PASS
-cargo build -> PASS
-```
-
-### New active references
-
+- [Round6.md](./Round6.md)
 - [Round5.md](./Round5.md)
-- [../../docs/design/REVIEW1_RUNTIME_TRANSPORT.md](../design/REVIEW1_RUNTIME_TRANSPORT.md)
 - [../../docs/reference-index/README.md](../reference-index/README.md)
 
