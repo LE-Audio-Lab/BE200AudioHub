@@ -1,6 +1,6 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 起继续记录 R5.3 Experiment 封板与 Review/Refactor 产品架构。旧 Round 原文不回写，新阶段只追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1，Round6 记录 Review-2A/2B HCI Host 封板。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
 **时间范围**：2026-10-11—持续更新；**活动分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
@@ -16,10 +16,11 @@
 | [Round3.md](./Round3.md) | **Round3 原文**：真正完成 R2.4 两成员 SMP/Bond/CSIS、Stored LTK 验证、R3 双加密 ACL/PACS/ASCS/CAS、USB/SMP/Privacy Quirk |
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
 | [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
+| [Round6.md](./Round6.md) | **Round6**：Review-2A/2B HCI Host、Firmware Bypass、Privacy/FAL、stored-LTK、dual encrypted ACL 与真实 HIL 封板 |
 
 ## 推荐阅读顺序
 
-需要快速接手 R5.3：**README → TIMELINE → BUG_FIX_REGISTER → Round4 → Round3**。调查固件/硬件再看 Round1；调查 BLE Host/SMP 初期决策再看 Round2。
+需要快速接手当前 Review：**README → TIMELINE → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**。需要追溯 Experiment 成功基线再看 Round5/Round4/Round3；调查固件/硬件再看 Round1。
 
 需要完整追溯：直接阅读 **AllRounds.md**，或四份 Round 原文。它们是**历史快照**：Round1 文档的“尚无 ACL”和 Round2 文档的“尚无 SMP”是当时真实状态，但都已在后续 Round 得到新的 HIL 证明；**不得**截取早期状态冒充项目当前状态。遇新旧结论矛盾，以更晚的独立 HIL/源码证据更新当前视图，同时保留原文。
 
@@ -47,12 +48,15 @@
 | R4.1 Codec Planner、R4.2 Config Codec | **HIL PASS** |
 | R5.1 QoS Planner、R5.2-A Set CIG + Config QoS | **HIL PASS** |
 | **R5.2-B Enable + 双 LE CIS + 规范 Teardown** | **HIL PASS** |
-| **R5.3 ISO Data Path + LC3 双耳实际发声** | **未验证 / 未完成** |
-| R6 日用长稳、自动重连/恢复 | 未验收 |
+| **R5.3 ISO Data Path + LC3 双耳实际发声** | **Experiment HIL PASS / SEALED** |
+| **Review-1 Runtime + Async Transport** | **Software PASS / COMPLETE** |
+| **Review-2A Attach / Capabilities / Scan** | **Software + HIL PASS** |
+| **Review-2B Privacy / Dual ACL / Stored LTK** | **Software + HIL PASS** |
+| Review-2C ACL / L2CAP / ATT / GATT | **NEXT** |
 
-**最后完成真实 R5.2-B HIL 的源码基线**：`eac486691fd4d7181d36bb09a620e942d0026936`。后续本目录的文档提交只是归档，不是音频开发新版本。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
+Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
-**下一步**：R5.3-A 首先验证 Setup/Remove ISO Data Path、HCI ISO Bulk-Out framing/flow control；然后 R5.3-B 让 LC3 48kHz、10ms、100 octets/mono SDU 通过两条已经 HIL 的 CIS 发声。详见 [TIMELINE `6](./TIMELINE.md) 和 [Round4 `13](./Round4.md)。
+**下一步**：Review-2C ACL / L2CAP / ATT / GATT。详见 [Round6.md](./Round6.md) 和 [TIMELINE.md](./TIMELINE.md)。
 
 ## 新 Round 维护规则
 
@@ -65,14 +69,16 @@
 
 ## Review continuation
 
-Round1–4 的历史状态口径仍按原文理解；Round5 开始后的当前状态以 [Round5.md](./Round5.md) 与 [TIMELINE.md](./TIMELINE.md) 新增 Review 段为准。
+Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Review-1 的历史截止点；当前状态以 [Round6.md](./Round6.md) 与 [TIMELINE.md](./TIMELINE.md) 为准。
 
 当前最短阅读顺序：
 
-**README → TIMELINE → Round5 → BUG_FIX_REGISTER → docs/reference-index/README.md**
+**README → TIMELINE → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**
 
 当前工程门槛：
 
 - Experiment R1–R5.3：sealed，真实 First Sound 已证明；
 - Review-1 Runtime + Async Transport：complete；
-- Review-2 HCI Host：WIP。
+- Review-2A Attach/Capabilities/Scan：complete + HIL PASS；
+- Review-2B Privacy/Dual ACL/Stored LTK：complete + HIL PASS；
+- Review-2C ACL/L2CAP/ATT/GATT：next。
