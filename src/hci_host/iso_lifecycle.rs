@@ -1,7 +1,9 @@
 use bumble_hci::{
-    codes::HCI_LE_REMOVE_CIG_COMMAND,
+    codes::{HCI_DISCONNECT_COMMAND, HCI_LE_REMOVE_CIG_COMMAND},
     Command,
 };
+
+pub const CIS_DISCONNECT_REASON_REMOTE_USER_TERMINATED: u8 = 0x13;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CigRemoveFailureKind {
@@ -89,9 +91,218 @@ impl CigRemoveTransaction {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisDisconnectFailureKind {
+    CommandStatus { status: u8 },
+    DisconnectionEventStatus { status: u8 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CisDisconnectFailure {
+    pub connection_handle: u16,
+    pub kind: CisDisconnectFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisDisconnectState {
+    Idle,
+    Submitting { connection_handle: u16 },
+    AwaitingEvent { connection_handle: u16 },
+    Disconnected {
+        connection_handle: u16,
+        event_reason: u8,
+    },
+    Failed(CisDisconnectFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisDisconnectEvent {
+    Disconnected {
+        connection_handle: u16,
+        reason: u8,
+    },
+    Failed {
+        connection_handle: u16,
+        status: u8,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisDisconnectAction {
+    AwaitEvent { connection_handle: u16 },
+    Disconnected {
+        connection_handle: u16,
+        event_reason: u8,
+    },
+    Failed(CisDisconnectFailure),
+    Ignored,
+}
+
+pub struct CisDisconnectTransaction {
+    connection_handle: u16,
+    awaiting_event: bool,
+    terminal: bool,
+}
+
+impl CisDisconnectTransaction {
+    pub fn begin(connection_handle: u16) -> (Self, Command) {
+        (
+            Self {
+                connection_handle,
+                awaiting_event: false,
+                terminal: false,
+            },
+            Command::Disconnect {
+                connection_handle,
+                reason: CIS_DISCONNECT_REASON_REMOTE_USER_TERMINATED,
+            },
+        )
+    }
+
+    pub const fn connection_handle(&self) -> u16 {
+        self.connection_handle
+    }
+
+    pub fn on_command_status(
+        &mut self,
+        opcode: u16,
+        status: u8,
+    ) -> CisDisconnectAction {
+        if self.terminal || opcode != HCI_DISCONNECT_COMMAND {
+            return CisDisconnectAction::Ignored;
+        }
+
+        if status != 0 {
+            self.terminal = true;
+            return CisDisconnectAction::Failed(CisDisconnectFailure {
+                connection_handle: self.connection_handle,
+                kind: CisDisconnectFailureKind::CommandStatus { status },
+            });
+        }
+
+        self.awaiting_event = true;
+        CisDisconnectAction::AwaitEvent {
+            connection_handle: self.connection_handle,
+        }
+    }
+
+    pub fn on_event(
+        &mut self,
+        event: CisDisconnectEvent,
+    ) -> CisDisconnectAction {
+        if self.terminal || !self.awaiting_event {
+            return CisDisconnectAction::Ignored;
+        }
+
+        match event {
+            CisDisconnectEvent::Disconnected {
+                connection_handle,
+                reason,
+            } if connection_handle == self.connection_handle => {
+                self.terminal = true;
+                CisDisconnectAction::Disconnected {
+                    connection_handle,
+                    event_reason: reason,
+                }
+            }
+            CisDisconnectEvent::Failed {
+                connection_handle,
+                status,
+            } if connection_handle == self.connection_handle => {
+                self.terminal = true;
+                CisDisconnectAction::Failed(CisDisconnectFailure {
+                    connection_handle,
+                    kind: CisDisconnectFailureKind::DisconnectionEventStatus {
+                        status,
+                    },
+                })
+            }
+            _ => CisDisconnectAction::Ignored,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cis_disconnect_command_uses_remote_user_terminated_reason() {
+        let (_transaction, command) =
+            CisDisconnectTransaction::begin(0x0900);
+        assert_eq!(
+            command,
+            Command::Disconnect {
+                connection_handle: 0x0900,
+                reason: 0x13,
+            }
+        );
+    }
+
+    #[test]
+    fn cis_disconnect_accepts_local_0x16_event_after_0x13_command() {
+        let (mut transaction, _) =
+            CisDisconnectTransaction::begin(0x0900);
+        assert_eq!(
+            transaction.on_command_status(HCI_DISCONNECT_COMMAND, 0),
+            CisDisconnectAction::AwaitEvent {
+                connection_handle: 0x0900,
+            }
+        );
+        assert_eq!(
+            transaction.on_event(CisDisconnectEvent::Disconnected {
+                connection_handle: 0x0900,
+                reason: 0x16,
+            }),
+            CisDisconnectAction::Disconnected {
+                connection_handle: 0x0900,
+                event_reason: 0x16,
+            }
+        );
+    }
+
+    #[test]
+    fn cis_disconnect_failure_and_unrelated_events_are_explicit() {
+        let (mut rejected, _) =
+            CisDisconnectTransaction::begin(0x0900);
+        assert!(matches!(
+            rejected.on_command_status(HCI_DISCONNECT_COMMAND, 0x12),
+            CisDisconnectAction::Failed(CisDisconnectFailure {
+                connection_handle: 0x0900,
+                kind: CisDisconnectFailureKind::CommandStatus {
+                    status: 0x12,
+                },
+            })
+        ));
+
+        let (mut transaction, _) =
+            CisDisconnectTransaction::begin(0x0900);
+        assert_eq!(
+            transaction.on_command_status(HCI_DISCONNECT_COMMAND, 0),
+            CisDisconnectAction::AwaitEvent {
+                connection_handle: 0x0900,
+            }
+        );
+        assert_eq!(
+            transaction.on_event(CisDisconnectEvent::Disconnected {
+                connection_handle: 0x0901,
+                reason: 0x16,
+            }),
+            CisDisconnectAction::Ignored
+        );
+        assert!(matches!(
+            transaction.on_event(CisDisconnectEvent::Failed {
+                connection_handle: 0x0900,
+                status: 0x01,
+            }),
+            CisDisconnectAction::Failed(CisDisconnectFailure {
+                connection_handle: 0x0900,
+                kind: CisDisconnectFailureKind::DisconnectionEventStatus {
+                    status: 0x01,
+                },
+            })
+        ));
+    }
 
     #[test]
     fn remove_cig_builds_typed_command() {
