@@ -47,10 +47,11 @@ use super::{
         CisDisconnectTransaction,
     },
     iso_path::{
-        IsoDataPathConfig, IsoPathConfigError, IsoPathOperationState,
-        IsoPathRemoveAction, IsoPathRemoveTransaction, IsoPathSetupAction,
-        IsoPathSetupTransaction,
+        IsoDataPathConfig, IsoDataPathDirection, IsoPathConfigError,
+        IsoPathOperationState, IsoPathRemoveAction, IsoPathRemoveTransaction,
+        IsoPathSetupAction, IsoPathSetupTransaction,
     },
+    iso_tx::{IsoSduConfigError, IsoSduRequest},
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
@@ -82,6 +83,10 @@ pub enum EngineFault {
     CisCreateConfig(CisCreateConfigError),
     IsoPathConfig(IsoPathConfigError),
     IsoPathSendRejected { connection_handle: u16 },
+    IsoSduConfig(IsoSduConfigError),
+    IsoControllerPoolUnavailable,
+    IsoInputPathNotReady { connection_handle: u16 },
+    IsoSduSendRejected { connection_handle: u16 },
     UnexpectedIsoControlEvent,
     IsoControlJournalMismatch { connection_handle: u16 },
     IsoPathProjectionMismatch {
@@ -546,6 +551,51 @@ impl HciEngine {
 
     pub fn iso_path_state(&self) -> &IsoPathOperationState {
         &self.iso_path_state
+    }
+
+    pub fn submit_iso_sdu(
+        &mut self,
+        request: IsoSduRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready {
+            return Err(EngineFault::InvalidState);
+        }
+        request.validate().map_err(EngineFault::IsoSduConfig)?;
+
+        let handle = request.connection_handle;
+        if self.device.iso_max_in_flight().is_none()
+            || self.iso_credit_audit.limit().is_none()
+        {
+            return Err(EngineFault::IsoControllerPoolUnavailable);
+        }
+        if !self.cis_state_contains_established_handle(handle)
+            || self.device.cis_link(handle).is_none()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let expected = IsoDataPathConfig::hci_input(handle)
+            .to_bumble_parameters();
+        if self.device.iso_data_path(
+            handle,
+            IsoDataPathDirection::Input as u8,
+        ) != Some(&expected)
+        {
+            return Err(EngineFault::IsoInputPathNotReady {
+                connection_handle: handle,
+            });
+        }
+
+        if !self
+            .device
+            .send_iso_sdu(&mut self.link, handle, &request.payload)
+        {
+            self.check_link_fault()?;
+            return Err(EngineFault::IsoSduSendRejected {
+                connection_handle: handle,
+            });
+        }
+        self.check_link_fault()
     }
 
     fn cis_ready_for_iso_path(&self, connection_handle: u16) -> bool {
