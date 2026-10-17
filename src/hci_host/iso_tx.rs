@@ -44,6 +44,12 @@ pub struct IsoSduGroupRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsoSubmitOutcome {
+    Accepted,
+    Backpressured,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IsoSduGroupConfigError {
     Empty,
     TooManyMembers { count: usize },
