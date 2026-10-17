@@ -4,6 +4,7 @@ pub mod engine;
 pub mod gatt;
 pub mod iso;
 pub mod iso_lifecycle;
+pub mod iso_path;
 pub mod link;
 pub mod mailbox;
 pub mod privacy;
