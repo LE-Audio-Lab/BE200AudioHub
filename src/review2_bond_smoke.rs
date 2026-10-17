@@ -236,7 +236,7 @@ impl BondSmokeTracker {
             HciReport::ConnectionSet(snapshot) => {
                 self.connection_set = snapshot.clone()
             }
-            HciReport::Gatt(_) => {}
+            HciReport::Gatt(_) | HciReport::CigConfigureState(_) => {}
         }
     }
 
