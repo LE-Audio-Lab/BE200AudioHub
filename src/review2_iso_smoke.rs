@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     thread,
     time::{Duration, Instant},
 };
@@ -297,6 +298,32 @@ fn parse_ase_status_compat(value: &[u8]) -> Result<AseStatus, String> {
         .map_err(|error| format!("ASE status parse: {error}"))
 }
 
+fn select_idle_ase_index(
+    statuses: &[AseStatus],
+) -> Result<usize, String> {
+    if statuses.is_empty() {
+        return Err("ASCS exposes no Sink ASE".into());
+    }
+
+    let mut ids = BTreeSet::new();
+    for status in statuses {
+        if status.ase_id == 0 || !ids.insert(status.ase_id) {
+            return Err(format!(
+                "invalid or duplicate Sink ASE ID {}",
+                status.ase_id
+            ));
+        }
+    }
+
+    statuses
+        .iter()
+        .enumerate()
+        .filter(|(_, status)| status.state == AseState::IDLE)
+        .min_by_key(|(_, status)| status.ase_id)
+        .map(|(index, _)| index)
+        .ok_or_else(|| "ASCS exposes no Idle Sink ASE".into())
+}
+
 fn characteristic<'a>(
     values: &'a [GattCharacteristic],
     uuid: u16,
@@ -503,31 +530,47 @@ fn prepare_member(
             ))
         }
     };
-    let ase = characteristic(
-        &ascs_chars,
-        SINK_ASE_CHARACTERISTIC,
-        "ASCS Sink ASE",
-    )?;
+    let sink_ases = ascs_chars
+        .iter()
+        .filter(|value| {
+            value.uuid == Uuid::from_16_bits(SINK_ASE_CHARACTERISTIC)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if sink_ases.is_empty() {
+        return Err(format!(
+            "{} ASCS exposes no Sink ASE characteristic",
+            member.identity_address
+        ));
+    }
+
+    let mut sink_statuses = Vec::with_capacity(sink_ases.len());
+    for ase in &sink_ases {
+        sink_statuses.push(parse_ase_status_compat(&read_value(
+            stack,
+            tracker,
+            member.connection,
+            next,
+            ase.handle,
+        )?)?);
+    }
+    let selected_index = select_idle_ase_index(&sink_statuses)?;
+    let ase = &sink_ases[selected_index];
+    let initial = sink_statuses[selected_index].clone();
+
+    println!(
+        "[R2D/ASCS] {} Sink ASEs={} selected ASE={} handle=0x{:04X} by lowest-Idle-ID policy",
+        member.identity_address,
+        sink_ases.len(),
+        initial.ase_id,
+        ase.handle,
+    );
+
     let control_point = characteristic(
         &ascs_chars,
         ASE_CONTROL_POINT_CHARACTERISTIC,
         "ASCS Control Point",
     )?;
-    let initial = parse_ase_status_compat(&read_value(
-        stack,
-        tracker,
-        member.connection,
-        next,
-        ase.handle,
-    )?)?;
-    if initial.state != AseState::IDLE {
-        return Err(format!(
-            "{} ASE {} is not Idle before smoke: state=0x{:02X}",
-            member.identity_address,
-            initial.ase_id,
-            initial.state.0
-        ));
-    }
 
     let ase_cccd = discover_cccd(
         stack,
@@ -1889,6 +1932,34 @@ mod tests {
                 && frame.right.len() == OCTETS_PER_SDU
         }));
         assert_ne!(frames[1].left, frames[1].right);
+    }
+
+    #[test]
+    fn multiple_sink_ases_select_lowest_idle_id() {
+        let status = |ase_id, state| AseStatus {
+            ase_id,
+            state,
+            details: AseStatusDetails::None,
+        };
+        let statuses = vec![
+            status(4, AseState::IDLE),
+            status(2, AseState::CODEC_CONFIGURED),
+            status(3, AseState::IDLE),
+            status(1, AseState::IDLE),
+        ];
+        assert_eq!(select_idle_ase_index(&statuses).unwrap(), 3);
+
+        let duplicate = vec![
+            status(1, AseState::IDLE),
+            status(1, AseState::IDLE),
+        ];
+        assert!(select_idle_ase_index(&duplicate).is_err());
+
+        let busy = vec![
+            status(1, AseState::CODEC_CONFIGURED),
+            status(2, AseState::QOS_CONFIGURED),
+        ];
+        assert!(select_idle_ase_index(&busy).is_err());
     }
 
     #[test]
