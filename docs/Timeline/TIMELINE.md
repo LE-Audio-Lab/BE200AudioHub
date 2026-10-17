@@ -2,7 +2,7 @@
 
 > **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–6 Review continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；当前 Review 状态以 Round6 §17 的仓库 continuation correction 与当前 `main` software gate 为准。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 的网页会话正式边界见 Round6 §17–§22，当前仓库在后续新聊天继续推进的状态见 Round6 §23 Post-Round6 continuation。
 
 ## 阅读入口
 
@@ -15,7 +15,7 @@
 | [Round3.md](./Round3.md) | R2.4 两成员 SMP/Bond/CSIS 落地、Stored Verify、R3 双 ACL + Audio Service discovery | R2.4、R3 |
 | [Round4.md](./Round4.md) | Codec/QoS/CIG/CIS 全控制面；三次 R5.2-B HIL | R4.1–R5.2-B |
 | [Round5.md](./Round5.md) | R5.3 First Sound、Experiment sealed、Review-1 Runtime/Async Transport | R5.3 / Review-1 |
-| [Round6.md](./Round6.md) | Review-2A/2B HCI Host、Privacy/FAL、stored-LTK、dual ACL HIL | Review-2A / 2B |
+| [Round6.md](./Round6.md) | Review-2A/2B/2C software + HIL、ToolHub locked workflow、Apache-2.0 governance；Post-Round6 续写 2D | Review-2A / 2B / 2C + handoff |
 | [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）
@@ -179,9 +179,9 @@ Review-2D CIG/CIS/ISO Host
 
 ---
 
-## 8. Round 6 / Review-2A + Review-2B completion — 2026-10-15
+## 8. Round 6 / Review-2A + Review-2B + Review-2C completion — 2026-10-15 to 2026-10-18
 
-> Round6 owns all Review-2A/2B implementation, static-audit and HIL changes from this development session. Round5 remains the Review-1 historical cutoff.
+> Round6 owns Review-2A/2B/2C implementation, static-audit and real-HIL changes from this webpage development session, plus ToolHub build-discipline and open-source governance decisions. The same chat then began Review-2D design/oracle audit but did not land 2D implementation before repeated connection interruption and chat migration. Round5 remains the Review-1 historical cutoff.
 
 | Stage | Status | Evidence / decision |
 |---|---|---|
@@ -197,6 +197,11 @@ Review-2D CIG/CIS/ISO Host
 | Review-2B bond guard | **COMPLETE** | controller identity, set_size=2, 2 verified members, key presence, before/after SHA-256 fingerprint |
 | Review-2B HIL | **PASS** | two existing-bond encrypted ACLs, reverse disconnect, privacy cleanup, bond unchanged |
 | Review-2B final software gate | **PASS** | 151/151 tests; cargo check PASS; cargo build PASS |
+| Review-2C async GATT | **COMPLETE** | typed event-driven GATT over Bumble Device ACL/L2CAP/ATT substrate; no synchronous ExternalAttTransport/GattClient public boundary |
+| Review-2C deterministic gate | **PASS** | final Round6 local gate: 180/180 tests; cargo check/build PASS; working tree clean |
+| Review-2C real HIL | **PASS** | both B3P members MTU=247, 14 services, PACS/ASCS/CAS discovered, CAS includes CSIS, descriptor probe + Supported Audio Contexts read, cleanup/bond unchanged |
+| ToolHub build discipline | **COMPLETE** | cargo test/check/build use --workspace --locked; fail-closed git-sync-generated handles only provably safe dirty Cargo.lock recovery |
+| Project license | **Apache-2.0** | LICENSE + NOTICE + THIRD_PARTY_NOTICES; Intel firmware excluded; vendored libusb LGPL boundary documented |
 
 ### Review-2A HIL evidence
 
@@ -225,7 +230,7 @@ Shutdown: hci=Stopped transport=Cancelled
 
 `key_size=0` is not interpreted as a zero-byte encryption key; the Review success gate is the controller/Bumble encrypted connection state.
 
-### Current implementation sequence
+### Round6 formal webpage boundary
 
 ```text
 Review-1 Runtime + Async Transport      ✅
@@ -234,7 +239,23 @@ Review-2A HCI attach/capabilities/scan ✅ COMPLETE + HIL
         ↓
 Review-2B ACL/privacy/stored LTK       ✅ COMPLETE + HIL
         ↓
-Review-2C ACL/L2CAP/ATT/GATT           ✅ SOFTWARE COMPLETE
+Review-2C ACL/L2CAP/ATT/GATT           ✅ COMPLETE + HIL
+        ↓
+Review-2D design / old-R5 oracle audit ✅
+        ↓
+chat migration / handoff
+```
+
+### Current repository sequence (includes Post-Round6 continuation)
+
+```text
+Review-1 Runtime + Async Transport      ✅
+        ↓
+Review-2A HCI attach/capabilities/scan ✅ COMPLETE + HIL
+        ↓
+Review-2B ACL/privacy/stored LTK       ✅ COMPLETE + HIL
+        ↓
+Review-2C ACL/L2CAP/ATT/GATT           ✅ COMPLETE + HIL
         ↓
 Review-2D CIG/CIS/ISO Host             ✅ SOFTWARE COMPLETE
         ↓
@@ -259,13 +280,13 @@ Profiling / HIL hardening
 
 
 
-### Review-2C / Review-2D continuation — repository truth update
+### Post-Round6 continuation — repository truth update
 
-The Round6 conversation summary ended before the repository work did. Current `main` therefore supersedes the earlier “2C NEXT / 2D pending” navigation state while preserving that text as a historical cutoff.
+The Round6 webpage session itself ended after Review-2C HIL PASS and Review-2D design/oracle audit. A later chat continued implementation. Current `main` therefore advances beyond the Round6 formal boundary while preserving that boundary as historical evidence.
 
 | Stage | Current status | Evidence / boundary |
 |---|---|---|
-| Review-2C ACL/L2CAP/ATT/GATT | **SOFTWARE COMPLETE** | async GATT transaction engine over real ACL/L2CAP/ATT path; discovery/read/write/subscription; fragmented ACL; bounded worker/mailbox |
+| Review-2C ACL/L2CAP/ATT/GATT | **SOFTWARE + HIL PASS (Round6)** | async GATT transaction engine over real ACL/L2CAP/ATT path; discovery/read/write/subscription; fragmented ACL; bounded worker/mailbox; real dual-member read-only B3P GATT HIL |
 | Review-2D CIG/CIS lifecycle | **SOFTWARE COMPLETE** | typed Set/Remove CIG, Create/Disconnect CIS, asynchronous terminal-outcome reduction |
 | Review-2D ISO Data Path | **SOFTWARE COMPLETE** | setup/remove projection, HCI input path readiness, explicit teardown ordering |
 | Review-2D ISO SDU Host | **SOFTWARE COMPLETE** | complete-SDU boundary; pinned Bumble owns ISO sequence/PB/fragmentation/controller queue |
