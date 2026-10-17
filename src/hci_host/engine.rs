@@ -12,7 +12,8 @@ use bumble_hci::{
     Command,
 };
 use bumble_host::{
-    Device, DeviceConnectionTransport, DeviceEvent, HostTransport,
+    CisControlEvent, Device, DeviceConnectionTransport, DeviceEvent,
+    HostTransport,
 };
 
 use crate::transport::{
@@ -36,7 +37,8 @@ use super::{
     },
     iso::{
         CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
-        CigConfigureTransaction,
+        CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
+        CisCreateRequest, CisCreateState, CisCreateTransaction,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
@@ -66,6 +68,7 @@ pub enum EngineFault {
     DisconnectConfig(DisconnectConfigError),
     StoredEncryptionConfig(StoredEncryptionConfigError),
     CigConfig(CigConfigError),
+    CisCreateConfig(CisCreateConfigError),
     StaleConnection {
         connection_handle: u16,
         requested_generation: u64,
@@ -164,6 +167,8 @@ pub struct HciEngine {
     gatt_reports: VecDeque<GattReport>,
     cig_configure_state: CigConfigureState,
     cig_configure_transaction: Option<CigConfigureTransaction>,
+    cis_create_state: CisCreateState,
+    cis_create_transaction: Option<CisCreateTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -197,6 +202,8 @@ impl HciEngine {
             gatt_reports: VecDeque::new(),
             cig_configure_state: CigConfigureState::Idle,
             cig_configure_transaction: None,
+            cis_create_state: CisCreateState::Idle,
+            cis_create_transaction: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -419,6 +426,46 @@ impl HciEngine {
 
         self.cig_configure_transaction = Some(transaction);
         self.cig_configure_state = CigConfigureState::Configuring;
+        Ok(())
+    }
+
+    pub fn cis_create_state(&self) -> &CisCreateState {
+        &self.cis_create_state
+    }
+
+    pub fn begin_cis_creation(
+        &mut self,
+        request: CisCreateRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.cis_create_transaction.is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let allocation = match &self.cig_configure_state {
+            CigConfigureState::Ready(allocation)
+                if allocation.cig_id == request.cig_id =>
+            {
+                allocation.clone()
+            }
+            _ => return Err(EngineFault::InvalidState),
+        };
+
+        for binding in &request.bindings {
+            self.validate_connection_token(binding.acl)?;
+        }
+
+        let (transaction, command) =
+            CisCreateTransaction::begin(allocation, request.bindings)
+                .map_err(EngineFault::CisCreateConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.cis_create_transaction = Some(transaction);
+        self.cis_create_state =
+            CisCreateState::Submitting { cig_id: request.cig_id };
         Ok(())
     }
 
@@ -730,6 +777,7 @@ impl HciEngine {
                 self.check_link_fault()?;
                 self.collect_scan_observations();
                 self.process_observations()?;
+                self.process_cis_control_events()?;
                 self.process_gatt_inbox()?;
                 self.process_device_events()?;
                 self.check_link_fault()?;
@@ -779,6 +827,81 @@ impl HciEngine {
             self.process_scan_observation(&observation)?;
         }
         Ok(())
+    }
+
+    fn process_cis_control_events(&mut self) -> Result<(), EngineFault> {
+        for event in self.device.take_cis_control_events() {
+            let action = match event {
+                CisControlEvent::CigConfigured { .. } => None,
+                CisControlEvent::CommandStatus {
+                    command_opcode,
+                    status,
+                } => self
+                    .cis_create_transaction
+                    .as_mut()
+                    .map(|transaction| {
+                        transaction
+                            .on_command_status(command_opcode, status)
+                    }),
+                CisControlEvent::Established { status, link } => self
+                    .cis_create_transaction
+                    .as_mut()
+                    .map(|transaction| {
+                        transaction.on_established(status, link)
+                    }),
+            };
+
+            let Some(action) = action else {
+                continue;
+            };
+            self.handle_cis_create_action(action);
+        }
+        Ok(())
+    }
+
+    fn handle_cis_create_action(&mut self, action: CisCreateAction) {
+        let cig_id = self
+            .cis_create_transaction
+            .as_ref()
+            .map(|transaction| transaction.allocation().cig_id);
+
+        match action {
+            CisCreateAction::AwaitingEstablished => {
+                if let Some(cig_id) = cig_id {
+                    self.cis_create_state =
+                        CisCreateState::AwaitingEstablished {
+                            cig_id,
+                            established: Vec::new(),
+                        };
+                }
+            }
+            CisCreateAction::Progress(established) => {
+                if let Some(cig_id) = cig_id {
+                    self.cis_create_state =
+                        CisCreateState::AwaitingEstablished {
+                            cig_id,
+                            established,
+                        };
+                }
+            }
+            CisCreateAction::Complete(established) => {
+                let cig_id = cig_id.expect(
+                    "terminal CIS action missing active transaction",
+                );
+                self.cis_create_transaction = None;
+                self.cis_create_state =
+                    CisCreateState::Ready {
+                        cig_id,
+                        established,
+                    };
+            }
+            CisCreateAction::Failed(failure) => {
+                self.cis_create_transaction = None;
+                self.cis_create_state =
+                    CisCreateState::Failed(failure);
+            }
+            CisCreateAction::Ignored => {}
+        }
     }
 
     fn process_acl_credit_observation(
