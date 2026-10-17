@@ -2817,6 +2817,70 @@ mod tests {
             }
         );
         assert!(engine.device().iso_data_path(0x0900, 0).is_none());
+
+        engine.begin_cis_disconnect(0x0900).unwrap();
+        let HostPacket::Command(disconnect) = rx.try_recv().unwrap() else {
+            panic!("expected CIS Disconnect command");
+        };
+        assert_eq!(
+            u16::from_le_bytes([disconnect[0], disconnect[1]]),
+            HCI_DISCONNECT_COMMAND
+        );
+        assert_eq!(
+            disconnect.last().copied(),
+            Some(super::super::iso_lifecycle::
+                CIS_DISCONNECT_REASON_REMOTE_USER_TERMINATED)
+        );
+
+        engine
+            .ingest(command_status(HCI_DISCONNECT_COMMAND, 0))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.cis_disconnect_state(),
+            &super::super::iso_lifecycle::CisDisconnectState::AwaitingEvent {
+                connection_handle: 0x0900,
+            }
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x09, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.cis_disconnect_state(),
+            &super::super::iso_lifecycle::CisDisconnectState::Disconnected {
+                connection_handle: 0x0900,
+                event_reason: 0x16,
+            }
+        );
+        assert!(engine.device().cis_link(0x0900).is_none());
+
+        engine.begin_cig_removal(1).unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_REMOVE_CIG_COMMAND
+        );
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_REMOVE_CIG_COMMAND,
+                0,
+                &[1],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.cig_remove_state(),
+            &super::super::iso_lifecycle::CigRemoveState::Removed {
+                cig_id: 1,
+            }
+        );
+        assert_eq!(
+            engine.cig_configure_state(),
+            &super::super::iso::CigConfigureState::Idle
+        );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
