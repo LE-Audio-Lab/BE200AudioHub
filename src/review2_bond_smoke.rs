@@ -1,3 +1,6 @@
+use bumble::{Address, AddressType};
+use bumble_smp::privacy::verify_resolvable_private_address;
+
 use std::{
     path::PathBuf,
     thread,
@@ -13,10 +16,11 @@ use crate::{
         },
         engine::{
             ControllerIdentity, ControllerIdentityFailure,
-            OperationalAttachState,
+            OperationalAttachState, PassiveScanState,
         },
         iso_host_feature::CisHostFeatureState,
         mailbox::{HciReport, HciReportInbox},
+        scan::ScanSummary,
         stack::{
             spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
         },
@@ -41,6 +45,7 @@ use crate::{
 };
 
 const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 12;
+const ISO_PRECONNECT_SCAN_DURATION: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BondSmokeConfig {
@@ -275,6 +280,7 @@ pub enum BondSmokeRunError {
         actual: [u8; 6],
     },
     CisHostFeatureFailed(String),
+    DiscoveryFailed(String),
     PrivacyFailed(String),
     ConnectFailed {
         member: String,
@@ -446,6 +452,163 @@ fn wait_cis_host_feature_ready(
             _ => None,
         },
     )
+}
+
+fn wait_scan_started(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "pre-connect scan start",
+        |report, _| match report {
+            HciReport::PassiveScanState(PassiveScanState::Scanning) => {
+                Some(Ok(()))
+            }
+            HciReport::PassiveScanState(
+                PassiveScanState::Failed { status, .. },
+            ) => Some(Err(BondSmokeRunError::DiscoveryFailed(
+                format!("passive scan start failed status=0x{status:02X}"),
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn wait_scan_complete(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<ScanSummary, BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "pre-connect scan stop",
+        |report, _| match report {
+            HciReport::ScanComplete(summary) => {
+                Some(Ok(summary.clone()))
+            }
+            HciReport::PassiveScanState(
+                PassiveScanState::Failed { status, .. },
+            ) => Some(Err(BondSmokeRunError::DiscoveryFailed(
+                format!("passive scan failed status=0x{status:02X}"),
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn observation_matches_member(
+    observation: &crate::hci_host::scan::ScanObservation,
+    member: &ReviewBondMember,
+) -> Result<bool, String> {
+    if observation.address.eq_ignore_ascii_case(
+        &format_address_le(member.identity_address_le),
+    ) {
+        return Ok(true);
+    }
+
+    if !matches!(observation.address_type, 0 | 1) {
+        return Ok(false);
+    }
+    let address = Address::parse(
+        &observation.address,
+        AddressType(observation.address_type),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot parse scan address {} type {}: {error}",
+            observation.address, observation.address_type
+        )
+    })?;
+    Ok(verify_resolvable_private_address(
+        &member.peer_irk,
+        &address,
+    ))
+}
+
+fn validate_iso_preconnect_scan(
+    plan: &BondSmokePlan,
+    scan: &ScanSummary,
+) -> Result<(), BondSmokeRunError> {
+    let mut matched = vec![None::<String>; plan.members.len()];
+
+    for observation in &scan.observations {
+        if !observation.is_connectable {
+            continue;
+        }
+        for (index, member) in plan.members.iter().enumerate() {
+            if matched[index].is_none()
+                && observation_matches_member(observation, member)
+                    .map_err(BondSmokeRunError::DiscoveryFailed)?
+            {
+                matched[index] = Some(observation.address.clone());
+            }
+        }
+    }
+
+    let missing = matched
+        .iter()
+        .enumerate()
+        .filter_map(|(index, address)| {
+            address.is_none().then(|| {
+                format_address_le(plan.members[index].identity_address_le)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if !missing.is_empty() {
+        return Err(BondSmokeRunError::DiscoveryFailed(format!(
+            "pre-connect scan resolved {}/{} connectable bonded member(s); missing identities: {}; reports={} observations={}",
+            plan.members.len() - missing.len(),
+            plan.members.len(),
+            missing.join(", "),
+            scan.reports_seen,
+            scan.observations.len(),
+        )));
+    }
+
+    for (index, current) in matched.into_iter().enumerate() {
+        println!(
+            "[R2D/DISCOVERY] identity={} current={} connectable=PASS",
+            format_address_le(plan.members[index].identity_address_le),
+            current.expect("validated member resolution"),
+        );
+    }
+    Ok(())
+}
+
+fn run_iso_preconnect_discovery(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+) -> Result<(), BondSmokeRunError> {
+    send_control(
+        stack.control().try_start_passive_extended_scan(),
+        "start ISO pre-connect discovery scan",
+    )?;
+    wait_scan_started(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+    )?;
+
+    thread::sleep(ISO_PRECONNECT_SCAN_DURATION);
+
+    send_control(
+        stack.control().try_stop_passive_extended_scan(),
+        "stop ISO pre-connect discovery scan",
+    )?;
+    let scan = wait_scan_complete(
+        stack.reports(),
+        tracker,
+        Duration::from_secs(5),
+    )?;
+    validate_iso_preconnect_scan(plan, &scan)
 }
 
 fn wait_privacy_ready(
@@ -807,6 +970,14 @@ fn establish_dual_encrypted_session_with_options(
             stack.reports(),
             tracker,
             Duration::from_secs(5),
+        )?;
+    }
+
+    if ensure_cis_host_feature {
+        run_iso_preconnect_discovery(
+            stack,
+            tracker,
+            plan,
         )?;
     }
 
@@ -1272,6 +1443,72 @@ mod tests {
             tracker.privacy,
             Some(ControllerPrivacyState::Ready)
         );
+    }
+
+    #[test]
+    fn preconnect_discovery_requires_both_connectable_members() {
+        use bumble_smp::privacy::resolvable_private_address;
+
+        let member = |last: u8, irk: [u8; 16]| ReviewBondMember {
+            identity_address_le: [last, 5, 4, 3, 2, 1],
+            address_type: 1,
+            peer_irk: irk,
+            long_term_key: [0x11; 16],
+            encrypted_diversifier: 0,
+            random_number: 0,
+            encryption_key_size: 16,
+            rank: None,
+        };
+        let left = member(6, [0x21; 16]);
+        let right = member(7, [0x31; 16]);
+        let plan = BondSmokePlan {
+            controller_identity_le: [0; 6],
+            local_irk: [0; 16],
+            members: vec![left.clone(), right.clone()],
+        };
+        let obs = |address: Address, connectable: bool| {
+            crate::hci_host::scan::ScanObservation {
+                address: address.to_string(true),
+                address_type: address.address_type().0,
+                name: None,
+                rsi: None,
+                rssi: -40,
+                primary_phy: 1,
+                secondary_phy: 0,
+                sid: 0,
+                is_legacy: false,
+                is_connectable: connectable,
+                is_scannable: false,
+                raw_data: vec![],
+            }
+        };
+        let left_rpa =
+            resolvable_private_address(&left.peer_irk, [1, 2, 3]);
+        let right_rpa =
+            resolvable_private_address(&right.peer_irk, [4, 5, 6]);
+
+        let both = ScanSummary {
+            reports_seen: 2,
+            observations: vec![
+                obs(left_rpa.clone(), true),
+                obs(right_rpa.clone(), true),
+            ],
+            truncated: false,
+        };
+        validate_iso_preconnect_scan(&plan, &both).unwrap();
+
+        let one = ScanSummary {
+            reports_seen: 2,
+            observations: vec![
+                obs(left_rpa, true),
+                obs(right_rpa, false),
+            ],
+            truncated: false,
+        };
+        assert!(matches!(
+            validate_iso_preconnect_scan(&plan, &one),
+            Err(BondSmokeRunError::DiscoveryFailed(_))
+        ));
     }
 
     #[test]
