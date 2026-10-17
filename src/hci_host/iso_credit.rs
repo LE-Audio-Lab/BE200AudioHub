@@ -25,6 +25,21 @@ pub struct IsoCreditAudit {
     limit: Option<usize>,
     total_in_flight: usize,
     per_handle: BTreeMap<u16, usize>,
+    total_submitted: u64,
+    total_completed: u64,
+    submitted_per_handle: BTreeMap<u16, u64>,
+    completed_per_handle: BTreeMap<u16, u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IsoCreditSnapshot {
+    pub limit: Option<usize>,
+    pub in_flight: usize,
+    pub total_submitted: u64,
+    pub total_completed: u64,
+    pub in_flight_per_handle: BTreeMap<u16, usize>,
+    pub submitted_per_handle: BTreeMap<u16, u64>,
+    pub completed_per_handle: BTreeMap<u16, u64>,
 }
 
 impl IsoCreditAudit {
@@ -39,6 +54,10 @@ impl IsoCreditAudit {
         }
         self.limit = Some(limit);
         self.per_handle.clear();
+        self.total_submitted = 0;
+        self.total_completed = 0;
+        self.submitted_per_handle.clear();
+        self.completed_per_handle.clear();
         Ok(())
     }
 
@@ -53,6 +72,11 @@ impl IsoCreditAudit {
 
         self.total_in_flight += 1;
         *self.per_handle.entry(cis_handle).or_default() += 1;
+        self.total_submitted = self.total_submitted.saturating_add(1);
+        *self
+            .submitted_per_handle
+            .entry(cis_handle)
+            .or_default() += 1;
         Ok(())
     }
 
@@ -81,6 +105,13 @@ impl IsoCreditAudit {
 
         *in_flight -= completed;
         self.total_in_flight -= completed;
+        self.total_completed = self
+            .total_completed
+            .saturating_add(completed as u64);
+        *self
+            .completed_per_handle
+            .entry(cis_handle)
+            .or_default() += completed as u64;
         if *in_flight == 0 {
             self.per_handle.remove(&cis_handle);
         }
@@ -108,6 +139,18 @@ impl IsoCreditAudit {
 
     pub fn in_flight_on(&self, cis_handle: u16) -> usize {
         self.per_handle.get(&cis_handle).copied().unwrap_or(0)
+    }
+
+    pub fn snapshot(&self) -> IsoCreditSnapshot {
+        IsoCreditSnapshot {
+            limit: self.limit,
+            in_flight: self.total_in_flight,
+            total_submitted: self.total_submitted,
+            total_completed: self.total_completed,
+            in_flight_per_handle: self.per_handle.clone(),
+            submitted_per_handle: self.submitted_per_handle.clone(),
+            completed_per_handle: self.completed_per_handle.clone(),
+        }
     }
 
     pub fn limit(&self) -> Option<usize> {
@@ -173,6 +216,29 @@ mod tests {
                 limit: 2,
                 in_flight: 2,
             })
+        );
+    }
+
+    #[test]
+    fn snapshot_tracks_submitted_completed_and_not_flushed_as_completed() {
+        let mut audit = IsoCreditAudit::default();
+        audit.configure(4).unwrap();
+        audit.submitted(0x0900).unwrap();
+        audit.submitted(0x0901).unwrap();
+        audit.completed(0x0900, 1).unwrap();
+        audit.flush(0x0901);
+
+        let snapshot = audit.snapshot();
+        assert_eq!(snapshot.total_submitted, 2);
+        assert_eq!(snapshot.total_completed, 1);
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(
+            snapshot.submitted_per_handle.get(&0x0901),
+            Some(&1)
+        );
+        assert_eq!(
+            snapshot.completed_per_handle.get(&0x0901),
+            None
         );
     }
 
