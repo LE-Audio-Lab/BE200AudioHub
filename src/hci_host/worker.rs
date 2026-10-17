@@ -1,4 +1,7 @@
-use std::thread::{self, JoinHandle};
+use std::{
+    collections::BTreeSet,
+    thread::{self, JoinHandle},
+};
 
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
@@ -17,7 +20,10 @@ use super::{
     iso::{CigConfigureState, CisCreateState},
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::IsoPathOperationState,
-    iso_tx::{IsoSduGroupRequest, IsoSubmitOutcome},
+    iso_tx::{
+        iso_group_touches_handles, IsoDrainRequest, IsoDrainState,
+        IsoSduGroupRequest, IsoSubmitOutcome,
+    },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
@@ -100,6 +106,9 @@ fn run_loop(
         engine.iso_path_state().clone();
     let mut last_connection_set = engine.connection_set_snapshot();
     let mut pending_iso_group: Option<IsoSduGroupRequest> = None;
+    let mut blocked_iso_handles = BTreeSet::new();
+    let mut iso_drain_state = IsoDrainState::Idle;
+    let mut last_iso_drain_state = IsoDrainState::Idle;
 
     loop {
         match stop_rx.try_recv() {
@@ -114,7 +123,13 @@ fn run_loop(
             match control_rx.try_recv() {
                 Ok(command) => {
                     did_work = true;
-                    if let Err(fault) = process_command(&mut engine, command) {
+                    if let Err(fault) = process_command(
+                        &mut engine,
+                        command,
+                        &mut blocked_iso_handles,
+                        &mut pending_iso_group,
+                        &mut iso_drain_state,
+                    ) {
                         return HciWorkerExit::Faulted(
                             HciWorkerFault::Engine(fault),
                         );
@@ -132,6 +147,8 @@ fn run_loop(
                         &mut last_cis_disconnect_state,
                         &mut last_cig_remove_state,
                         &mut last_iso_path_state,
+                        &mut iso_drain_state,
+                        &mut last_iso_drain_state,
                         &mut last_connection_set,
                         &report_tx,
                     ) {
@@ -208,6 +225,16 @@ fn run_loop(
                     }
                 },
             };
+
+            if iso_group_touches_handles(
+                &request,
+                &blocked_iso_handles,
+            ) {
+                // Realtime data already superseded by a reliable drain gate is
+                // stale by definition. Drop the complete group, never one ear.
+                did_work = true;
+                continue;
+            }
 
             match engine.submit_iso_group(&request) {
                 Ok(IsoSubmitOutcome::Accepted) => {
@@ -288,6 +315,8 @@ fn run_loop(
                     &mut last_cis_disconnect_state,
                     &mut last_cig_remove_state,
                     &mut last_iso_path_state,
+                    &mut iso_drain_state,
+                    &mut last_iso_drain_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -304,7 +333,13 @@ fn run_loop(
                         )
                     }
                 };
-                if let Err(fault) = process_command(&mut engine, command) {
+                if let Err(fault) = process_command(
+                        &mut engine,
+                        command,
+                        &mut blocked_iso_handles,
+                        &mut pending_iso_group,
+                        &mut iso_drain_state,
+                    ) {
                     return HciWorkerExit::Faulted(
                         HciWorkerFault::Engine(fault),
                     );
@@ -322,6 +357,8 @@ fn run_loop(
                     &mut last_cis_disconnect_state,
                     &mut last_cig_remove_state,
                     &mut last_iso_path_state,
+                    &mut iso_drain_state,
+                    &mut last_iso_drain_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -347,6 +384,9 @@ fn run_loop(
 fn process_command(
     engine: &mut HciEngine,
     command: HciCommand,
+    blocked_iso_handles: &mut BTreeSet<u16>,
+    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    iso_drain_state: &mut IsoDrainState,
 ) -> Result<(), EngineFault> {
     match command {
         HciCommand::BeginOperationalAttach => {
@@ -401,6 +441,23 @@ fn process_command(
             connection_handle,
             directions,
         ),
+        HciCommand::BeginIsoDrain(request) => {
+            begin_iso_drain(
+                engine,
+                request,
+                blocked_iso_handles,
+                pending_iso_group,
+                iso_drain_state,
+            )
+        }
+        HciCommand::ResumeIsoData(request) => {
+            resume_iso_data(
+                engine,
+                request,
+                blocked_iso_handles,
+                iso_drain_state,
+            )
+        }
         HciCommand::BeginGatt(request) => {
             engine.begin_gatt_request(request)
         }
@@ -409,6 +466,70 @@ fn process_command(
             request_id,
         } => engine.cancel_gatt_request(connection, request_id),
     }
+}
+
+fn begin_iso_drain(
+    engine: &HciEngine,
+    request: IsoDrainRequest,
+    blocked_iso_handles: &mut BTreeSet<u16>,
+    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    iso_drain_state: &mut IsoDrainState,
+) -> Result<(), EngineFault> {
+    engine.validate_iso_drain(&request)?;
+
+    match iso_drain_state {
+        IsoDrainState::Idle => {}
+        IsoDrainState::Draining(current)
+        | IsoDrainState::Drained(current)
+            if current == &request =>
+        {
+            return Ok(())
+        }
+        _ => return Err(EngineFault::InvalidState),
+    }
+
+    blocked_iso_handles.extend(
+        request.connection_handles.iter().copied(),
+    );
+    if pending_iso_group.as_ref().is_some_and(|group| {
+        iso_group_touches_handles(group, blocked_iso_handles)
+    }) {
+        *pending_iso_group = None;
+    }
+
+    *iso_drain_state = if engine.iso_outputs_drained(&request) {
+        IsoDrainState::Drained(request)
+    } else {
+        IsoDrainState::Draining(request)
+    };
+    Ok(())
+}
+
+fn resume_iso_data(
+    engine: &HciEngine,
+    request: IsoDrainRequest,
+    blocked_iso_handles: &mut BTreeSet<u16>,
+    iso_drain_state: &mut IsoDrainState,
+) -> Result<(), EngineFault> {
+    engine.validate_iso_drain(&request)?;
+    if !engine.iso_input_paths_ready(&request) {
+        return Err(EngineFault::InvalidState);
+    }
+
+    for handle in &request.connection_handles {
+        blocked_iso_handles.remove(handle);
+    }
+
+    let reset_state = matches!(
+        iso_drain_state,
+        IsoDrainState::Draining(current)
+            | IsoDrainState::Drained(current)
+            if current == &request
+    );
+    if reset_state {
+        *iso_drain_state = IsoDrainState::Idle;
+    }
+    Ok(())
 }
 
 fn publish_state_transitions(
@@ -424,6 +545,8 @@ fn publish_state_transitions(
     last_cis_disconnect_state: &mut CisDisconnectState,
     last_cig_remove_state: &mut CigRemoveState,
     last_iso_path_state: &mut IsoPathOperationState,
+    iso_drain_state: &mut IsoDrainState,
+    last_iso_drain_state: &mut IsoDrainState,
     last_connection_set: &mut LeConnectionSetSnapshot,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
@@ -552,6 +675,20 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_iso_path_state = iso_path_state;
+    }
+
+    if let IsoDrainState::Draining(request) = iso_drain_state.clone() {
+        if engine.iso_outputs_drained(&request) {
+            *iso_drain_state = IsoDrainState::Drained(request);
+        }
+    }
+    if *iso_drain_state != *last_iso_drain_state {
+        report_tx
+            .try_send(HciReport::IsoDrainState(
+                iso_drain_state.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_iso_drain_state = iso_drain_state.clone();
     }
 
     let connection_set = engine.connection_set_snapshot();
