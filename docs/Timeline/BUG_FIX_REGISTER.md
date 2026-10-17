@@ -233,17 +233,29 @@ HIL 第三次的 Controller 实测：C→P PHY 2M，Transport Latency **63,210 �
 | **R6R-27** | Generic recovery via `git reset --hard` would violate ToolHub's fixed-capability design | Add fail-closed `git-sync-generated`: only sole unstaged Cargo.lock, clean index, incoming canonical lock, fast-forward; otherwise refuse. Keep generic reset/restore unavailable | **ToolHub operation verified; clean tree correctly refused** |
 | **R6R-28** | First locked `cargo-test` after ToolHub hardening failed with E0063 missing `GattCharacteristic.declaration_handle` | Earlier warning-cleanup accidentally removed the initializer field. Restore `declaration_handle`; rerun test/check/build | **180/180; check/build PASS; git clean** |
 
+| **R6R-29** | A bounded Bridge→HCI mailbox looked sufficient to bound realtime ISO backlog | Pinned Bumble `DataPacketQueue` bounds controller `max_in_flight` but its waiting `VecDeque` is unbounded. Add pre-Bumble complete-group admission based on real ISO packet length/window; normal traffic may not move Host pending beyond controller capacity | **Deterministic window test + real HIL 8-packet window** |
+| **R6R-30** | Realtime ISO traffic risked starving teardown/control or transferring backpressure into HCI worker | Add dedicated bounded `HciIsoTx` lane, explicit per-turn data budget, priority stop→control→controller events→ISO, and at most one worker-local backpressured group | **Worker fairness tests + HIL** |
+| **R6R-31** | A retained backpressured group could be retried after ISO Path removal and fault the HCI worker during teardown | Introduce reliable ISO drain/resume gate. Drain blocks affected CIS, drops only not-yet-admitted stale groups atomically, waits for already-admitted packets to truly complete before path/CIS teardown | **Deterministic drain tests + HIL reverse teardown PASS** |
+| **R6R-32** | Review HCI Host initially lacked the R5-proven CIS Host Support bit32 pre-ACL gate; Create CIS can return 0x0C without it | Port a typed `HCI LE Set Host Feature (0x2074)` transaction with zero-ACL guard and LE feature readback; Command Complete alone is not sufficient proof | **Unit tests + real ISO HIL** |
+| **R6R-33** | First `iso-smoke` assumed exactly one ASCS Sink ASE per Bud and failed: `expected exactly one ... 0x2BC4, found 2` | Restore sealed R5 policy: enumerate all Sink ASEs, require nonzero unique ASE IDs, read state, choose lowest-ID Idle Sink ASE, leave all others untouched | **Regression test + B3P HIL selected ASE=1/handle=0x0046** |
+| **R6R-34** | After multi-ASE fix, ISO smoke repeatedly timed out on the first identity-FAL ACL even after three retries and re-boxing earbuds | Review smoke omitted the R5 pre-connect discovery gate. Restore passive extended scan + host-side IRK resolution of current RPA; require 2/2 bonded members currently connectable before controller RL/privacy + identity FAL | **RPA resolver test + HIL 2/2 discovery PASS; subsequent ACL/CIS/ISO PASS** |
+| **R6R-35** | Failure rollback treated controller-allocated CIS handles as if CIS links were already Established, creating false cleanup errors when Create CIS failed early | Track allocation and actual `EstablishedCis` separately; only real established handles are drained/disconnected, while CIG cleanup still follows may-exist semantics | **Code review + 245+ regression suite** |
+| **R6R-36** | Direct `bumble-smp` dependency for the RPA helper left local `Cargo.lock` dirty because the crate already existed only transitively | Add canonical direct root lock entry, push remotely, then use fail-closed `git-sync-generated` to prove Cargo.lock was the sole generated diff and fast-forward safely | **ToolHub sync + clean git status** |
+| **R6R-37** | Using valid LC3 inside Review-2D smoke would blur HCI Host validation with future Media/codec ownership and add an unnecessary root codec dependency | Keep ISO smoke payload deterministic but codec-opaque 100-byte data. Treat audible digital output only as supplementary endpoint evidence, never as valid-LC3/acoustic First Sound | **HIL 200/200 ISO packets + audible endpoint evidence; claim explicitly scoped** |
+
 ### Round6 closed gates
 
 ```text
 Review-2A attach/capabilities/scan     software + HIL PASS
 Review-2B privacy/dual ACL/stored LTK software + HIL PASS
 Review-2C ACL/L2CAP/ATT/GATT          software + HIL PASS
+Review-2D CIG/CIS/ISO Host             software + HIL PASS
 Bond mutation                         NONE; fingerprint unchanged
 ToolHub normal Cargo gates            --workspace --locked
-Round6 webpage boundary               Review-2D design/oracle audit + handoff
+Round6 final software gate             247/247 + check/build PASS
+Round6 engineering boundary            Review-2D real HIL closure
 ```
 
-Post-Round6 continuation later completed Review-2D software and moved the current repository next step to Control semantic migration; that later code state is not retroactively counted as a Round6 implementation result.
+Round6 internally crossed a chat-migration boundary after Review-2D design/oracle audit, but the successor-chat implementation and HIL are now formally counted as the same Engineering Round. Round7 begins at Control semantic migration.
 
-See [Round6.md](./Round6.md) for the complete implementation/HIL chronology and the explicit separation between Round6 §17–§22 and Post-Round6 §23.
+See [Round6.md](./Round6.md) §22–§24 for the chat boundary, Review-2D continuation, final HIL and Round7 handoff.
