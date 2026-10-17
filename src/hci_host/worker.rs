@@ -14,6 +14,7 @@ use super::{
     connection::{
         DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
     },
+    iso::CigConfigureState,
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
@@ -81,6 +82,8 @@ fn run_loop(
     let mut last_disconnect_state = engine.disconnect_state().clone();
     let mut last_stored_encryption_state =
         engine.stored_encryption_state().clone();
+    let mut last_cig_configure_state =
+        engine.cig_configure_state().clone();
     let mut last_connection_set = engine.connection_set_snapshot();
 
     loop {
@@ -109,6 +112,7 @@ fn run_loop(
                         &mut last_fal_connection_state,
                         &mut last_disconnect_state,
                         &mut last_stored_encryption_state,
+                        &mut last_cig_configure_state,
                         &mut last_connection_set,
                         &report_tx,
                     ) {
@@ -202,6 +206,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_cig_configure_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -231,6 +236,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_cig_configure_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -276,6 +282,9 @@ fn process_command(
         HciCommand::BeginStoredEncryption(request) => {
             engine.begin_stored_encryption(request)
         }
+        HciCommand::ConfigureCig(config) => {
+            engine.begin_cig_configuration(config)
+        }
         HciCommand::BeginGatt(request) => {
             engine.begin_gatt_request(request)
         }
@@ -294,6 +303,7 @@ fn publish_state_transitions(
     last_fal_connection_state: &mut FalConnectionState,
     last_disconnect_state: &mut DisconnectState,
     last_stored_encryption_state: &mut StoredEncryptionState,
+    last_cig_configure_state: &mut CigConfigureState,
     last_connection_set: &mut LeConnectionSetSnapshot,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
@@ -372,6 +382,16 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_stored_encryption_state = stored_encryption_state;
+    }
+
+    let cig_configure_state = engine.cig_configure_state().clone();
+    if cig_configure_state != *last_cig_configure_state {
+        report_tx
+            .try_send(HciReport::CigConfigureState(
+                cig_configure_state.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_cig_configure_state = cig_configure_state;
     }
 
     let connection_set = engine.connection_set_snapshot();
