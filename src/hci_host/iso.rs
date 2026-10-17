@@ -67,7 +67,18 @@ pub enum CigConfigureFailureKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CigConfigureFailure {
     pub cig_id: u8,
+    /// A successful controller status means allocation may already exist even
+    /// if the returned payload is malformed and cannot be trusted.
+    pub may_have_allocated: bool,
     pub kind: CigConfigureFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CigConfigureState {
+    Idle,
+    Configuring,
+    Ready(CigAllocation),
+    Failed(CigConfigureFailure),
 }
 
 #[derive(Debug)]
@@ -111,6 +122,7 @@ impl CigConfigureTransaction {
             self.terminal = true;
             return CigConfigureAction::Failed(CigConfigureFailure {
                 cig_id: self.config.cig_id,
+                may_have_allocated: false,
                 kind: CigConfigureFailureKind::CommandCompleteStatus {
                     status,
                 },
@@ -123,6 +135,7 @@ impl CigConfigureTransaction {
             Ok(allocation) => CigConfigureAction::Complete(allocation),
             Err(kind) => CigConfigureAction::Failed(CigConfigureFailure {
                 cig_id: self.config.cig_id,
+                may_have_allocated: true,
                 kind,
             }),
         }
@@ -338,6 +351,7 @@ mod tests {
             action,
             CigConfigureAction::Failed(CigConfigureFailure {
                 cig_id: 1,
+                may_have_allocated: false,
                 kind: CigConfigureFailureKind::CommandCompleteStatus {
                     status: 0x0c
                 },
@@ -364,6 +378,7 @@ mod tests {
                 &[1, 1, 0x40, 0],
             ),
             CigConfigureAction::Failed(CigConfigureFailure {
+                may_have_allocated: true,
                 kind: CigConfigureFailureKind::CisCountMismatch {
                     expected: 2,
                     actual: 1
@@ -381,6 +396,7 @@ mod tests {
                 &[1, 2, 0x40, 0, 0x40, 0],
             ),
             CigConfigureAction::Failed(CigConfigureFailure {
+                may_have_allocated: true,
                 kind: CigConfigureFailureKind::DuplicateConnectionHandle(
                     0x0040
                 ),
