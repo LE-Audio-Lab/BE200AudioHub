@@ -1928,6 +1928,64 @@ mod tests {
         ControllerPacket::Event(event)
     }
 
+    fn command_status(opcode: u16, status: u8) -> ControllerPacket {
+        ControllerPacket::Event(vec![
+            0x0f,
+            0x04,
+            status,
+            0x01,
+            opcode as u8,
+            (opcode >> 8) as u8,
+        ])
+    }
+
+    fn le_connection_complete(
+        handle: u16,
+        peer_address_le: [u8; 6],
+    ) -> ControllerPacket {
+        let [handle_lo, handle_hi] = handle.to_le_bytes();
+        let mut event = vec![
+            0x3e, 0x13, 0x01, 0x00,
+            handle_lo, handle_hi,
+            0x00,
+            0x01,
+        ];
+        event.extend_from_slice(&peer_address_le);
+        event.extend_from_slice(&[
+            0x18, 0x00,
+            0x00, 0x00,
+            0x2a, 0x00,
+            0x00,
+        ]);
+        ControllerPacket::Event(event)
+    }
+
+    fn cis_established(
+        handle: u16,
+        status: u8,
+    ) -> ControllerPacket {
+        let [handle_lo, handle_hi] = handle.to_le_bytes();
+        ControllerPacket::Event(vec![
+            0x3e, 0x1d, 0x19,
+            status,
+            handle_lo, handle_hi,
+            0x40, 0x9c, 0x00,
+            0x20, 0x4e, 0x00,
+            0xb8, 0x88, 0x00,
+            0x00, 0x00, 0x00,
+            0x02,
+            0x01,
+            0x02,
+            0x01,
+            0x00,
+            0x02,
+            0x00,
+            0x64, 0x00,
+            0x00, 0x00,
+            0x08, 0x00,
+        ])
+    }
+
     fn cig_config() -> super::super::iso::CigConfig {
         let cis = |cis_id| super::super::iso::CisConfig {
             cis_id,
@@ -1991,6 +2049,117 @@ mod tests {
             )
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn engine_creates_two_cis_from_typed_bumble_control_journal() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine
+            .ingest(le_connection_complete(
+                0x0801,
+                [7, 8, 9, 10, 11, 12],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let snapshot = engine.connection_set_snapshot();
+        let first = ConnectionToken {
+            connection_handle: snapshot.connections[0].connection_handle,
+            generation: snapshot.connections[0].generation,
+        };
+        let second = ConnectionToken {
+            connection_handle: snapshot.connections[1].connection_handle,
+            generation: snapshot.connections[1].generation,
+        };
+
+        engine.begin_cig_configuration(cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 2, 0x00, 0x09, 0x01, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_cis_creation(
+                super::super::iso::CisCreateRequest {
+                    cig_id: 1,
+                    bindings: vec![
+                        super::super::iso::CisAclBinding {
+                            cis_id: 1,
+                            acl: first,
+                        },
+                        super::super::iso::CisAclBinding {
+                            cis_id: 2,
+                            acl: second,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+
+        let create_opcode = command_opcode(rx.try_recv().unwrap());
+        assert_eq!(
+            create_opcode,
+            bumble_hci::codes::HCI_LE_CREATE_CIS_COMMAND
+        );
+        assert_eq!(
+            engine.cis_create_state(),
+            &super::super::iso::CisCreateState::Submitting { cig_id: 1 }
+        );
+
+        engine.ingest(command_status(create_opcode, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.cis_create_state(),
+            &super::super::iso::CisCreateState::AwaitingEstablished {
+                cig_id: 1,
+                established: vec![],
+            }
+        );
+
+        engine.ingest(cis_established(0x0901, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(matches!(
+            engine.cis_create_state(),
+            super::super::iso::CisCreateState::AwaitingEstablished {
+                cig_id: 1,
+                established,
+            } if established.len() == 1
+                && established[0].cis_id == 2
+        ));
+
+        engine.ingest(cis_established(0x0900, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let super::super::iso::CisCreateState::Ready {
+            cig_id,
+            established,
+        } = engine.cis_create_state()
+        else {
+            panic!("expected Ready CIS set");
+        };
+        assert_eq!(*cig_id, 1);
+        assert_eq!(
+            established.iter().map(|cis| cis.cis_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(established[0].acl, first);
+        assert_eq!(established[1].acl, second);
+        assert!(engine.device().cis_link(0x0900).is_some());
+        assert!(engine.device().cis_link(0x0901).is_some());
     }
 
     #[test]
