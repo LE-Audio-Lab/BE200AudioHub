@@ -61,10 +61,6 @@ pub enum IsoSduGroupConfigError {
 }
 
 impl IsoSduGroupRequest {
-    pub fn single(sdu: IsoSduRequest) -> Self {
-        Self { sdus: vec![sdu] }
-    }
-
     pub fn validate(&self) -> Result<(), IsoSduGroupConfigError> {
         if self.sdus.is_empty() {
             return Err(IsoSduGroupConfigError::Empty);
