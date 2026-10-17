@@ -23,6 +23,7 @@ use super::{
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
     },
+    iso_host_feature::CisHostFeatureState,
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
     iso_tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest},
@@ -43,6 +44,7 @@ pub enum HciCommand {
     CancelFalConnection,
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
+    EnsureCisHostFeature,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     DisconnectCis { connection_handle: u16 },
@@ -74,6 +76,7 @@ pub enum HciReport {
     FalConnectionState(FalConnectionState),
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
+    CisHostFeatureState(CisHostFeatureState),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
     CisDisconnectState(CisDisconnectState),
@@ -249,6 +252,14 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::BeginStoredEncryption(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_ensure_cis_host_feature(
+        &self,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::EnsureCisHostFeature)
             .map_err(map_send_error)
     }
 
@@ -461,6 +472,17 @@ mod tests {
             max_transport_latency_p_to_c: 95,
             cis: vec![cis(1), cis(2)],
         }
+    }
+
+    #[test]
+    fn cis_host_feature_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 1, 1);
+        control.try_ensure_cis_host_feature().unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::EnsureCisHostFeature
+        );
     }
 
     #[test]
