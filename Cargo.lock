@@ -33,6 +33,7 @@ dependencies = [
  "bumble-att",
  "bumble-hci",
  "bumble-host",
+ "bumble-profiles",
  "crossbeam-channel",
  "rusb",
  "serde_json",
