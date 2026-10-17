@@ -51,7 +51,11 @@ use super::{
         IsoPathOperationState, IsoPathRemoveAction, IsoPathRemoveTransaction,
         IsoPathSetupAction, IsoPathSetupTransaction,
     },
-    iso_tx::{IsoSduConfigError, IsoSduRequest},
+    iso_tx::{
+        iso_group_fits, iso_group_packet_count, IsoSduConfigError,
+        IsoSduGroupConfigError, IsoSduGroupRequest, IsoSduRequest,
+        IsoSubmitOutcome,
+    },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
@@ -84,6 +88,7 @@ pub enum EngineFault {
     IsoPathConfig(IsoPathConfigError),
     IsoPathSendRejected { connection_handle: u16 },
     IsoSduConfig(IsoSduConfigError),
+    IsoSduGroupConfig(IsoSduGroupConfigError),
     IsoControllerPoolUnavailable,
     IsoInputPathNotReady { connection_handle: u16 },
     IsoSduSendRejected { connection_handle: u16 },
@@ -556,46 +561,88 @@ impl HciEngine {
     pub fn submit_iso_sdu(
         &mut self,
         request: IsoSduRequest,
-    ) -> Result<(), EngineFault> {
+    ) -> Result<IsoSubmitOutcome, EngineFault> {
+        self.submit_iso_group(IsoSduGroupRequest::single(request))
+    }
+
+    pub fn submit_iso_group(
+        &mut self,
+        request: IsoSduGroupRequest,
+    ) -> Result<IsoSubmitOutcome, EngineFault> {
         if self.attach_state != OperationalAttachState::Ready {
             return Err(EngineFault::InvalidState);
         }
-        request.validate().map_err(EngineFault::IsoSduConfig)?;
+        request
+            .validate()
+            .map_err(EngineFault::IsoSduGroupConfig)?;
 
-        let handle = request.connection_handle;
-        if self.device.iso_max_in_flight().is_none()
-            || self.iso_credit_audit.limit().is_none()
-        {
+        let packet_length = self
+            .device
+            .iso_data_packet_length()
+            .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+        let controller_window = self
+            .device
+            .iso_max_in_flight()
+            .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+        if self.iso_credit_audit.limit().is_none() {
             return Err(EngineFault::IsoControllerPoolUnavailable);
         }
-        if !self.cis_state_contains_established_handle(handle)
-            || self.device.cis_link(handle).is_none()
-        {
-            return Err(EngineFault::InvalidState);
-        }
-
-        let expected = IsoDataPathConfig::hci_input(handle)
-            .to_bumble_parameters();
-        if self.device.iso_data_path(
-            handle,
-            IsoDataPathDirection::Input as u8,
-        ) != Some(&expected)
-        {
-            return Err(EngineFault::IsoInputPathNotReady {
-                connection_handle: handle,
-            });
-        }
-
-        if !self
+        let pending_packets = self
             .device
-            .send_iso_sdu(&mut self.link, handle, &request.payload)
-        {
-            self.check_link_fault()?;
-            return Err(EngineFault::IsoSduSendRejected {
-                connection_handle: handle,
-            });
+            .iso_packets_pending()
+            .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+        let required_packets = iso_group_packet_count(&request, packet_length)
+            .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+
+        // Admission is checked before any member is submitted. This prevents a
+        // fast HCI worker from moving an unbounded realtime backlog into
+        // Bumble's internally-unbounded waiting VecDeque while controller
+        // credits are exhausted.
+        if !iso_group_fits(
+            pending_packets,
+            controller_window,
+            required_packets,
+        ) {
+            return Ok(IsoSubmitOutcome::Backpressured);
         }
-        self.check_link_fault()
+
+        // Validate the complete group against live HCI state before mutating
+        // either member's Host queue.
+        for sdu in &request.sdus {
+            let handle = sdu.connection_handle;
+            if !self.cis_state_contains_established_handle(handle)
+                || self.device.cis_link(handle).is_none()
+            {
+                return Err(EngineFault::InvalidState);
+            }
+
+            let expected = IsoDataPathConfig::hci_input(handle)
+                .to_bumble_parameters();
+            if self.device.iso_data_path(
+                handle,
+                IsoDataPathDirection::Input as u8,
+            ) != Some(&expected)
+            {
+                return Err(EngineFault::IsoInputPathNotReady {
+                    connection_handle: handle,
+                });
+            }
+        }
+
+        for sdu in request.sdus {
+            let handle = sdu.connection_handle;
+            if !self
+                .device
+                .send_iso_sdu(&mut self.link, handle, &sdu.payload)
+            {
+                self.check_link_fault()?;
+                return Err(EngineFault::IsoSduSendRejected {
+                    connection_handle: handle,
+                });
+            }
+        }
+        self.check_link_fault()?;
+        Ok(IsoSubmitOutcome::Accepted)
     }
 
     fn cis_ready_for_iso_path(&self, connection_handle: u16) -> bool {
