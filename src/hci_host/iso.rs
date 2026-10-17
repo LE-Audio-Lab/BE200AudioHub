@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use bumble_host::CisLinkInfo;
 use bumble_hci::{
     codes::{
         HCI_LE_CREATE_CIS_COMMAND,
@@ -168,17 +169,35 @@ pub enum CisCreateConfigError {
 pub enum CisCreateFailureKind {
     CommandStatus { status: u8 },
     DuplicateCommandStatus,
+    EstablishedBeforeCommandStatus { connection_handle: u16 },
+    UnexpectedEstablishedHandle(u16),
+    EstablishedStatus {
+        cis_id: u8,
+        connection_handle: u16,
+        status: u8,
+    },
+    DuplicateEstablishedHandle(u16),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CisCreateFailure {
     pub cig_id: u8,
+    pub established: Vec<EstablishedCis>,
     pub kind: CisCreateFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EstablishedCis {
+    pub cis_id: u8,
+    pub acl: ConnectionToken,
+    pub link: CisLinkInfo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CisCreateAction {
     AwaitingEstablished,
+    Progress(Vec<EstablishedCis>),
+    Complete(Vec<EstablishedCis>),
     Failed(CisCreateFailure),
     Ignored,
 }
@@ -186,6 +205,7 @@ pub enum CisCreateAction {
 pub struct CisCreateTransaction {
     allocation: CigAllocation,
     bindings: Vec<CisAclBinding>,
+    established: std::collections::BTreeMap<u16, EstablishedCis>,
     command_accepted: bool,
     terminal: bool,
 }
@@ -201,6 +221,7 @@ impl CisCreateTransaction {
             Self {
                 allocation,
                 bindings,
+                established: std::collections::BTreeMap::new(),
                 command_accepted: false,
                 terminal: false,
             },
@@ -218,21 +239,102 @@ impl CisCreateTransaction {
         }
         if self.command_accepted {
             self.terminal = true;
-            return CisCreateAction::Failed(CisCreateFailure {
-                cig_id: self.allocation.cig_id,
-                kind: CisCreateFailureKind::DuplicateCommandStatus,
-            });
+            return self.fail(
+                CisCreateFailureKind::DuplicateCommandStatus,
+            );
         }
         if status != 0 {
             self.terminal = true;
-            return CisCreateAction::Failed(CisCreateFailure {
-                cig_id: self.allocation.cig_id,
-                kind: CisCreateFailureKind::CommandStatus { status },
-            });
+            return self.fail(
+                CisCreateFailureKind::CommandStatus { status },
+            );
         }
 
         self.command_accepted = true;
         CisCreateAction::AwaitingEstablished
+    }
+
+    pub fn on_established(
+        &mut self,
+        status: u8,
+        link: CisLinkInfo,
+    ) -> CisCreateAction {
+        if self.terminal {
+            return CisCreateAction::Ignored;
+        }
+
+        let handle = link.connection_handle;
+        if !self.command_accepted {
+            return self.fail(
+                CisCreateFailureKind::EstablishedBeforeCommandStatus {
+                    connection_handle: handle,
+                },
+            );
+        }
+
+        let Some(cis) = self
+            .allocation
+            .cis
+            .iter()
+            .find(|cis| cis.connection_handle == handle)
+        else {
+            return self.fail(
+                CisCreateFailureKind::UnexpectedEstablishedHandle(handle),
+            );
+        };
+        let binding = self
+            .bindings
+            .iter()
+            .find(|binding| binding.cis_id == cis.cis_id)
+            .expect("binding completeness validated at transaction start");
+
+        if status != 0 {
+            return self.fail(CisCreateFailureKind::EstablishedStatus {
+                cis_id: cis.cis_id,
+                connection_handle: handle,
+                status,
+            });
+        }
+        if self.established.contains_key(&handle) {
+            return self.fail(
+                CisCreateFailureKind::DuplicateEstablishedHandle(handle),
+            );
+        }
+
+        self.established.insert(
+            handle,
+            EstablishedCis {
+                cis_id: cis.cis_id,
+                acl: binding.acl,
+                link,
+            },
+        );
+        let established = self.ordered_established();
+        if established.len() == self.allocation.cis.len() {
+            self.terminal = true;
+            CisCreateAction::Complete(established)
+        } else {
+            CisCreateAction::Progress(established)
+        }
+    }
+
+    fn ordered_established(&self) -> Vec<EstablishedCis> {
+        self.allocation
+            .cis
+            .iter()
+            .filter_map(|cis| {
+                self.established.get(&cis.connection_handle).cloned()
+            })
+            .collect()
+    }
+
+    fn fail(&mut self, kind: CisCreateFailureKind) -> CisCreateAction {
+        self.terminal = true;
+        CisCreateAction::Failed(CisCreateFailure {
+            cig_id: self.allocation.cig_id,
+            established: self.ordered_established(),
+            kind,
+        })
     }
 
     pub fn allocation(&self) -> &CigAllocation {
@@ -519,6 +621,7 @@ mod tests {
             transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
             CisCreateAction::Failed(CisCreateFailure {
                 cig_id: 1,
+                established: vec![],
                 kind: CisCreateFailureKind::DuplicateCommandStatus,
             })
         );
@@ -543,6 +646,7 @@ mod tests {
             transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0x0c),
             CisCreateAction::Failed(CisCreateFailure {
                 cig_id: 1,
+                established: vec![],
                 kind: CisCreateFailureKind::CommandStatus { status: 0x0c },
             })
         );
