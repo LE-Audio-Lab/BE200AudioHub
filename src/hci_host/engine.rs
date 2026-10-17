@@ -562,12 +562,13 @@ impl HciEngine {
         &mut self,
         request: IsoSduRequest,
     ) -> Result<IsoSubmitOutcome, EngineFault> {
-        self.submit_iso_group(IsoSduGroupRequest::single(request))
+        let group = IsoSduGroupRequest::single(request);
+        self.submit_iso_group(&group)
     }
 
     pub fn submit_iso_group(
         &mut self,
-        request: IsoSduGroupRequest,
+        request: &IsoSduGroupRequest,
     ) -> Result<IsoSubmitOutcome, EngineFault> {
         if self.attach_state != OperationalAttachState::Ready {
             return Err(EngineFault::InvalidState);
@@ -629,7 +630,7 @@ impl HciEngine {
             }
         }
 
-        for sdu in request.sdus {
+        for sdu in &request.sdus {
             let handle = sdu.connection_handle;
             if !self
                 .device
