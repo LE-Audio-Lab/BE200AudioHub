@@ -126,6 +126,8 @@ fn run_loop(
             match control_rx.try_recv() {
                 Ok(command) => {
                     did_work = true;
+                    let audit_command =
+                        matches!(command, HciCommand::ReadIsoTxAudit);
                     if let Err(fault) = process_command(
                         &mut engine,
                         command,
@@ -136,6 +138,16 @@ fn run_loop(
                         return HciWorkerExit::Faulted(
                             HciWorkerFault::Engine(fault),
                         );
+                    }
+                    if audit_command {
+                        if let Err(fault) = report_tx
+                            .try_send(HciReport::IsoTxAudit(
+                                engine.iso_credit_snapshot(),
+                            ))
+                            .map_err(map_report_error)
+                        {
+                            return HciWorkerExit::Faulted(fault);
+                        }
                     }
                     if let Err(fault) = publish_state_transitions(
                         &mut engine,
@@ -341,6 +353,8 @@ fn run_loop(
                         )
                     }
                 };
+                let audit_command =
+                    matches!(command, HciCommand::ReadIsoTxAudit);
                 if let Err(fault) = process_command(
                         &mut engine,
                         command,
@@ -351,6 +365,16 @@ fn run_loop(
                     return HciWorkerExit::Faulted(
                         HciWorkerFault::Engine(fault),
                     );
+                }
+                if audit_command {
+                    if let Err(fault) = report_tx
+                        .try_send(HciReport::IsoTxAudit(
+                            engine.iso_credit_snapshot(),
+                        ))
+                        .map_err(map_report_error)
+                    {
+                        return HciWorkerExit::Faulted(fault);
+                    }
                 }
                 if let Err(fault) = publish_state_transitions(
                     &mut engine,
@@ -388,6 +412,21 @@ fn run_loop(
             }
         }
     }
+}
+
+fn maybe_publish_iso_audit(
+    engine: &HciEngine,
+    command: &HciCommand,
+    report_tx: &crossbeam_channel::Sender<HciReport>,
+) -> Result<(), HciWorkerFault> {
+    if matches!(command, HciCommand::ReadIsoTxAudit) {
+        report_tx
+            .try_send(HciReport::IsoTxAudit(
+                engine.iso_credit_snapshot(),
+            ))
+            .map_err(map_report_error)?;
+    }
+    Ok(())
 }
 
 fn process_command(
@@ -431,6 +470,7 @@ fn process_command(
         HciCommand::EnsureCisHostFeature => {
             engine.begin_cis_host_feature()
         }
+        HciCommand::ReadIsoTxAudit => Ok(()),
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
         }
