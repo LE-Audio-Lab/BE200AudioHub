@@ -17,6 +17,7 @@ use super::{
     iso::{CigConfigureState, CisCreateState},
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::IsoPathOperationState,
+    iso_tx::{IsoSduGroupRequest, IsoSubmitOutcome},
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
@@ -24,6 +25,7 @@ use super::{
 
 const CONTROL_BUDGET_PER_TURN: usize = 4;
 const CONTROLLER_BUDGET_PER_TURN: usize = 64;
+const ISO_GROUP_BUDGET_PER_TURN: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HciWorkerFault {
@@ -32,6 +34,7 @@ pub enum HciWorkerFault {
     ReportDisconnected,
     ControlDisconnected,
     ControllerDisconnected,
+    IsoDataDisconnected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +75,7 @@ fn run_loop(
         control_rx,
         stop_rx,
         controller_rx,
+        iso_rx,
         report_tx,
     } = ports;
 
@@ -95,6 +99,7 @@ fn run_loop(
     let mut last_iso_path_state =
         engine.iso_path_state().clone();
     let mut last_connection_set = engine.connection_set_snapshot();
+    let mut pending_iso_group: Option<IsoSduGroupRequest> = None;
 
     loop {
         match stop_rx.try_recv() {
@@ -189,12 +194,65 @@ fn run_loop(
             }
         }
 
+        let mut iso_accepted = false;
+        for _ in 0..ISO_GROUP_BUDGET_PER_TURN {
+            let request = match pending_iso_group.take() {
+                Some(request) => request,
+                None => match iso_rx.try_recv() {
+                    Ok(request) => request,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        return HciWorkerExit::Faulted(
+                            HciWorkerFault::IsoDataDisconnected,
+                        )
+                    }
+                },
+            };
+
+            match engine.submit_iso_group(&request) {
+                Ok(IsoSubmitOutcome::Accepted) => {
+                    did_work = true;
+                    iso_accepted = true;
+                }
+                Ok(IsoSubmitOutcome::Backpressured) => {
+                    pending_iso_group = Some(request);
+                    break;
+                }
+                Err(fault) => {
+                    return HciWorkerExit::Faulted(
+                        HciWorkerFault::Engine(fault),
+                    )
+                }
+            }
+        }
+
+        if iso_accepted {
+            // Successful ISO packet enqueue is journaled by QueueHostTransport.
+            // Consume those observations now so credit accounting remains exact
+            // before this HCI turn yields.
+            if let Err(fault) = engine.poll_until_quiescent() {
+                return HciWorkerExit::Faulted(
+                    HciWorkerFault::Engine(fault),
+                );
+            }
+        }
+
         if did_work {
             continue;
         }
 
-        // Idle wait only. No HCI transaction waits here: every command/event
-        // handler remains run-to-completion and returns to this selector.
+        // Idle wait only. A retained backpressured ISO group must not cause a
+        // busy retry loop: only controller/control/stop progress can make it
+        // admissible again. Disable the ISO receive arm until that happens.
+        let never_iso = crossbeam_channel::never();
+        let iso_wait = if pending_iso_group.is_none() {
+            &iso_rx
+        } else {
+            &never_iso
+        };
+
+        // No HCI transaction waits here: every command/event handler remains
+        // run-to-completion and returns to this selector.
         select_biased! {
             recv(stop_rx) -> _ => return HciWorkerExit::Stopped,
 
@@ -269,6 +327,18 @@ fn run_loop(
                 ) {
                     return HciWorkerExit::Faulted(fault);
                 }
+            }
+
+            recv(iso_wait) -> message => {
+                let request = match message {
+                    Ok(request) => request,
+                    Err(_) => {
+                        return HciWorkerExit::Faulted(
+                            HciWorkerFault::IsoDataDisconnected,
+                        )
+                    }
+                };
+                pending_iso_group = Some(request);
             }
         }
     }
