@@ -2,7 +2,7 @@
 
 > **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–6 Review continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 的网页会话正式边界见 Round6 §17–§22，当前仓库在后续新聊天继续推进的状态见 Round6 §23 Post-Round6 continuation。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 跨越一次 chat migration，最终在 §24 Review-2D real HIL 后封板，Round7 从 Control semantic migration 开始。
 
 ## 阅读入口
 
@@ -15,7 +15,7 @@
 | [Round3.md](./Round3.md) | R2.4 两成员 SMP/Bond/CSIS 落地、Stored Verify、R3 双 ACL + Audio Service discovery | R2.4、R3 |
 | [Round4.md](./Round4.md) | Codec/QoS/CIG/CIS 全控制面；三次 R5.2-B HIL | R4.1–R5.2-B |
 | [Round5.md](./Round5.md) | R5.3 First Sound、Experiment sealed、Review-1 Runtime/Async Transport | R5.3 / Review-1 |
-| [Round6.md](./Round6.md) | Review-2A/2B/2C software + HIL、ToolHub locked workflow、Apache-2.0 governance；Post-Round6 续写 2D | Review-2A / 2B / 2C + handoff |
+| [Round6.md](./Round6.md) | Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部 chat migration 后继续完成 2D | Review-2A / 2B / 2C / 2D closure |
 | [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）
