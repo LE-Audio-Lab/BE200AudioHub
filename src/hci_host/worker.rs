@@ -464,16 +464,6 @@ fn publish_state_transitions(
         *last_iso_path_state = iso_path_state;
     }
 
-    let iso_path_state = engine.iso_path_state().clone();
-    if iso_path_state != *last_iso_path_state {
-        report_tx
-            .try_send(HciReport::IsoPathState(
-                iso_path_state.clone(),
-            ))
-            .map_err(map_report_error)?;
-        *last_iso_path_state = iso_path_state;
-    }
-
     let connection_set = engine.connection_set_snapshot();
     if connection_set != *last_connection_set {
         report_tx
