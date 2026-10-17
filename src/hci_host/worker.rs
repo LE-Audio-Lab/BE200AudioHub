@@ -16,6 +16,7 @@ use super::{
     },
     iso::{CigConfigureState, CisCreateState},
     iso_lifecycle::CigRemoveState,
+    iso_path::IsoPathOperationState,
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
@@ -89,6 +90,8 @@ fn run_loop(
         engine.cis_create_state().clone();
     let mut last_cig_remove_state =
         engine.cig_remove_state().clone();
+    let mut last_iso_path_state =
+        engine.iso_path_state().clone();
     let mut last_connection_set = engine.connection_set_snapshot();
 
     loop {
@@ -120,6 +123,7 @@ fn run_loop(
                         &mut last_cig_configure_state,
                         &mut last_cis_create_state,
                         &mut last_cig_remove_state,
+                        &mut last_iso_path_state,
                         &mut last_connection_set,
                         &report_tx,
                     ) {
@@ -173,6 +177,7 @@ fn run_loop(
                 &mut last_cig_configure_state,
                 &mut last_cis_create_state,
                 &mut last_cig_remove_state,
+                &mut last_iso_path_state,
                 &mut last_connection_set,
                 &report_tx,
             ) {
@@ -219,6 +224,7 @@ fn run_loop(
                     &mut last_cig_configure_state,
                     &mut last_cis_create_state,
                     &mut last_cig_remove_state,
+                    &mut last_iso_path_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -251,6 +257,7 @@ fn run_loop(
                     &mut last_cig_configure_state,
                     &mut last_cis_create_state,
                     &mut last_cig_remove_state,
+                    &mut last_iso_path_state,
                     &mut last_connection_set,
                     &report_tx,
                 ) {
@@ -305,6 +312,16 @@ fn process_command(
         HciCommand::RemoveCig { cig_id } => {
             engine.begin_cig_removal(cig_id)
         }
+        HciCommand::SetupIsoPath(config) => {
+            engine.begin_iso_path_setup(config)
+        }
+        HciCommand::RemoveIsoPath {
+            connection_handle,
+            directions,
+        } => engine.begin_iso_path_remove(
+            connection_handle,
+            directions,
+        ),
         HciCommand::BeginGatt(request) => {
             engine.begin_gatt_request(request)
         }
@@ -326,6 +343,7 @@ fn publish_state_transitions(
     last_cig_configure_state: &mut CigConfigureState,
     last_cis_create_state: &mut CisCreateState,
     last_cig_remove_state: &mut CigRemoveState,
+    last_iso_path_state: &mut IsoPathOperationState,
     last_connection_set: &mut LeConnectionSetSnapshot,
     report_tx: &crossbeam_channel::Sender<HciReport>,
 ) -> Result<(), HciWorkerFault> {
@@ -434,6 +452,16 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_cig_remove_state = cig_remove_state;
+    }
+
+    let iso_path_state = engine.iso_path_state().clone();
+    if iso_path_state != *last_iso_path_state {
+        report_tx
+            .try_send(HciReport::IsoPathState(
+                iso_path_state.clone(),
+            ))
+            .map_err(map_report_error)?;
+        *last_iso_path_state = iso_path_state;
     }
 
     let connection_set = engine.connection_set_snapshot();
