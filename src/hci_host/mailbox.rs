@@ -20,6 +20,7 @@ use super::{
         ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
     gatt::{GattReport, GattRequest, GattRequestId},
+    iso::{CigConfig, CigConfigureState},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -37,6 +38,7 @@ pub enum HciCommand {
     CancelFalConnection,
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
+    ConfigureCig(CigConfig),
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -57,6 +59,7 @@ pub enum HciReport {
     FalConnectionState(FalConnectionState),
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
+    CigConfigureState(CigConfigureState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
 }
@@ -191,6 +194,15 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_configure_cig(
+        &self,
+        config: CigConfig,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ConfigureCig(config))
+            .map_err(map_send_error)
+    }
+
     pub fn try_begin_gatt(
         &self,
         request: GattRequest,
@@ -292,6 +304,46 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::ClearControllerPrivacy
+        );
+    }
+
+    fn cig_config() -> CigConfig {
+        let cis = |cis_id| super::super::iso::CisConfig {
+            cis_id,
+            max_sdu_c_to_p: 100,
+            max_sdu_p_to_c: 0,
+            phy_c_to_p: 2,
+            phy_p_to_c: 1,
+            rtn_c_to_p: 13,
+            rtn_p_to_c: 0,
+        };
+        CigConfig {
+            cig_id: 1,
+            sdu_interval_c_to_p: 10_000,
+            sdu_interval_p_to_c: 10_000,
+            worst_case_sca: 0,
+            packing: 0,
+            framing: 0,
+            max_transport_latency_c_to_p: 95,
+            max_transport_latency_p_to_c: 95,
+            cis: vec![cis(1), cis(2)],
+        }
+    }
+
+    #[test]
+    fn cig_configuration_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 1, 1);
+
+        let config = cig_config();
+        control.try_configure_cig(config.clone()).unwrap();
+        assert_eq!(
+            control.try_configure_cig(config.clone()),
+            Err(SendError::Full)
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::ConfigureCig(config)
         );
     }
 
