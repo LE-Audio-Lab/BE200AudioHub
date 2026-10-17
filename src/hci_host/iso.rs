@@ -324,4 +324,68 @@ mod tests {
             Some(CigConfigError::DuplicateCisId(1))
         );
     }
+
+    #[test]
+    fn controller_status_failure_is_terminal_and_typed() {
+        let (mut transaction, _) =
+            CigConfigureTransaction::begin(config()).unwrap();
+        let action = transaction.on_command_complete(
+            HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+            0x0c,
+            &[],
+        );
+        assert!(matches!(
+            action,
+            CigConfigureAction::Failed(CigConfigureFailure {
+                cig_id: 1,
+                kind: CigConfigureFailureKind::CommandCompleteStatus {
+                    status: 0x0c
+                },
+            })
+        ));
+        assert!(matches!(
+            transaction.on_command_complete(
+                HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+                0,
+                &[1, 2, 0x40, 0, 0x41, 0],
+            ),
+            CigConfigureAction::Ignored
+        ));
+    }
+
+    #[test]
+    fn malformed_or_duplicate_controller_handles_are_rejected() {
+        let (mut wrong_count, _) =
+            CigConfigureTransaction::begin(config()).unwrap();
+        assert!(matches!(
+            wrong_count.on_command_complete(
+                HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+                0,
+                &[1, 1, 0x40, 0],
+            ),
+            CigConfigureAction::Failed(CigConfigureFailure {
+                kind: CigConfigureFailureKind::CisCountMismatch {
+                    expected: 2,
+                    actual: 1
+                },
+                ..
+            })
+        ));
+
+        let (mut duplicate, _) =
+            CigConfigureTransaction::begin(config()).unwrap();
+        assert!(matches!(
+            duplicate.on_command_complete(
+                HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+                0,
+                &[1, 2, 0x40, 0, 0x40, 0],
+            ),
+            CigConfigureAction::Failed(CigConfigureFailure {
+                kind: CigConfigureFailureKind::DuplicateConnectionHandle(
+                    0x0040
+                ),
+                ..
+            })
+        ));
+    }
 }
