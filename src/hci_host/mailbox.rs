@@ -24,6 +24,7 @@ use super::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
     },
     iso_lifecycle::CigRemoveState,
+    iso_path::{IsoDataPathConfig, IsoPathOperationState},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -44,6 +45,11 @@ pub enum HciCommand {
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     RemoveCig { cig_id: u8 },
+    SetupIsoPath(IsoDataPathConfig),
+    RemoveIsoPath {
+        connection_handle: u16,
+        directions: u8,
+    },
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -67,6 +73,7 @@ pub enum HciReport {
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
     CigRemoveState(CigRemoveState),
+    IsoPathState(IsoPathOperationState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
 }
@@ -222,6 +229,28 @@ impl HciControl {
     pub fn try_remove_cig(&self, cig_id: u8) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::RemoveCig { cig_id })
+            .map_err(map_send_error)
+    }
+
+    pub fn try_setup_iso_path(
+        &self,
+        config: IsoDataPathConfig,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::SetupIsoPath(config))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_remove_iso_path(
+        &self,
+        connection_handle: u16,
+        directions: u8,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::RemoveIsoPath {
+                connection_handle,
+                directions,
+            })
             .map_err(map_send_error)
     }
 
@@ -394,6 +423,28 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::RemoveCig { cig_id: 1 }
+        );
+    }
+
+    #[test]
+    fn iso_paths_use_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        let config = IsoDataPathConfig::hci_input(0x0900);
+        control.try_setup_iso_path(config.clone()).unwrap();
+        control.try_remove_iso_path(0x0900, 0x01).unwrap();
+
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::SetupIsoPath(config)
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::RemoveIsoPath {
+                connection_handle: 0x0900,
+                directions: 0x01,
+            }
         );
     }
 
