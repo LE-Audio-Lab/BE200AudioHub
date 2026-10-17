@@ -65,6 +65,27 @@ pub struct IsoPathFailure {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoPathState {
+    SettingUp {
+        connection_handle: u16,
+        direction: IsoDataPathDirection,
+    },
+    Ready {
+        connection_handle: u16,
+        direction: IsoDataPathDirection,
+    },
+    Removing {
+        connection_handle: u16,
+        directions: u8,
+    },
+    Removed {
+        connection_handle: u16,
+        directions: u8,
+    },
+    Failed(IsoPathFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IsoPathSetupAction {
     Complete {
         connection_handle: u16,
