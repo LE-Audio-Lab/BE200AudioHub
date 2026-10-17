@@ -1449,15 +1449,18 @@ mod tests {
     fn preconnect_discovery_requires_both_connectable_members() {
         use bumble_smp::privacy::resolvable_private_address;
 
-        let member = |last: u8, irk: [u8; 16]| ReviewBondMember {
-            identity_address_le: [last, 5, 4, 3, 2, 1],
-            address_type: 1,
-            peer_irk: irk,
-            long_term_key: [0x11; 16],
-            encrypted_diversifier: 0,
-            random_number: 0,
-            encryption_key_size: 16,
-            rank: None,
+        let member = |last: u8, irk: [u8; 16]| {
+            let identity_address_le = [last, 5, 4, 3, 2, 1];
+            ReviewBondMember {
+                identity_address:
+                    format_address_le(identity_address_le),
+                identity_address_le,
+                address_type: 1,
+                peer_irk: irk,
+                long_term_key: [0x11; 16],
+                encrypted_diversifier: 0,
+                random_number: [0; 8],
+            }
         };
         let left = member(6, [0x21; 16]);
         let right = member(7, [0x31; 16]);
