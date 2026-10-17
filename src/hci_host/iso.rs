@@ -164,9 +164,30 @@ pub enum CisCreateConfigError {
     CisHandleEqualsAclHandle(u16),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CisCreateFailureKind {
+    CommandStatus { status: u8 },
+    DuplicateCommandStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CisCreateFailure {
+    pub cig_id: u8,
+    pub kind: CisCreateFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisCreateAction {
+    AwaitingEstablished,
+    Failed(CisCreateFailure),
+    Ignored,
+}
+
 pub struct CisCreateTransaction {
     allocation: CigAllocation,
     bindings: Vec<CisAclBinding>,
+    command_accepted: bool,
+    terminal: bool,
 }
 
 impl CisCreateTransaction {
@@ -180,9 +201,38 @@ impl CisCreateTransaction {
             Self {
                 allocation,
                 bindings,
+                command_accepted: false,
+                terminal: false,
             },
             command,
         ))
+    }
+
+    pub fn on_command_status(
+        &mut self,
+        opcode: u16,
+        status: u8,
+    ) -> CisCreateAction {
+        if self.terminal || opcode != HCI_LE_CREATE_CIS_COMMAND {
+            return CisCreateAction::Ignored;
+        }
+        if self.command_accepted {
+            self.terminal = true;
+            return CisCreateAction::Failed(CisCreateFailure {
+                cig_id: self.allocation.cig_id,
+                kind: CisCreateFailureKind::DuplicateCommandStatus,
+            });
+        }
+        if status != 0 {
+            self.terminal = true;
+            return CisCreateAction::Failed(CisCreateFailure {
+                cig_id: self.allocation.cig_id,
+                kind: CisCreateFailureKind::CommandStatus { status },
+            });
+        }
+
+        self.command_accepted = true;
+        CisCreateAction::AwaitingEstablished
     }
 
     pub fn allocation(&self) -> &CigAllocation {
@@ -444,6 +494,62 @@ mod tests {
             connection_handle: handle,
             generation,
         }
+    }
+
+    #[test]
+    fn create_cis_command_status_must_succeed_once() {
+        let bindings = vec![
+            CisAclBinding {
+                cis_id: 1,
+                acl: token(0x0800, 7),
+            },
+            CisAclBinding {
+                cis_id: 2,
+                acl: token(0x0801, 8),
+            },
+        ];
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings).unwrap();
+
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::AwaitingEstablished
+        );
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::Failed(CisCreateFailure {
+                cig_id: 1,
+                kind: CisCreateFailureKind::DuplicateCommandStatus,
+            })
+        );
+    }
+
+    #[test]
+    fn create_cis_rejected_status_is_terminal() {
+        let bindings = vec![
+            CisAclBinding {
+                cis_id: 1,
+                acl: token(0x0800, 7),
+            },
+            CisAclBinding {
+                cis_id: 2,
+                acl: token(0x0801, 8),
+            },
+        ];
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings).unwrap();
+
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0x0c),
+            CisCreateAction::Failed(CisCreateFailure {
+                cig_id: 1,
+                kind: CisCreateFailureKind::CommandStatus { status: 0x0c },
+            })
+        );
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::Ignored
+        );
     }
 
     #[test]
