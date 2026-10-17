@@ -18,6 +18,7 @@ use super::{
         DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
     },
     iso::{CigConfigureState, CisCreateState},
+    iso_host_feature::CisHostFeatureState,
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::IsoPathOperationState,
     iso_tx::{
@@ -94,6 +95,8 @@ fn run_loop(
     let mut last_disconnect_state = engine.disconnect_state().clone();
     let mut last_stored_encryption_state =
         engine.stored_encryption_state().clone();
+    let mut last_cis_host_feature_state =
+        engine.cis_host_feature_state();
     let mut last_cig_configure_state =
         engine.cig_configure_state().clone();
     let mut last_cis_create_state =
@@ -142,6 +145,7 @@ fn run_loop(
                         &mut last_fal_connection_state,
                         &mut last_disconnect_state,
                         &mut last_stored_encryption_state,
+                        &mut last_cis_host_feature_state,
                         &mut last_cig_configure_state,
                         &mut last_cis_create_state,
                         &mut last_cis_disconnect_state,
@@ -312,6 +316,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_cis_host_feature_state,
                     &mut last_cig_configure_state,
                     &mut last_cis_create_state,
                     &mut last_cis_disconnect_state,
@@ -354,6 +359,7 @@ fn run_loop(
                     &mut last_fal_connection_state,
                     &mut last_disconnect_state,
                     &mut last_stored_encryption_state,
+                    &mut last_cis_host_feature_state,
                     &mut last_cig_configure_state,
                     &mut last_cis_create_state,
                     &mut last_cis_disconnect_state,
@@ -420,6 +426,9 @@ fn process_command(
         }
         HciCommand::BeginStoredEncryption(request) => {
             engine.begin_stored_encryption(request)
+        }
+        HciCommand::EnsureCisHostFeature => {
+            engine.begin_cis_host_feature()
         }
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
@@ -542,6 +551,7 @@ fn publish_state_transitions(
     last_fal_connection_state: &mut FalConnectionState,
     last_disconnect_state: &mut DisconnectState,
     last_stored_encryption_state: &mut StoredEncryptionState,
+    last_cis_host_feature_state: &mut CisHostFeatureState,
     last_cig_configure_state: &mut CigConfigureState,
     last_cis_create_state: &mut CisCreateState,
     last_cis_disconnect_state: &mut CisDisconnectState,
@@ -627,6 +637,17 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_stored_encryption_state = stored_encryption_state;
+    }
+
+    let cis_host_feature_state =
+        engine.cis_host_feature_state();
+    if cis_host_feature_state != *last_cis_host_feature_state {
+        report_tx
+            .try_send(HciReport::CisHostFeatureState(
+                cis_host_feature_state,
+            ))
+            .map_err(map_report_error)?;
+        *last_cis_host_feature_state = cis_host_feature_state;
     }
 
     let cig_configure_state = engine.cig_configure_state().clone();
