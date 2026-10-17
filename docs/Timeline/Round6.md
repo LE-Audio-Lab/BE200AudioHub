@@ -1,10 +1,10 @@
-# BE200AudioHub · Round 6：Review-2A / Review-2B HCI Host 封板
+# BE200AudioHub · Round 6：Review-2A / Review-2B / Review-2C 封板 + Project Governance
 
 > **性质**：Round 6 技术总结、实现推进、静态审计、HIL 证据与纠偏记录。  
-> **时间范围**：2026-10-15。  
+> **时间范围**：2026-10-15—2026-10-18（本网页会话边界）。  
 > **主分支**：`main`。  
-> **阶段变化**：从 Round5 已完成的 Review-1 Runtime / Async Transport 基座继续推进 HCI Host Plane，完成 Review-2A 与 Review-2B 的软件实现和真实 BE200/Buds3 Pro HIL。  
-> **重要口径**：本轮只复用已有 R5/R3 成功 bond；不发起新 SMP、不重新配对、不修改持久化 BondStore。
+> **阶段变化**：从 Round5 已完成的 Review-1 Runtime / Async Transport 基座继续推进 HCI Host Plane；本轮完成 Review-2A、Review-2B、Review-2C 的软件实现与真实 BE200/Buds3 Pro HIL，并完成 ToolHub 构建纪律与 Apache-2.0 项目治理；Review-2D 只完成设计/旧 R5 oracle 审计后发生会话中断，后续实现属于新聊天 continuation。  
+> **重要口径**：本轮复用已有 R5/R3 成功 bond；不发起新 SMP、不重新配对、不修改持久化 BondStore。后文标记为 **Post-Round6 continuation** 的内容由后续聊天追加，不属于本 Round 网页会话本身。
 
 ---
 
@@ -34,17 +34,36 @@ Review-2B
   bond fingerprint / no-write proof       ✅
   real dual encrypted ACL HIL             ✅ PASS
 
-NEXT
-  Review-2C ACL / L2CAP / ATT / GATT       ← NEXT
+Review-2C
+  ACL / L2CAP / fixed ATT substrate       ✅
+  async typed GATT transaction FSM        ✅
+  MTU / service / include / char / desc   ✅
+  short+long read / write / CCCD          ✅
+  notification / indication confirm       ✅
+  cancel poison / late-response fencing   ✅
+  dual-ACL independent fixed bearers       ✅
+  fragmented ACL→L2CAP→ATT regression     ✅
+  real read-only B3P GATT HIL             ✅ PASS
+
+Project / tooling
+  Cargo --locked normal gates             ✅
+  fail-closed git-sync-generated          ✅
+  Apache-2.0 + NOTICE / third-party audit ✅
+
+Round6 boundary
+  Review-2D design + old-R5 oracle audit  ✅
+  Review-2D implementation                 → continued in next chat
 ```
 
-最终软件 gate：
+Review-2B checkpoint software gate：
 
 ```text
 cargo test  151 passed; 0 failed
 cargo check PASS
 cargo build PASS
 ```
+
+本 Round 在 Review-2C 封板后的最终本地 gate 见 §17：`cargo test` **180/180 PASS**，`cargo check` PASS，`cargo build` PASS，working tree clean。
 
 最终 Review-2B HIL：
 
@@ -490,13 +509,327 @@ Phase 8 Clock discipline / ASRC         pending
 
 ---
 
-## 17. Later continuation correction：Review-2C / Review-2D 实际代码状态（2026-10-18）
+## 17. Round6 正式收口：Review-2C ACL / L2CAP / ATT / GATT
+
+> §1–16 是本轮较早的 Review-2A/2B 阶段性收口。当前节记录同一网页会话随后完成的 Review-2C；这是 **Round6 的真实最终边界**。后面的 Post-Round6 continuation 属于用户切换到新聊天后的继续开发。
+
+### 23.1 架构选择：复用 Bumble Device 数据面，不暴露同步 GattClient
+
+Pinned Bumble-RS 的 `Device` 已经拥有：
+
+- per-handle ACL reassembly；
+- L2CAP framing / routing；
+- fixed ATT CID 0x0004；
+- `send_att_on_handle` / per-handle inbox；
+- disconnect / flush；
+- LE connection projection。
+
+但 upstream `GattClient` 的 `AttTransport::request()` 是同步 request/response 形状，不满足 Review 的 HciContext ownership / no blocking wait contract。
+
+因此 Review-2C 冻结为：
+
+```text
+typed GATT request
+  -> validate ConnectionToken + encrypted state
+  -> Device::send_att_on_handle()
+  -> return event loop
+  -> Device::poll() consumes ACL/L2CAP/ATT
+  -> drain per-handle ATT inbox
+  -> typed GATT report
+```
+
+不重复实现 ACL/L2CAP assembler/router，也不把 raw ATT bytes 暴露给 Control。
+
+### 23.2 typed GATT surface 与 fixed-bearer 约束
+
+实现的操作面：
+
+- Exchange MTU；
+- Discover Primary Services；
+- Discover Included Services；
+- Discover Characteristics；
+- Discover Descriptors；
+- Read / Long Read (Read Blob)；
+- Write Request / Write Command；
+- Subscribe / Unsubscribe；
+- Notification / Indication。
+
+关键约束：
+
+1. 每条 ACL 的 fixed ATT bearer 同时最多一个 request in flight；两条 ACL 可独立各跑一个；
+2. 所有请求都使用 `ConnectionToken { handle, generation }` fencing；
+3. 未加密 connection 不允许 GATT；
+4. Notification / Indication 独立于 active request；Indication 自动发 Handle Value Confirmation；
+5. requester cancel 后，wire 上没有 ATT cancel，因此该 fixed bearer **poisoned until real disconnect**；late response 明确 drop/report，禁止误配给后续请求；
+6. ATT Error Response 的 `request_opcode_in_error` 必须与当前 request opcode 匹配；
+7. Service / Characteristic / Descriptor discovery 支持分页；
+8. Included Service 同时支持 6-byte inline UUID 形式和 4-byte declaration + follow-up Read UUID 形式；
+9. Long Read 按 MTU 继续 Read Blob，Attribute Not Long / Invalid Offset 在合法上下文中结束累计值。
+
+### 23.3 Engine / mailbox / dual-bond HIL substrate
+
+Review HCI mailbox 增加 typed GATT begin/cancel command 与 `HciReport::Gatt`；Engine 维护 per-handle transaction / MTU / poisoned bearer / bounded report queue。
+
+为了避免 2C HIL 复制 2B 的连接逻辑，原有双加密 bond-smoke 被抽成可复用 session：
+
+```text
+firmware bypass
+-> resetless attach
+-> controller identity guard
+-> privacy / resolving list
+-> dual FAL ACL
+-> dual stored-LTK encryption
+-> caller-specific work
+-> reverse disconnect
+-> privacy cleanup
+-> ordered shutdown
+-> bond fingerprint unchanged
+```
+
+2C harness 只在上述已验证 session 上做 read-only GATT。
+
+### 23.4 deterministic tests
+
+本轮新增/确认的关键测试包括：
+
+- encrypted-current-connection gate；
+- MTU round-trip 走真实 synthetic ACL→L2CAP→ATT；
+- 两 ACL fixed bearer transaction isolation；
+- unsolicited Notification / Indication connection-local；
+- indication confirmation；
+- cancel poison + late response drop + disconnect reset；
+- disconnect 只失败 matching transaction；
+- ATT Error Response opcode correlation；
+- Included Service 两种编码形式；
+- Write Request / Unsubscribe；
+- fragmented HCI ACL response 必须完整 reassemble 后才完成 GATT。
+
+直接依赖 `bumble-att` 固定到与其它 Bumble crates 相同 revision；canonical `Cargo.lock` 同步提交。
+
+### 23.5 ToolHub locked gate 抓到的真实回归
+
+在把 normal Cargo operation 改为 `--workspace --locked` 后，第一次 `cargo-test` 抓到：
+
+```text
+error[E0063]: missing field declaration_handle in initializer of GattCharacteristic
+```
+
+根因不是 ToolHub，而是此前 warning-cleanup 时误删了 `GattCharacteristic.declaration_handle` initializer 字段。补回后：
+
+```text
+cargo test   180 passed; 0 failed
+cargo check  PASS
+cargo build  PASS
+git status   ## main...origin/main
+```
+
+这次 failure 也证明新的 locked build path 会直接暴露代码/manifest 不一致，而不会通过改写 `Cargo.lock` 隐藏状态。
+
+### 23.6 Review-2C 真实 HIL PASS
+
+用户在 Windows/BE200/Buds3 Pro 上执行 `review2 gatt-smoke`，结果：
+
+```text
+Review-2C read-only GATT HIL
+Firmware bypass: AlreadyOperational
+Controller identity guard: PASS (44:A3:BB:36:94:1B)
+
+Member: identity=E8:C9:13:EF:2F:23 handle=0x0800@gen1
+  mtu=247 services=14
+  PACS=0x004E..0x0060 ASCS=0x0041..0x004D CAS=0x007D..0x007E
+  PACS chars=6 ASCS chars=4 CAS includes=1 CSIS=true
+  descriptors=1 supported-contexts-handle=0x0053 value-bytes=4
+
+Member: identity=E8:C9:13:F6:5C:E0 handle=0x0801@gen2
+  mtu=247 services=14
+  PACS=0x004E..0x0060 ASCS=0x0041..0x004D CAS=0x007D..0x007E
+  PACS chars=6 ASCS chars=4 CAS includes=1 CSIS=true
+  descriptors=1 supported-contexts-handle=0x0053 value-bytes=4
+
+Encrypted GATT service access: PASS
+Cleanup disconnect: handle=0x0801@gen2 reason=0x16
+Cleanup disconnect: handle=0x0800@gen1 reason=0x16
+Privacy cleanup: true
+Bond store unchanged: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+该 HIL 实际跑通：MTU、Primary Service、Characteristic、Included Service、Descriptor、Characteristic Read。没有 CCCD write、没有 ASCS Control Point write、没有 SMP、没有 bond mutation。
+
+> **Review-2C software + real HIL 正式封板。**
+
+---
+
+## 18. ToolHub 构建/同步纪律在本轮完成收敛
+
+本轮遇到的 `Cargo.lock` dirty / ff-only pull 阻塞不通过开放远程 shell 解决，而保持 ToolHub 的 fixed-capability 设计：
+
+```text
+cargo-test  = cargo test  --workspace --locked
+cargo-check = cargo check --workspace --locked
+cargo-build = cargo build --workspace --locked
+```
+
+新增 fail-closed `git-sync-generated`：
+
+- 只允许当前 branch=main；
+- staged changes 必须为空；
+- working tree 必须恰好只有 unstaged `Cargo.lock`；
+- fetch 后必须证明 origin/main 是 fast-forward descendant；
+- incoming diff 必须包含 canonical `Cargo.lock`；
+- 任一条件不满足直接拒绝；
+- 不暴露通用 `git reset/restore` 能力。
+
+真实验证中，当工作树已经 clean 时它返回：
+
+```text
+refused:
+Working tree must contain exactly one unstaged Cargo.lock modification; got []
+```
+
+这是预期的 fail-closed 行为。随后 normal `git-pull` + locked Cargo gate 全部通过，且 build/test 后 working tree 仍 clean。
+
+---
+
+## 19. 开源治理：Apache-2.0
+
+本轮正式给项目建立许可证链：
+
+- `LICENSE`：Apache License 2.0 全文；
+- `NOTICE`：项目 + bumble-rs attribution；
+- `THIRD_PARTY_NOTICES.md`：第三方依赖与发行边界；
+- `Cargo.toml`：`license = "Apache-2.0"`；
+- README 增加 License 段。
+
+对应提交：
+
+- `751983f` — add Apache-2.0 LICENSE；
+- `445792b` — add NOTICE；
+- `58c3ac6` — third-party license boundaries；
+- `84a78cf` — Cargo package license；
+- `fd95666` — README license section。
+
+许可证选择理由：
+
+1. 与 bumble-rs / Google Bumble 的 Apache-2.0 provenance 对齐；
+2. 显式 patent grant / retaliation 条款更适合 Bluetooth / controller / codec 这种专利密集基础设施；
+3. 商业/OEM/研究集成友好，不引入全项目 copyleft；
+4. contributor 默认按 Apache-2.0 contribution 规则进入；当前不引入 CLA，未来需要时可考虑 DCO。
+
+边界：
+
+- Intel `.sfi` / `.ddc` firmware **不属于** BE200AudioHub Apache-2.0；
+- `rusb` 启用 `vendored` 会带入 libusb；libusb LGPL-2.1-or-later 的发行义务不能被项目 Apache-2.0 覆盖；
+- binary release 需要保留第三方 license/source/relinking 合规路径。
+
+---
+
+## 20. 社区定位与公开 claim 边界
+
+本轮专门调研 BlueZ / BTstack / Zephyr / NimBLE / Google Bumble / bumble-rs 的项目历史和 Windows/LE Audio 能力。
+
+时间尺度：
+
+```text
+BlueZ       2001-
+BTstack     2009-
+Mynewt/NimBLE roots 2015- / NimBLE 1.0 2018
+Zephyr      2016-
+Google Bumble public 2022-
+bumble-rs   2026-07-
+```
+
+重要结论：Core Bluetooth / ATT / GATT / SMP 已经成熟很多年，但 commodity-controller LE Audio Host、CIG/CIS/USB ISO、commercial TWS integration 普遍只有近 2–4 年的公开工程历史；bumble-rs 更是只比本项目早约一个半月开始 Rust port。
+
+公开 claim 必须收窄：
+
+- **不能**宣称“第一个 Windows Bluetooth Host”或“唯一 Windows LE Audio stack”；BTstack/Bumble 都有 Windows/direct-HCI precedent；
+- 当前可以事实性描述为：native Windows userspace Host takeover of commodity Intel BE200，绕过 Windows Bluetooth Host，已完成 firmware/dual encrypted ACL/real LE Audio GATT access；
+- 等 Review 路径重新完成 CIG/CIS/ISO/LC3/WASAPI end-to-end 后，才适合使用：
+  **“To our knowledge, the first publicly documented open-source implementation to take over a commodity Intel PC Bluetooth controller on native Windows and run the complete LE Audio Unicast host path to commercial TWS earbuds without the Windows Bluetooth host stack.”**
+
+社区判断：这是 niche systems infrastructure，不应以大众 star 数为成功标准；最大价值来自 generic Intel backend、可复现 First Sound、真实 controller/earbud quirk、以及向 Bumble/其它 upstream 回馈最小复现和修复。Consumer adoption 受 WinUSB takeover、内置 Bluetooth 丢失风险、firmware/driver setup 门槛强烈限制。
+
+---
+
+## 21. 项目动机 / North Star 在本轮重新明确
+
+早期 Windows LE Audio 调试的关键证据链是：
+
+```text
+同一 B660M + AX210 + Buds3 Pro
+
+Windows:
+  CIS effective capability = False
+  native LE Audio unavailable
+
+Fedora:
+  cis-central / cis-peripheral available
+  LE bearer connected
+  BAP-sink
+  LC3
+```
+
+此前 BIOS IFR、SST、NHLT、Intel private DevProp、BATS registry、driver-version A/B 与 property spoofing 已逐层排除“硬件不支持”的解释。Fedora 证明同一物理硬件可跑 LE Audio 后，项目的根本动机从“继续猜 Windows private gate”转为：
+
+> **绕过 Windows Bluetooth Host，直接拥有 controller / Host / LE Audio 全链路。**
+
+长期系统边界可概括为：
+
+```text
+Windows:
+  USB host
+  PCM source
+
+Bluetooth control/data:
+  owned by BE200AudioHub
+```
+
+这不是当前所有功能已经完成的声明，而是项目的产品/研究 North Star。
+
+---
+
+## 22. Round6 结束时的 Review-2D 设计交接
+
+2C HIL PASS 后，本轮开始设计 Review-2D，但在实际落第一笔 2D code 前多次 connection interruption，用户随后切换到新聊天继续。因此本 Round 对 2D **只声明设计/审计完成，不声明实现完成**。
+
+冻结拆分：
+
+```text
+2D-A  ISO capabilities + typed CIG/CIS lifecycle
+2D-B  ISO Data Path + complete HCI ISO SDU transport
+2D-C  teardown / fault / credit / dual-CIS invariants
+```
+
+本轮已完成的旧 R5 / reference audit：
+
+- CIS Host Support bit32 必须在任何 LE ACL 前建立；
+- stale/inactive CIG 不能靠 ACL disconnect 等价清除，需显式 lifecycle；
+- Set CIG Command Complete wire 语义：status / cig_id / count / CIS handles；
+- Create CIS 是 Command Status + later LE CIS Established terminal events，不能把 command acceptance 当 established；
+- complete ISO SDU 是 HCI Host boundary；Host owns ISO sequence / PB / fragmentation / controller credits；
+- Number Of Completed Packets 只释放 transport capacity，绝不推进 FrameId / StreamClock；
+- old R5 unidirectional QoS 仍给未使用 P→C 方向合法 interval/latency/PHY，同时 Max_SDU=0、RTN=0，避免 mandatory-range controller rejection；
+- 新 2D 不应把 ASCS Control semantic 混回 HCI Host；Control Plane migration 是后续 phase。
+
+Engine integration 阅读到的边界：
+
+- Command Complete / Status 使用 Review `HciObservation`；
+- LE CIS Established / disconnect 属于 Bumble DeviceEvent；
+- `QueueHostTransport` 已有 native ISO ↔ H4 adaptation；
+- 2D 应继续使用 `Transaction + typed Action + Engine owner + bounded report` 风格。
+
+> **Round6 网页会话到此结束。后续 2D 实现属于下一聊天，不应反向写成本 Round 已完成。**
+
+---
+
+## 23. Post-Round6 continuation：Review-2C / Review-2D 后续仓库状态（2026-10-18）
 
 > 本节是对 §16 当时截点的**后续事实补充**，不改写前面的历史记录。Round6 对话末尾曾发生输出截断，因此本节只以当前 `main` 源码、Git commit 与 deterministic test 为事实源。
 
 §16 写下时，Review-2C 仍标记为 NEXT、2D 为 pending。仓库随后继续推进，实际代码已经越过该状态。
 
-### 17.1 Review-2C — ACL / L2CAP / ATT / GATT
+### 23.1 Review-2C — ACL / L2CAP / ATT / GATT
 
 当前 Review 路径已经具备：
 
@@ -514,9 +847,9 @@ Phase 8 Clock discipline / ASRC         pending
 - bounded GATT mailbox / report surface；
 - read-only real-HIL harness `review2 gatt-smoke`。
 
-因此 **Review-2C 软件实现已 COMPLETE**。本节不声明新的 2C HIL gate；真实 Buds attribute/service assumptions 仍以已有实验/HIL 证据和显式 HIL harness 为边界。
+Review-2C 已在本 Round §17 达到 **software + real HIL PASS**。本 Post-Round6 continuation 不重复声明新的 2C gate，只记录后续仓库继续演进的事实。
 
-### 17.2 Review-2D — CIG / CIS / ISO Host
+### 23.2 Review-2D — CIG / CIS / ISO Host
 
 Review-2D 当前实现完成：
 
@@ -544,7 +877,7 @@ Review-2D 当前实现完成：
 - `498fb5a7` — ISO data pressure fairness tests；
 - `fbbd9327` — keep public submission boundary group-only。
 
-### 17.3 为什么额外做 Host admission
+### 23.3 为什么额外做 Host admission
 
 Pinned Bumble `DataPacketQueue` 只限制 controller `max_in_flight`；其 waiting packet `VecDeque` 本身没有容量上限。因此仅在 Bridge→HCI 入口使用 bounded mailbox 仍不够：如果 HCI worker 持续消费 mailbox，realtime backlog 会被转移到 Bumble 内部并重新变成无界延迟。
 
@@ -554,7 +887,7 @@ Review-2D 的规则因此冻结为：
 
 对于 sealed B3P First Sound 参数，历史 HIL 已知 BE200 报告 ISO pool = **248 B × 8 packets**，48 kHz / 10 ms / 100 B mono-per-ear 每耳各占一个 HCI ISO packet，因此正常情况下一个 8-packet window 最多容纳四个 stereo intervals。该数值只作为已知硬件 fixture；runtime 使用实际 controller capability，不硬编码 8。
 
-### 17.4 Review-2D deterministic gate
+### 23.4 Review-2D deterministic gate
 
 完成本节代码后，本地 ToolHub 当前软件门槛：
 
