@@ -2958,6 +2958,138 @@ mod tests {
     }
 
     #[test]
+    fn iso_group_admission_stops_at_controller_window_and_resumes_on_completion() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        assert!(engine.device_mut().configure_controller_packet_pools(
+            None,
+            None,
+            Some(bumble_host::ControllerBufferInfo {
+                data_packet_length: 248,
+                total_num_data_packets: 8,
+            }),
+        ));
+        engine.iso_credit_audit.configure(8).unwrap();
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let acl = engine.connection_set_snapshot().connections[0].token();
+
+        engine.begin_cig_configuration(cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 2, 0x00, 0x09, 0x01, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_cis_creation(super::super::iso::CisCreateRequest {
+                cig_id: 1,
+                bindings: vec![
+                    super::super::iso::CisAclBinding {
+                        cis_id: 1,
+                        acl,
+                    },
+                    super::super::iso::CisAclBinding {
+                        cis_id: 2,
+                        acl,
+                    },
+                ],
+            })
+            .unwrap();
+        let create_opcode = command_opcode(rx.try_recv().unwrap());
+        engine.ingest(command_status(create_opcode, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine.ingest(cis_established(0x0900, 0)).unwrap();
+        engine.ingest(cis_established(0x0901, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        for handle in [0x0900, 0x0901] {
+            engine
+                .begin_iso_path_setup(
+                    super::super::iso_path::IsoDataPathConfig::hci_input(
+                        handle,
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                command_opcode(rx.try_recv().unwrap()),
+                bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND
+            );
+            engine
+                .ingest(complete(
+                    bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+                    0,
+                    &handle.to_le_bytes(),
+                ))
+                .unwrap();
+            engine.poll_until_quiescent().unwrap();
+        }
+
+        let group = super::super::iso_tx::IsoSduGroupRequest {
+            sdus: vec![
+                super::super::iso_tx::IsoSduRequest {
+                    connection_handle: 0x0900,
+                    payload: vec![0x11; 100],
+                },
+                super::super::iso_tx::IsoSduRequest {
+                    connection_handle: 0x0901,
+                    payload: vec![0x22; 100],
+                },
+            ],
+        };
+
+        for _ in 0..4 {
+            assert_eq!(
+                engine.submit_iso_group(&group).unwrap(),
+                super::super::iso_tx::IsoSubmitOutcome::Accepted
+            );
+            engine.poll_until_quiescent().unwrap();
+        }
+        assert_eq!(engine.iso_credit_audit.in_flight(), 8);
+        assert_eq!(engine.device().iso_packets_pending(), Some(8));
+
+        assert_eq!(
+            engine.submit_iso_group(&group).unwrap(),
+            super::super::iso_tx::IsoSubmitOutcome::Backpressured
+        );
+        assert_eq!(engine.device().iso_packets_pending(), Some(8));
+
+        for _ in 0..8 {
+            assert!(matches!(rx.try_recv().unwrap(), HostPacket::Iso(_)));
+        }
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x13, 0x09, 0x02,
+                0x00, 0x09, 0x04, 0x00,
+                0x01, 0x09, 0x04, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(engine.iso_credit_audit.in_flight(), 0);
+        assert_eq!(engine.device().iso_packets_pending(), Some(0));
+
+        assert_eq!(
+            engine.submit_iso_group(&group).unwrap(),
+            super::super::iso_tx::IsoSubmitOutcome::Accepted
+        );
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(engine.iso_credit_audit.in_flight(), 2);
+    }
+
+    #[test]
     fn engine_sets_up_and_removes_hci_input_path_through_bumble_projection() {
         let (mut engine, rx) = engine(32);
         make_minimal_attach_ready(&mut engine, &rx);
