@@ -41,6 +41,10 @@ use super::{
         CisCreateRequest, CisCreateState, CisCreateTransaction,
     },
     iso_credit::{IsoCreditAudit, IsoCreditFault},
+    iso_host_feature::{
+        CisHostFeatureAction, CisHostFeatureFailure,
+        CisHostFeatureState, CisHostFeatureTransaction,
+    },
     iso_lifecycle::{
         CigRemoveAction, CigRemoveState, CigRemoveTransaction,
         CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
@@ -105,6 +109,7 @@ pub enum EngineFault {
     },
     AclCredit(AclCreditFault),
     IsoCredit(IsoCreditFault),
+    CisHostFeature(CisHostFeatureFailure),
     GattSendRejected { connection_handle: u16 },
     GattReportBacklogFull,
     DeviceEventBacklogFull,
@@ -192,6 +197,8 @@ pub struct HciEngine {
     next_connection_generation: u64,
     acl_credit_audit: AclCreditAudit,
     iso_credit_audit: IsoCreditAudit,
+    cis_host_feature_state: CisHostFeatureState,
+    cis_host_feature_transaction: Option<CisHostFeatureTransaction>,
     gatt_transactions: BTreeMap<u16, GattTransaction>,
     gatt_mtus: BTreeMap<u16, u16>,
     gatt_poisoned: BTreeMap<u16, GattRequestId>,
@@ -235,6 +242,8 @@ impl HciEngine {
             next_connection_generation: 1,
             acl_credit_audit: AclCreditAudit::default(),
             iso_credit_audit: IsoCreditAudit::default(),
+            cis_host_feature_state: CisHostFeatureState::Idle,
+            cis_host_feature_transaction: None,
             gatt_transactions: BTreeMap::new(),
             gatt_mtus: BTreeMap::new(),
             gatt_poisoned: BTreeMap::new(),
@@ -324,6 +333,88 @@ impl HciEngine {
 
     pub fn stored_encryption_state(&self) -> &StoredEncryptionState {
         &self.stored_encryption_state
+    }
+
+    pub fn cis_host_feature_state(&self) -> CisHostFeatureState {
+        self.cis_host_feature_state
+    }
+
+    pub fn begin_cis_host_feature(
+        &mut self,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.device.le_connections().next().is_some()
+            || self.cis_host_feature_transaction.is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, action) =
+            CisHostFeatureTransaction::begin(
+                self.device.local_le_features(),
+            )
+            .map_err(EngineFault::CisHostFeature)?;
+        self.cis_host_feature_transaction = transaction;
+        self.handle_cis_host_feature_action(action)
+    }
+
+    fn handle_cis_host_feature_action(
+        &mut self,
+        action: CisHostFeatureAction,
+    ) -> Result<(), EngineFault> {
+        match action {
+            CisHostFeatureAction::Send(command) => {
+                self.link.handle_command(0, command);
+                self.check_link_fault()?;
+                self.cis_host_feature_state =
+                    if self.cis_host_feature_transaction
+                        .as_ref()
+                        .is_some()
+                    {
+                        match self.cis_host_feature_state {
+                            CisHostFeatureState::Setting
+                            | CisHostFeatureState::ReadingBack => {
+                                self.cis_host_feature_state
+                            }
+                            _ => {
+                                // The first Send is Set Host Feature; the
+                                // second is the readback.
+                                if matches!(
+                                    self.cis_host_feature_state,
+                                    CisHostFeatureState::Idle
+                                        | CisHostFeatureState::Ready { .. }
+                                        | CisHostFeatureState::Failed(_)
+                                ) {
+                                    CisHostFeatureState::Setting
+                                } else {
+                                    self.cis_host_feature_state
+                                }
+                            }
+                        }
+                    } else {
+                        self.cis_host_feature_state
+                    };
+            }
+            CisHostFeatureAction::Ready {
+                initially_enabled,
+                set_command_sent,
+            } => {
+                self.cis_host_feature_transaction = None;
+                self.cis_host_feature_state =
+                    CisHostFeatureState::Ready {
+                        initially_enabled,
+                        set_command_sent,
+                    };
+            }
+            CisHostFeatureAction::Failed(failure) => {
+                self.cis_host_feature_transaction = None;
+                self.cis_host_feature_state =
+                    CisHostFeatureState::Failed(failure);
+                return Err(EngineFault::CisHostFeature(failure));
+            }
+            CisHostFeatureAction::Ignored => {}
+        }
+        Ok(())
     }
 
     pub fn begin_gatt_request(
@@ -1169,8 +1260,49 @@ impl HciEngine {
             self.process_disconnect_observation(&observation)?;
             self.process_cis_disconnect_observation(&observation)?;
             self.process_stored_encryption_observation(&observation)?;
+            self.process_cis_host_feature_observation(&observation)?;
             self.process_cig_observation(&observation)?;
             self.process_scan_observation(&observation)?;
+        }
+        Ok(())
+    }
+
+    fn process_cis_host_feature_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let Some(transaction) =
+            self.cis_host_feature_transaction.as_mut()
+        else {
+            return Ok(());
+        };
+
+        let action = match observation {
+            HciObservation::CommandComplete {
+                opcode,
+                status,
+                parameters_after_status,
+            } => transaction.on_command_complete(
+                *opcode,
+                *status,
+                parameters_after_status,
+            ),
+            HciObservation::CommandStatus { opcode, .. } => {
+                transaction.on_command_status(*opcode)
+            }
+            _ => CisHostFeatureAction::Ignored,
+        };
+
+        let reading_back = matches!(
+            &action,
+            CisHostFeatureAction::Send(
+                Command::LeReadLocalSupportedFeatures
+            )
+        );
+        self.handle_cis_host_feature_action(action)?;
+        if reading_back {
+            self.cis_host_feature_state =
+                CisHostFeatureState::ReadingBack;
         }
         Ok(())
     }
