@@ -23,7 +23,7 @@ use super::{
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
     },
-    iso_lifecycle::CigRemoveState,
+    iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
@@ -44,6 +44,7 @@ pub enum HciCommand {
     BeginStoredEncryption(StoredEncryptionRequest),
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
+    DisconnectCis { connection_handle: u16 },
     RemoveCig { cig_id: u8 },
     SetupIsoPath(IsoDataPathConfig),
     RemoveIsoPath {
@@ -72,6 +73,7 @@ pub enum HciReport {
     StoredEncryptionState(StoredEncryptionState),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
+    CisDisconnectState(CisDisconnectState),
     CigRemoveState(CigRemoveState),
     IsoPathState(IsoPathOperationState),
     ConnectionSet(LeConnectionSetSnapshot),
@@ -223,6 +225,17 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::CreateCis(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_disconnect_cis(
+        &self,
+        connection_handle: u16,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::DisconnectCis {
+                connection_handle,
+            })
             .map_err(map_send_error)
     }
 
@@ -401,7 +414,7 @@ mod tests {
     #[test]
     fn cis_lifecycle_uses_bounded_control_lane() {
         let (control, _ingress, _reports, ports) =
-            hci_mailbox(1, 2, 1);
+            hci_mailbox(1, 3, 1);
 
         let request = CisCreateRequest {
             cig_id: 1,
@@ -414,11 +427,18 @@ mod tests {
             }],
         };
         control.try_create_cis(request.clone()).unwrap();
+        control.try_disconnect_cis(0x0900).unwrap();
         control.try_remove_cig(1).unwrap();
 
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::CreateCis(request)
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::DisconnectCis {
+                connection_handle: 0x0900,
+            }
         );
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
