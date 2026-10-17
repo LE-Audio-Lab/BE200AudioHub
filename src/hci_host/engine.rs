@@ -2349,6 +2349,12 @@ mod tests {
         }
     }
 
+    fn single_cig_config() -> super::super::iso::CigConfig {
+        let mut config = cig_config();
+        config.cis.truncate(1);
+        config
+    }
+
     #[test]
     fn engine_drives_cig_configuration_from_completion_journal() {
         let (mut engine, rx) = engine(16);
@@ -2544,6 +2550,127 @@ mod tests {
         assert_eq!(established[1].acl, second);
         assert!(engine.device().cis_link(0x0900).is_some());
         assert!(engine.device().cis_link(0x0901).is_some());
+    }
+
+    #[test]
+    fn engine_sets_up_and_removes_hci_input_path_through_bumble_projection() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let acl = engine.connection_set_snapshot().connections[0].token();
+
+        engine.begin_cig_configuration(single_cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 1, 0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_cis_creation(
+                super::super::iso::CisCreateRequest {
+                    cig_id: 1,
+                    bindings: vec![super::super::iso::CisAclBinding {
+                        cis_id: 1,
+                        acl,
+                    }],
+                },
+            )
+            .unwrap();
+        let create_opcode = command_opcode(rx.try_recv().unwrap());
+        assert_eq!(
+            create_opcode,
+            bumble_hci::codes::HCI_LE_CREATE_CIS_COMMAND
+        );
+        engine.ingest(command_status(create_opcode, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine.ingest(cis_established(0x0900, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(matches!(
+            engine.cis_create_state(),
+            super::super::iso::CisCreateState::Ready { established, .. }
+                if established.len() == 1
+                    && established[0].link.connection_handle == 0x0900
+        ));
+
+        let setup =
+            super::super::iso_path::IsoDataPathConfig::hci_input(0x0900);
+        engine.begin_iso_path_setup(setup.clone()).unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND
+        );
+        assert_eq!(
+            engine.iso_path_state(),
+            &super::super::iso_path::IsoPathOperationState::SettingUp(
+                setup.clone()
+            )
+        );
+
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.iso_path_state(),
+            &super::super::iso_path::IsoPathOperationState::SetupComplete {
+                connection_handle: 0x0900,
+                direction:
+                    super::super::iso_path::IsoDataPathDirection::Input,
+            }
+        );
+        assert_eq!(
+            engine.device().iso_data_path(0x0900, 0),
+            Some(&setup.to_bumble_parameters())
+        );
+
+        engine.begin_iso_path_remove(0x0900, 0x01).unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND
+        );
+        assert_eq!(
+            engine.iso_path_state(),
+            &super::super::iso_path::IsoPathOperationState::Removing {
+                connection_handle: 0x0900,
+                directions: 0x01,
+            }
+        );
+
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.iso_path_state(),
+            &super::super::iso_path::IsoPathOperationState::RemoveComplete {
+                connection_handle: 0x0900,
+                directions: 0x01,
+            }
+        );
+        assert!(engine.device().iso_data_path(0x0900, 0).is_none());
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
     #[test]
