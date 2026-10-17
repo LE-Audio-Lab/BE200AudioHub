@@ -40,7 +40,9 @@ use super::{
         CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
         CisCreateRequest, CisCreateState, CisCreateTransaction,
     },
-    iso_credit::{IsoCreditAudit, IsoCreditFault},
+    iso_credit::{
+        IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot,
+    },
     iso_host_feature::{
         CisHostFeatureAction, CisHostFeatureFailure,
         CisHostFeatureState, CisHostFeatureTransaction,
@@ -643,6 +645,10 @@ impl HciEngine {
         self.cis_disconnect_state =
             CisDisconnectState::Submitting { connection_handle };
         Ok(())
+    }
+
+    pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
+        self.iso_credit_audit.snapshot()
     }
 
     pub fn iso_path_state(&self) -> &IsoPathOperationState {
