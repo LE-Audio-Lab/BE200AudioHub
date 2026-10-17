@@ -520,7 +520,7 @@ Phase 8 Clock discipline / ASRC         pending
 
 ## 17. Round6 正式收口：Review-2C ACL / L2CAP / ATT / GATT
 
-> §1–16 是本轮较早的 Review-2A/2B 阶段性收口。当前节记录同一网页会话随后完成的 Review-2C；这是 **Round6 的真实最终边界**。后面的 Post-Round6 continuation 属于用户切换到新聊天后的继续开发。
+> §1–16 是本轮较早的 Review-2A/2B 阶段性收口。当前节记录原网页会话随后完成的 Review-2C；它是 **原网页会话中的最后一个完整实现/HIL gate**，但不是 Round6 的最终工程边界。Review-2D 在 chat migration 后继续，并于 §24 完成 Round6 final closure。
 
 ### 17.1 架构选择：复用 Bumble Device 数据面，不暴露同步 GattClient
 
