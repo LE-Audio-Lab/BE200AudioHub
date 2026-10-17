@@ -46,13 +46,14 @@ use crate::{
         stack::HciStack,
     },
     review2_bond_smoke::{
-        parse_bond_smoke_args, BondSmokeConfig, BondSmokeMemberResult,
-        BondSmokeTracker,
+        open_dual_encrypted_bond_session_for_iso,
+        parse_bond_smoke_args, BondSmokeConfig, BondSmokeExecuteError,
+        BondSmokeMemberResult, BondSmokeResult, BondSmokeTracker,
     },
     review2_gatt_smoke::{
         execute_gatt, required_service, ASCS_UUID, PACS_UUID,
     },
-    runtime::mailbox::RecvError,
+    runtime::mailbox::{RecvError, SendError},
 };
 
 const DEFAULT_FRAMES: usize = 100;
@@ -1291,6 +1292,493 @@ fn read_iso_audit(
     )
 }
 
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoSmokeResult {
+    pub bond: BondSmokeResult,
+    pub frames: usize,
+    pub left_identity_address: String,
+    pub right_identity_address: String,
+    pub left_cis_handle: u16,
+    pub right_cis_handle: u16,
+    pub audit_before: IsoCreditSnapshot,
+    pub audit_after: IsoCreditSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoSmokeExecuteError {
+    Bond(BondSmokeExecuteError),
+    Probe {
+        detail: String,
+        bond: BondSmokeResult,
+    },
+    ProbeAndCleanup {
+        detail: String,
+        bond: Box<BondSmokeExecuteError>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IsoProbeResult {
+    frames: usize,
+    left_identity_address: String,
+    right_identity_address: String,
+    left_cis_handle: u16,
+    right_cis_handle: u16,
+    audit_before: IsoCreditSnapshot,
+    audit_after: IsoCreditSnapshot,
+}
+
+fn stereo_prepared(
+    prepared: Vec<PreparedAse>,
+) -> Result<(PreparedAse, PreparedAse), String> {
+    if prepared.len() != 2 {
+        return Err(format!(
+            "ISO smoke requires exactly two prepared sink ASEs, found {}",
+            prepared.len()
+        ));
+    }
+    let mut left = None;
+    let mut right = None;
+    for item in prepared {
+        let slot = match item.side {
+            AudioSide::Left => &mut left,
+            AudioSide::Right => &mut right,
+        };
+        if slot.replace(item).is_some() {
+            return Err("two members claimed the same physical side".into());
+        }
+    }
+    Ok((
+        left.ok_or_else(|| "no left sink member discovered".to_string())?,
+        right.ok_or_else(|| "no right sink member discovered".to_string())?,
+    ))
+}
+
+fn wait_streaming(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    prepared: &PreparedAse,
+    next: &mut u64,
+) -> Result<(), String> {
+    let expected_cis = match prepared.side {
+        AudioSide::Left => LEFT_CIS_ID,
+        AudioSide::Right => RIGHT_CIS_ID,
+    };
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = parse_ase_status_compat(&read_value(
+            stack,
+            tracker,
+            prepared.connection,
+            next,
+            prepared.ase_handle,
+        )?)?;
+        match &status.details {
+            AseStatusDetails::Metadata {
+                cig_id,
+                cis_id,
+                ..
+            } if *cig_id == CIG_ID && *cis_id == expected_cis => {}
+            other => {
+                return Err(format!(
+                    "{:?} ASE metadata/CIG/CIS mismatch while waiting for Streaming: {other:?}",
+                    prepared.side
+                ))
+            }
+        }
+
+        if status.state == AseState::STREAMING {
+            return Ok(());
+        }
+        if status.state != AseState::ENABLING {
+            return Err(format!(
+                "{:?} ASE left Enabling/Streaming path: state=0x{:02X}",
+                prepared.side, status.state.0
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{:?} ASE did not reach Streaming within timeout",
+                prepared.side
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn submit_transport_frames(
+    stack: &HciStack,
+    frames: &[IsoTransportFrame],
+    handles: [u16; 2],
+) -> Result<(), String> {
+    let iso = stack.iso_tx();
+    let start = Instant::now();
+    for (index, frame) in frames.iter().enumerate() {
+        let target = start
+            + Duration::from_micros(
+                SDU_INTERVAL_US as u64 * index as u64,
+            );
+        let now = Instant::now();
+        if target > now {
+            thread::sleep(target - now);
+        }
+
+        let group = IsoSduGroupRequest {
+            sdus: vec![
+                IsoSduRequest {
+                    connection_handle: handles[0],
+                    payload: frame.left.clone(),
+                },
+                IsoSduRequest {
+                    connection_handle: handles[1],
+                    payload: frame.right.clone(),
+                },
+            ],
+        };
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            match iso.try_submit_group(group.clone()) {
+                Ok(()) => break,
+                Err(SendError::Full) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "ISO data lane remained full while submitting interval {index}"
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(SendError::Disconnected) => {
+                    return Err(
+                        "ISO data lane disconnected during submission".into(),
+                    )
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn wait_submitted_packets(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    baseline: &IsoCreditSnapshot,
+    expected_delta: u64,
+) -> Result<IsoCreditSnapshot, String> {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let snapshot = read_iso_audit(stack, tracker)?;
+        let delta = snapshot
+            .total_submitted
+            .saturating_sub(baseline.total_submitted);
+        if delta == expected_delta {
+            return Ok(snapshot);
+        }
+        if delta > expected_delta {
+            return Err(format!(
+                "ISO Host submitted {delta} packets, expected exactly {expected_delta}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "ISO Host submitted only {delta}/{expected_delta} expected packets before timeout"
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn validate_completed_audit(
+    before: &IsoCreditSnapshot,
+    after: &IsoCreditSnapshot,
+    handles: [u16; 2],
+    frames: usize,
+) -> Result<(), String> {
+    let expected = frames as u64;
+    let total_expected = expected * 2;
+
+    let submitted = after
+        .total_submitted
+        .saturating_sub(before.total_submitted);
+    let completed = after
+        .total_completed
+        .saturating_sub(before.total_completed);
+    if submitted != total_expected || completed != total_expected {
+        return Err(format!(
+            "ISO audit mismatch: submitted={submitted} completed={completed} expected={total_expected}"
+        ));
+    }
+    if after.in_flight != 0 {
+        return Err(format!(
+            "ISO drain completed with {} packet(s) still in flight",
+            after.in_flight
+        ));
+    }
+
+    for handle in handles {
+        let submitted_on = after
+            .submitted_per_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                before
+                    .submitted_per_handle
+                    .get(&handle)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        let completed_on = after
+            .completed_per_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                before
+                    .completed_per_handle
+                    .get(&handle)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        if submitted_on != expected || completed_on != expected {
+            return Err(format!(
+                "ISO handle 0x{handle:04X} audit mismatch: submitted={submitted_on} completed={completed_on} expected={expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_iso_probe(
+    session: &mut crate::review2_bond_smoke::DualEncryptedBondSession,
+    frame_count: usize,
+) -> Result<IsoProbeResult, String> {
+    let frames = prepare_transport_frames(frame_count)?;
+    let stack = &session.stack;
+    let tracker = &mut session.tracker;
+    let mut next = 1u64;
+
+    let mut prepared = Vec::new();
+    let mut cig_may_exist = false;
+    let mut allocated_handles: Option<[u16; 2]> = None;
+    let mut paths_may_exist = Vec::<u16>::new();
+    let mut drained = false;
+
+    let stage = (|| -> Result<IsoProbeResult, String> {
+        for member in session.members.clone() {
+            prepared.push(prepare_member(
+                stack,
+                tracker,
+                &member,
+                &mut next,
+            )?);
+        }
+        let (left, right) = stereo_prepared(prepared.clone())?;
+
+        config_codec(stack, tracker, &left, &mut next)?;
+        config_codec(stack, tracker, &right, &mut next)?;
+
+        // Set the cleanup flag before submission: a malformed success response
+        // may still mean the controller allocated CIG state.
+        cig_may_exist = true;
+        let allocation = configure_cig(stack, tracker)?;
+        let left_alloc = allocation
+            .cis
+            .iter()
+            .find(|entry| entry.cis_id == LEFT_CIS_ID)
+            .ok_or_else(|| "CIG allocation omitted left CIS".to_string())?;
+        let right_alloc = allocation
+            .cis
+            .iter()
+            .find(|entry| entry.cis_id == RIGHT_CIS_ID)
+            .ok_or_else(|| "CIG allocation omitted right CIS".to_string())?;
+        let allocated = [
+            left_alloc.connection_handle,
+            right_alloc.connection_handle,
+        ];
+        allocated_handles = Some(allocated);
+
+        config_qos(stack, tracker, &left, &mut next)?;
+        config_qos(stack, tracker, &right, &mut next)?;
+        enable(stack, tracker, &left, &mut next)?;
+        enable(stack, tracker, &right, &mut next)?;
+
+        let established = create_cis(
+            stack, tracker, &left, &right,
+        )?;
+        let handles = [
+            cis_handle(&established, LEFT_CIS_ID)?,
+            cis_handle(&established, RIGHT_CIS_ID)?,
+        ];
+        if handles != allocated {
+            return Err(format!(
+                "Create CIS handle mapping changed: allocated={allocated:04X?} established={handles:04X?}"
+            ));
+        }
+
+        for handle in handles {
+            paths_may_exist.push(handle);
+            setup_iso_path(stack, tracker, handle)?;
+        }
+
+        wait_streaming(stack, tracker, &left, &mut next)?;
+        wait_streaming(stack, tracker, &right, &mut next)?;
+
+        let audit_before = read_iso_audit(stack, tracker)?;
+        let limit = audit_before
+            .limit
+            .ok_or_else(|| "controller ISO packet pool is not configured".to_string())?;
+        if limit == 0 {
+            return Err("controller ISO packet pool has zero capacity".into());
+        }
+
+        submit_transport_frames(stack, &frames, handles)?;
+        let expected_packets = (frame_count as u64) * 2;
+        let _submitted = wait_submitted_packets(
+            stack,
+            tracker,
+            &audit_before,
+            expected_packets,
+        )?;
+
+        begin_and_wait_iso_drain(stack, tracker, handles)?;
+        drained = true;
+        let audit_after = read_iso_audit(stack, tracker)?;
+        validate_completed_audit(
+            &audit_before,
+            &audit_after,
+            handles,
+            frame_count,
+        )?;
+
+        for handle in handles.into_iter().rev() {
+            remove_iso_path(stack, tracker, handle)?;
+            paths_may_exist.retain(|value| *value != handle);
+        }
+        for handle in handles.into_iter().rev() {
+            let _ = disconnect_cis(stack, tracker, handle)?;
+        }
+        allocated_handles = None;
+
+        disable_and_release(stack, tracker, &right, &mut next)?;
+        disable_and_release(stack, tracker, &left, &mut next)?;
+        remove_cig(stack, tracker)?;
+        cig_may_exist = false;
+
+        Ok(IsoProbeResult {
+            frames: frame_count,
+            left_identity_address: left.identity_address,
+            right_identity_address: right.identity_address,
+            left_cis_handle: handles[0],
+            right_cis_handle: handles[1],
+            audit_before,
+            audit_after,
+        })
+    })();
+
+    if stage.is_err() {
+        let mut cleanup_errors = Vec::new();
+
+        if let Some(handles) = allocated_handles {
+            if !drained {
+                if let Err(error) =
+                    begin_and_wait_iso_drain(stack, tracker, handles)
+                {
+                    cleanup_errors.push(format!(
+                        "ISO drain UNCONFIRMED: {error}"
+                    ));
+                }
+            }
+
+            for &handle in paths_may_exist.iter().rev() {
+                if let Err(error) =
+                    remove_iso_path(stack, tracker, handle)
+                {
+                    cleanup_errors.push(format!(
+                        "ISO path remove 0x{handle:04X} UNCONFIRMED: {error}"
+                    ));
+                }
+            }
+
+            for handle in handles.into_iter().rev() {
+                if let Err(error) =
+                    disconnect_cis(stack, tracker, handle)
+                {
+                    cleanup_errors.push(format!(
+                        "CIS disconnect 0x{handle:04X} UNCONFIRMED: {error}"
+                    ));
+                }
+            }
+        }
+
+        for item in prepared.iter().rev() {
+            if let Err(error) =
+                disable_and_release(stack, tracker, item, &mut next)
+            {
+                cleanup_errors.push(format!(
+                    "{:?} ASE cleanup UNCONFIRMED: {error}",
+                    item.side
+                ));
+            }
+        }
+
+        if cig_may_exist {
+            if let Err(error) = remove_cig(stack, tracker) {
+                cleanup_errors.push(format!(
+                    "Remove CIG UNCONFIRMED: {error}"
+                ));
+            }
+        }
+
+        if !cleanup_errors.is_empty() {
+            return Err(format!(
+                "{}; rollback UNCONFIRMED: {}",
+                stage.unwrap_err(),
+                cleanup_errors.join("; ")
+            ));
+        }
+    }
+
+    stage
+}
+
+#[cfg(windows)]
+pub fn execute_iso_smoke(
+    config: IsoSmokeConfig,
+) -> Result<IsoSmokeResult, IsoSmokeExecuteError> {
+    let frame_count = config.frames;
+    let mut session =
+        open_dual_encrypted_bond_session_for_iso(config.bond)
+            .map_err(IsoSmokeExecuteError::Bond)?;
+
+    let probe = run_iso_probe(&mut session, frame_count);
+    let finish = session.finish();
+
+    match (probe, finish) {
+        (Ok(probe), Ok(bond)) => Ok(IsoSmokeResult {
+            bond,
+            frames: probe.frames,
+            left_identity_address: probe.left_identity_address,
+            right_identity_address: probe.right_identity_address,
+            left_cis_handle: probe.left_cis_handle,
+            right_cis_handle: probe.right_cis_handle,
+            audit_before: probe.audit_before,
+            audit_after: probe.audit_after,
+        }),
+        (Ok(_), Err(error)) => Err(IsoSmokeExecuteError::Bond(error)),
+        (Err(detail), Ok(bond)) => {
+            Err(IsoSmokeExecuteError::Probe { detail, bond })
+        }
+        (Err(detail), Err(bond)) => {
+            Err(IsoSmokeExecuteError::ProbeAndCleanup {
+                detail,
+                bond: Box::new(bond),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,7 +1856,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn hci_smoke_cig_is_dual_unidirectional_10ms_100b() {
         let config = cig_config();
         assert_eq!(config.cig_id, CIG_ID);
@@ -1383,6 +1870,7 @@ mod tests {
         }));
     }
 
+    #[test]
     fn codec_and_qos_smoke_parameters_match_sealed_policy() {
         let codec = codec_configuration(AudioLocation::FRONT_LEFT);
         let parsed =
