@@ -513,7 +513,7 @@ Phase 8 Clock discipline / ASRC         pending
 
 > §1–16 是本轮较早的 Review-2A/2B 阶段性收口。当前节记录同一网页会话随后完成的 Review-2C；这是 **Round6 的真实最终边界**。后面的 Post-Round6 continuation 属于用户切换到新聊天后的继续开发。
 
-### 23.1 架构选择：复用 Bumble Device 数据面，不暴露同步 GattClient
+### 17.1 架构选择：复用 Bumble Device 数据面，不暴露同步 GattClient
 
 Pinned Bumble-RS 的 `Device` 已经拥有：
 
@@ -540,7 +540,7 @@ typed GATT request
 
 不重复实现 ACL/L2CAP assembler/router，也不把 raw ATT bytes 暴露给 Control。
 
-### 23.2 typed GATT surface 与 fixed-bearer 约束
+### 17.2 typed GATT surface 与 fixed-bearer 约束
 
 实现的操作面：
 
@@ -566,7 +566,7 @@ typed GATT request
 8. Included Service 同时支持 6-byte inline UUID 形式和 4-byte declaration + follow-up Read UUID 形式；
 9. Long Read 按 MTU 继续 Read Blob，Attribute Not Long / Invalid Offset 在合法上下文中结束累计值。
 
-### 23.3 Engine / mailbox / dual-bond HIL substrate
+### 17.3 Engine / mailbox / dual-bond HIL substrate
 
 Review HCI mailbox 增加 typed GATT begin/cancel command 与 `HciReport::Gatt`；Engine 维护 per-handle transaction / MTU / poisoned bearer / bounded report queue。
 
@@ -588,7 +588,7 @@ firmware bypass
 
 2C harness 只在上述已验证 session 上做 read-only GATT。
 
-### 23.4 deterministic tests
+### 17.4 deterministic tests
 
 本轮新增/确认的关键测试包括：
 
@@ -606,7 +606,7 @@ firmware bypass
 
 直接依赖 `bumble-att` 固定到与其它 Bumble crates 相同 revision；canonical `Cargo.lock` 同步提交。
 
-### 23.5 ToolHub locked gate 抓到的真实回归
+### 17.5 ToolHub locked gate 抓到的真实回归
 
 在把 normal Cargo operation 改为 `--workspace --locked` 后，第一次 `cargo-test` 抓到：
 
@@ -625,7 +625,7 @@ git status   ## main...origin/main
 
 这次 failure 也证明新的 locked build path 会直接暴露代码/manifest 不一致，而不会通过改写 `Cargo.lock` 隐藏状态。
 
-### 23.6 Review-2C 真实 HIL PASS
+### 17.6 Review-2C 真实 HIL PASS
 
 用户在 Windows/BE200/Buds3 Pro 上执行 `review2 gatt-smoke`，结果：
 
