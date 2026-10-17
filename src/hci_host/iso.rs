@@ -707,6 +707,48 @@ mod tests {
     }
 
     #[test]
+    fn create_cis_waits_for_remaining_outcomes_after_first_failure() {
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings()).unwrap();
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::AwaitingEstablished
+        );
+
+        let CisCreateAction::Progress(progress) =
+            transaction.on_established(0x3e, link(0x0900))
+        else {
+            panic!("first failed CIS must leave the other outcome pending");
+        };
+        assert!(progress.is_empty());
+
+        let CisCreateAction::Failed(failure) =
+            transaction.on_established(0, link(0x0901))
+        else {
+            panic!("final outcome must report the whole failed CIS set");
+        };
+        assert_eq!(
+            failure.kind,
+            CisCreateFailureKind::CisEstablishmentFailed
+        );
+        assert_eq!(
+            failure.established
+                .iter()
+                .map(|cis| cis.cis_id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            failure.failed,
+            vec![CisEstablishedFailure {
+                cis_id: 1,
+                connection_handle: 0x0900,
+                status: 0x3e,
+            }]
+        );
+    }
+
+    #[test]
     fn create_cis_failure_preserves_already_established_links() {
         let (mut transaction, _) =
             CisCreateTransaction::begin(allocation(), bindings()).unwrap();
