@@ -24,7 +24,7 @@ use crate::{
     architecture::types::AudioSide,
     hci_host::{
         connection::ConnectionToken,
-        gatt::{
+        gatt:{
             GattCharacteristic, GattOperation, GattReport, GattRequest,
             GattResult, GattValueEvent,
         },
@@ -1774,6 +1774,780 @@ pub fn execute_iso_smoke(
             Err(IsoSmokeExecuteError::ProbeAndCleanup {
                 detail,
                 bond: Box::new(bond),
+            })
+        }
+    }
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoSmokeProbeResult {
+    pub left_cis_handle: u16,
+    pub right_cis_handle: u16,
+    pub frames_submitted: usize,
+    pub audit_before: IsoCreditSnapshot,
+    pub audit_after: IsoCreditSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoSmokeResult {
+    pub bond: BondSmokeResult,
+    pub probe: IsoSmokeProbeResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoSmokeExecuteError {
+    Bond(BondSmokeExecuteError),
+    Probe {
+        detail: String,
+        cleanup: BondSmokeCleanupSummary,
+        bond_unchanged: bool,
+        exit: HciStackExit,
+    },
+    ProbeAndCleanup {
+        detail: String,
+        cleanup: Box<BondSmokeExecuteError>,
+    },
+}
+
+fn wait_hci_report<T>(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+    stage: &str,
+    mut predicate: impl FnMut(&HciReport) -> Option<Result<T, String>>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match stack.reports().try_recv() {
+            Ok(report) => {
+                tracker.observe(&report);
+                if let Some(result) = predicate(&report) {
+                    return result;
+                }
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return Err(format!("{stage}: timed out"));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err(format!("{stage}: report lane disconnected"));
+            }
+        }
+    }
+}
+
+fn smoke_cig_config() -> CigConfig {
+    let cis = |cis_id| CisConfig {
+        cis_id,
+        max_sdu_c_to_p: OCTETS_PER_SDU as u16,
+        max_sdu_p_to_c: 0,
+        phy_c_to_p: PHY_2M,
+        phy_p_to_c: 0x01,
+        rtn_c_to_p: RTN,
+        rtn_p_to_c: 0,
+    };
+    CigConfig {
+        cig_id: CIG_ID,
+        sdu_interval_c_to_p: SDU_INTERVAL_US,
+        sdu_interval_p_to_c: SDU_INTERVAL_US,
+        worst_case_sca: 0,
+        packing: 0,
+        framing: 0,
+        max_transport_latency_c_to_p: MAX_TRANSPORT_LATENCY_MS,
+        max_transport_latency_p_to_c: MAX_TRANSPORT_LATENCY_MS,
+        cis: vec![cis(LEFT_CIS_ID), cis(RIGHT_CIS_ID)],
+    }
+}
+
+fn wait_cig_ready(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<CigAllocation, String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "Set CIG",
+        |report| match report {
+            HciReport::CigConfigureState(
+                CigConfigureState::Ready(allocation),
+            ) => Some(Ok(allocation.clone())),
+            HciReport::CigConfigureState(
+                CigConfigureState::Failed(failure),
+            ) => Some(Err(format!(
+                "Set CIG failed: {failure:?}"
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn wait_cis_ready(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<Vec<EstablishedCis>, (String, Vec<EstablishedCis>)> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(8),
+        "Create CIS",
+        |report| match report {
+            HciReport::CisCreateState(CisCreateState::Ready {
+                established,
+                ..
+            }) => Some(Ok(established.clone())),
+            HciReport::CisCreateState(CisCreateState::Failed(
+                failure,
+            )) => Some(Err((
+                format!("Create CIS failed: {failure:?}"),
+                failure.established.clone(),
+            ))),
+            _ => None,
+        },
+    )
+    .map_err(|detail| (detail, Vec::new()))?
+}
+
+fn wait_iso_path_setup(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    handle: u16,
+) -> Result<(), String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "Setup ISO Data Path",
+        |report| match report {
+            HciReport::IsoPathState(
+                IsoPathOperationState::SetupComplete {
+                    connection_handle,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ) if *connection_handle == handle => Some(Ok(())),
+            HciReport::IsoPathState(IsoPathOperationState::Failed(
+                failure,
+            )) if failure.connection_handle == handle => {
+                Some(Err(format!(
+                    "Setup ISO Data Path 0x{handle:04X} failed: {failure:?}"
+                )))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn wait_iso_path_removed(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    handle: u16,
+) -> Result<(), String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "Remove ISO Data Path",
+        |report| match report {
+            HciReport::IsoPathState(
+                IsoPathOperationState::RemoveComplete {
+                    connection_handle,
+                    directions: 0x01,
+                },
+            ) if *connection_handle == handle => Some(Ok(())),
+            HciReport::IsoPathState(IsoPathOperationState::Failed(
+                failure,
+            )) if failure.connection_handle == handle => {
+                Some(Err(format!(
+                    "Remove ISO Data Path 0x{handle:04X} failed: {failure:?}"
+                )))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn read_iso_audit(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<IsoCreditSnapshot, String> {
+    stack
+        .control()
+        .try_read_iso_tx_audit()
+        .map_err(|error| {
+            format!("read ISO TX audit submit: {error:?}")
+        })?;
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(2),
+        "read ISO TX audit",
+        |report| match report {
+            HciReport::IsoTxAudit(snapshot) => {
+                Some(Ok(snapshot.clone()))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn wait_submitted_count(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    baseline: &IsoCreditSnapshot,
+    expected_delta: u64,
+) -> Result<IsoCreditSnapshot, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = read_iso_audit(stack, tracker)?;
+        if snapshot
+            .total_submitted
+            .saturating_sub(baseline.total_submitted)
+            >= expected_delta
+        {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "ISO Host submission count stalled: submitted_delta={} expected={expected_delta}",
+                snapshot
+                    .total_submitted
+                    .saturating_sub(baseline.total_submitted)
+            ));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn wait_iso_drained(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    request: &IsoDrainRequest,
+) -> Result<(), String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "ISO drain",
+        |report| match report {
+            HciReport::IsoDrainState(IsoDrainState::Drained(
+                actual,
+            )) if actual == request => Some(Ok(())),
+            _ => None,
+        },
+    )
+}
+
+fn wait_cis_disconnected(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    handle: u16,
+) -> Result<u8, String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "CIS disconnect",
+        |report| match report {
+            HciReport::CisDisconnectState(
+                CisDisconnectState::Disconnected {
+                    connection_handle,
+                    event_reason,
+                },
+            ) if *connection_handle == handle => Some(Ok(*event_reason)),
+            HciReport::CisDisconnectState(
+                CisDisconnectState::Failed(failure),
+            ) if failure.connection_handle == handle => {
+                Some(Err(format!(
+                    "CIS disconnect 0x{handle:04X} failed: {failure:?}"
+                )))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn wait_cig_removed(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<(), String> {
+    wait_hci_report(
+        stack,
+        tracker,
+        Duration::from_secs(5),
+        "Remove CIG",
+        |report| match report {
+            HciReport::CigRemoveState(CigRemoveState::Removed {
+                cig_id: CIG_ID,
+            }) => Some(Ok(())),
+            HciReport::CigRemoveState(CigRemoveState::Failed(
+                failure,
+            )) => Some(Err(format!(
+                "Remove CIG failed: {failure:?}"
+            ))),
+            _ => None,
+        },
+    )
+}
+
+fn verify_post_cis_ase(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    prepared: &PreparedAse,
+    next: &mut u64,
+) -> Result<(), String> {
+    let status = parse_ase_status_compat(&read_value(
+        stack,
+        tracker,
+        prepared.connection,
+        next,
+        prepared.ase_handle,
+    )?)?;
+    if !matches!(
+        status.state,
+        AseState::ENABLING | AseState::STREAMING
+    ) {
+        return Err(format!(
+            "{:?} ASE {} post-CIS state=0x{:02X}",
+            prepared.side,
+            prepared.ase_id,
+            status.state.0
+        ));
+    }
+    match status.details {
+        AseStatusDetails::Metadata {
+            cig_id,
+            cis_id,
+            ..
+        } if cig_id == CIG_ID
+            && cis_id
+                == match prepared.side {
+                    AudioSide::Left => LEFT_CIS_ID,
+                    AudioSide::Right => RIGHT_CIS_ID,
+                } =>
+        {
+            Ok(())
+        }
+        other => Err(format!(
+            "{:?} post-CIS metadata mismatch: {other:?}",
+            prepared.side
+        )),
+    }
+}
+
+fn cleanup_iso_probe(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    prepared: &[PreparedAse],
+    next: &mut u64,
+    cis_handles: &[u16],
+    paths_may_exist: &[u16],
+    cig_may_exist: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if !cis_handles.is_empty() {
+        let request = IsoDrainRequest {
+            connection_handles: cis_handles.to_vec(),
+        };
+        match stack.control().try_begin_iso_drain(request.clone()) {
+            Ok(()) => {
+                if let Err(error) =
+                    wait_iso_drained(stack, tracker, &request)
+                {
+                    errors.push(format!(
+                        "ISO drain before teardown UNCONFIRMED: {error}"
+                    ));
+                }
+            }
+            Err(error) => errors.push(format!(
+                "ISO drain submit UNCONFIRMED: {error:?}"
+            )),
+        }
+    }
+
+    for &handle in paths_may_exist.iter().rev() {
+        match stack.control().try_remove_iso_path(handle, 0x01) {
+            Ok(()) => {
+                if let Err(error) =
+                    wait_iso_path_removed(stack, tracker, handle)
+                {
+                    errors.push(error);
+                }
+            }
+            Err(error) => errors.push(format!(
+                "remove ISO path 0x{handle:04X} submit: {error:?}"
+            )),
+        }
+    }
+
+    for &handle in cis_handles.iter().rev() {
+        match stack.control().try_disconnect_cis(handle) {
+            Ok(()) => {
+                if let Err(error) =
+                    wait_cis_disconnected(stack, tracker, handle)
+                {
+                    errors.push(error);
+                }
+            }
+            Err(error) => errors.push(format!(
+                "disconnect CIS 0x{handle:04X} submit: {error:?}"
+            )),
+        }
+    }
+
+    for ase in prepared.iter().rev() {
+        if let Err(error) =
+            disable_and_release(stack, tracker, ase, next)
+        {
+            errors.push(format!(
+                "{:?} ASE cleanup: {error}",
+                ase.side
+            ));
+        }
+    }
+
+    if cig_may_exist {
+        match stack.control().try_remove_cig(CIG_ID) {
+            Ok(()) => {
+                if let Err(error) =
+                    wait_cig_removed(stack, tracker)
+                {
+                    errors.push(error);
+                }
+            }
+            Err(error) => errors.push(format!(
+                "Remove CIG submit: {error:?}"
+            )),
+        }
+    }
+
+    errors
+}
+
+fn run_iso_probe(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    members: &[BondSmokeMemberResult],
+    frames: &[IsoTransportFrame],
+) -> Result<IsoSmokeProbeResult, String> {
+    let mut next = 1u64;
+    let mut prepared = Vec::with_capacity(2);
+    let mut cig_may_exist = false;
+    let mut cis_handles = Vec::<u16>::new();
+    let mut paths_may_exist = Vec::<u16>::new();
+
+    let stage = (|| -> Result<IsoSmokeProbeResult, String> {
+        for member in members {
+            prepared.push(prepare_member(
+                stack,
+                tracker,
+                member,
+                &mut next,
+            )?);
+        }
+        if prepared.len() != 2 {
+            return Err(format!(
+                "ISO smoke requires exactly two prepared ASEs; got {}",
+                prepared.len()
+            ));
+        }
+        let left_count = prepared
+            .iter()
+            .filter(|ase| ase.side == AudioSide::Left)
+            .count();
+        let right_count = prepared
+            .iter()
+            .filter(|ase| ase.side == AudioSide::Right)
+            .count();
+        if left_count != 1 || right_count != 1 {
+            return Err(format!(
+                "physical side mapping must be 1L+1R; got left={left_count} right={right_count}"
+            ));
+        }
+        prepared.sort_by_key(|ase| match ase.side {
+            AudioSide::Left => 0,
+            AudioSide::Right => 1,
+        });
+        let left = prepared[0].clone();
+        let right = prepared[1].clone();
+
+        config_codec(stack, tracker, &left, &mut next)?;
+        config_codec(stack, tracker, &right, &mut next)?;
+
+        stack
+            .control()
+            .try_configure_cig(smoke_cig_config())
+            .map_err(|error| {
+                format!("Set CIG submit: {error:?}")
+            })?;
+        cig_may_exist = true;
+        let _allocation = wait_cig_ready(stack, tracker)?;
+
+        config_qos(stack, tracker, &left, &mut next)?;
+        config_qos(stack, tracker, &right, &mut next)?;
+        enable(stack, tracker, &left, &mut next)?;
+        enable(stack, tracker, &right, &mut next)?;
+
+        stack
+            .control()
+            .try_create_cis(CisCreateRequest {
+                cig_id: CIG_ID,
+                bindings: vec![
+                    CisAclBinding {
+                        cis_id: LEFT_CIS_ID,
+                        acl: left.connection,
+                    },
+                    CisAclBinding {
+                        cis_id: RIGHT_CIS_ID,
+                        acl: right.connection,
+                    },
+                ],
+            })
+            .map_err(|error| {
+                format!("Create CIS submit: {error:?}")
+            })?;
+
+        let established = match wait_cis_ready(stack, tracker) {
+            Ok(established) => established,
+            Err((detail, partial)) => {
+                cis_handles = partial
+                    .iter()
+                    .map(|entry| entry.link.connection_handle)
+                    .collect();
+                return Err(detail);
+            }
+        };
+        cis_handles = established
+            .iter()
+            .map(|entry| entry.link.connection_handle)
+            .collect();
+
+        let handle_for = |cis_id| {
+            established
+                .iter()
+                .find(|entry| entry.cis_id == cis_id)
+                .map(|entry| entry.link.connection_handle)
+                .ok_or_else(|| {
+                    format!("Create CIS result omitted CIS {cis_id}")
+                })
+        };
+        let left_handle = handle_for(LEFT_CIS_ID)?;
+        let right_handle = handle_for(RIGHT_CIS_ID)?;
+        if left_handle == right_handle {
+            return Err("left/right CIS handles are identical".into());
+        }
+
+        verify_post_cis_ase(
+            stack,
+            tracker,
+            &left,
+            &mut next,
+        )?;
+        verify_post_cis_ase(
+            stack,
+            tracker,
+            &right,
+            &mut next,
+        )?;
+
+        for handle in [left_handle, right_handle] {
+            stack
+                .control()
+                .try_setup_iso_path(
+                    IsoDataPathConfig::hci_input(handle),
+                )
+                .map_err(|error| {
+                    format!(
+                        "Setup ISO Data Path 0x{handle:04X} submit: {error:?}"
+                    )
+                })?;
+            paths_may_exist.push(handle);
+            wait_iso_path_setup(stack, tracker, handle)?;
+        }
+
+        let audit_before = read_iso_audit(stack, tracker)?;
+        let iso_tx = stack.iso_tx();
+        let started = Instant::now();
+        for (index, frame) in frames.iter().enumerate() {
+            let target = started
+                + Duration::from_millis(
+                    (index as u64).saturating_mul(10),
+                );
+            if let Some(delay) = target.checked_duration_since(
+                Instant::now(),
+            ) {
+                thread::sleep(delay);
+            }
+
+            iso_tx
+                .try_submit_group(IsoSduGroupRequest {
+                    sdus: vec![
+                        IsoSduRequest {
+                            connection_handle: left_handle,
+                            payload: frame.left.clone(),
+                        },
+                        IsoSduRequest {
+                            connection_handle: right_handle,
+                            payload: frame.right.clone(),
+                        },
+                    ],
+                })
+                .map_err(|error| {
+                    format!(
+                        "ISO data lane backpressure at interval {index}: {error:?}"
+                    )
+                })?;
+        }
+
+        let expected_packets =
+            u64::try_from(frames.len() * 2).unwrap_or(u64::MAX);
+        let submitted = wait_submitted_count(
+            stack,
+            tracker,
+            &audit_before,
+            expected_packets,
+        )?;
+        let left_submitted = submitted
+            .submitted_per_handle
+            .get(&left_handle)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                audit_before
+                    .submitted_per_handle
+                    .get(&left_handle)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        let right_submitted = submitted
+            .submitted_per_handle
+            .get(&right_handle)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(
+                audit_before
+                    .submitted_per_handle
+                    .get(&right_handle)
+                    .copied()
+                    .unwrap_or(0),
+            );
+        if left_submitted != frames.len() as u64
+            || right_submitted != frames.len() as u64
+        {
+            return Err(format!(
+                "ISO Host submitted counts are not stereo-exact: left={left_submitted} right={right_submitted} expected={}",
+                frames.len()
+            ));
+        }
+
+        let drain = IsoDrainRequest {
+            connection_handles: vec![left_handle, right_handle],
+        };
+        stack
+            .control()
+            .try_begin_iso_drain(drain.clone())
+            .map_err(|error| {
+                format!("Begin ISO drain submit: {error:?}")
+            })?;
+        wait_iso_drained(stack, tracker, &drain)?;
+
+        let audit_after = read_iso_audit(stack, tracker)?;
+        let submitted_delta = audit_after
+            .total_submitted
+            .saturating_sub(audit_before.total_submitted);
+        let completed_delta = audit_after
+            .total_completed
+            .saturating_sub(audit_before.total_completed);
+        if audit_after.in_flight != 0
+            || submitted_delta != expected_packets
+            || completed_delta != expected_packets
+        {
+            return Err(format!(
+                "ISO drain audit mismatch: submitted_delta={submitted_delta} completed_delta={completed_delta} in_flight={} expected={expected_packets}",
+                audit_after.in_flight
+            ));
+        }
+
+        Ok(IsoSmokeProbeResult {
+            left_cis_handle: left_handle,
+            right_cis_handle: right_handle,
+            frames_submitted: frames.len(),
+            audit_before,
+            audit_after,
+        })
+    })();
+
+    let cleanup = cleanup_iso_probe(
+        stack,
+        tracker,
+        &prepared,
+        &mut next,
+        &cis_handles,
+        &paths_may_exist,
+        cig_may_exist,
+    );
+
+    match stage {
+        Ok(result) if cleanup.is_empty() => Ok(result),
+        Ok(_) => Err(format!(
+            "ISO data probe passed but cleanup UNCONFIRMED: {}",
+            cleanup.join("; ")
+        )),
+        Err(error) if cleanup.is_empty() => Err(format!(
+            "ISO data probe failed; rollback confirmed: {error}"
+        )),
+        Err(error) => Err(format!(
+            "ISO data probe failed: {error}; cleanup UNCONFIRMED: {}",
+            cleanup.join("; ")
+        )),
+    }
+}
+
+#[cfg(windows)]
+pub fn execute_iso_smoke(
+    config: IsoSmokeConfig,
+) -> Result<IsoSmokeResult, IsoSmokeExecuteError> {
+    let frames = prepare_transport_frames(config.frames)
+        .map_err(|detail| {
+            IsoSmokeExecuteError::Bond(
+                BondSmokeExecuteError::Preflight(detail),
+            )
+        })?;
+
+    let mut session =
+        open_dual_encrypted_bond_session_for_iso(config.bond)
+            .map_err(IsoSmokeExecuteError::Bond)?;
+    let members = session.members.clone();
+    let probe = run_iso_probe(
+        &session.stack,
+        &mut session.tracker,
+        &members,
+        &frames,
+    );
+    let finish = session.finish();
+
+    match (probe, finish) {
+        (Ok(probe), Ok(bond)) => {
+            Ok(IsoSmokeResult { bond, probe })
+        }
+        (Ok(_), Err(error)) => {
+            Err(IsoSmokeExecuteError::Bond(error))
+        }
+        (Err(detail), Ok(bond)) => {
+            Err(IsoSmokeExecuteError::Probe {
+                detail,
+                cleanup: bond.cleanup,
+                bond_unchanged: bond.bond_unchanged,
+                exit: bond.exit,
+            })
+        }
+        (Err(detail), Err(cleanup)) => {
+            Err(IsoSmokeExecuteError::ProbeAndCleanup {
+                detail,
+                cleanup: Box::new(cleanup),
             })
         }
     }
