@@ -222,7 +222,7 @@ fn wait_gatt_result(
     }
 }
 
-fn execute_gatt(
+pub(crate) fn execute_gatt(
     stack: &crate::hci_host::stack::HciStack,
     tracker: &mut BondSmokeTracker,
     connection: ConnectionToken,
@@ -258,7 +258,7 @@ fn service_with_uuid<'a>(
         .find(|service| service.uuid == wanted)
 }
 
-fn characteristic_with_uuid<'a>(
+pub(crate) fn characteristic_with_uuid<'a>(
     characteristics: &'a [GattCharacteristic],
     uuid: u16,
 ) -> Option<&'a GattCharacteristic> {
@@ -268,7 +268,7 @@ fn characteristic_with_uuid<'a>(
         .find(|characteristic| characteristic.uuid == wanted)
 }
 
-fn required_service(
+pub(crate) fn required_service(
     services: &[GattService],
     uuid: u16,
     label: &str,
