@@ -154,6 +154,27 @@ pub struct CisAclBinding {
     pub acl: ConnectionToken,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CisCreateRequest {
+    pub cig_id: u8,
+    pub bindings: Vec<CisAclBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CisCreateState {
+    Idle,
+    Submitting { cig_id: u8 },
+    AwaitingEstablished {
+        cig_id: u8,
+        established: Vec<EstablishedCis>,
+    },
+    Ready {
+        cig_id: u8,
+        established: Vec<EstablishedCis>,
+    },
+    Failed(CisCreateFailure),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CisCreateConfigError {
     EmptyAllocation,
