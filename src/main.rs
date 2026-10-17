@@ -161,6 +161,149 @@ fn main() {
         }
 
         if args.first().map(String::as_str) == Some("review2")
+            && args.get(1).map(String::as_str) == Some("iso-smoke")
+        {
+            let config = match review2_iso_smoke::parse_iso_smoke_args(
+                &args[2..],
+            ) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!(
+                        "Review-2D iso-smoke argument error: {error}"
+                    );
+                    std::process::exit(2);
+                }
+            };
+
+            println!(
+                "Review-2D ISO HIL: existing bond -> pre-ACL CIS Host bit32 -> dual encrypted ACL -> ASCS Codec/QoS/Enable -> dual CIS -> ISO paths -> bounded HCI ISO TX -> drain -> teardown"
+            );
+            println!("Target set: {}", config.bond.target_name);
+            println!(
+                "Connect timeout: {} s; transport intervals: {} × 10 ms",
+                config.bond.connect_timeout.as_secs(),
+                config.frames
+            );
+            println!(
+                "Policy: existing bond only; no SMP/bond writes. ISO payload is codec-opaque 100-byte transport data; this smoke does NOT claim LC3/acoustic correctness."
+            );
+
+            match review2_iso_smoke::execute_iso_smoke(config) {
+                Ok(result) => {
+                    let submitted = result
+                        .audit_after
+                        .total_submitted
+                        .saturating_sub(
+                            result.audit_before.total_submitted
+                        );
+                    let completed = result
+                        .audit_after
+                        .total_completed
+                        .saturating_sub(
+                            result.audit_before.total_completed
+                        );
+                    println!(
+                        "Firmware bypass: {:?}",
+                        result.bond.firmware
+                    );
+                    println!(
+                        "Controller identity guard: PASS ({})",
+                        result.bond.controller_identity
+                    );
+                    println!(
+                        "Left:  identity={} CIS=0x{:04X}",
+                        result.left_identity_address,
+                        result.left_cis_handle
+                    );
+                    println!(
+                        "Right: identity={} CIS=0x{:04X}",
+                        result.right_identity_address,
+                        result.right_cis_handle
+                    );
+                    println!(
+                        "Controller ISO packet window: {:?}",
+                        result.audit_before.limit
+                    );
+                    println!(
+                        "ISO Host audit: frames={} submitted={} completed={} in_flight_after={}",
+                        result.frames,
+                        submitted,
+                        completed,
+                        result.audit_after.in_flight
+                    );
+                    println!("ISO drain + reverse teardown: PASS");
+                    for (connection, reason) in
+                        &result.bond.cleanup.disconnected
+                    {
+                        println!(
+                            "Cleanup ACL disconnect: handle=0x{:04X}@gen{} reason=0x{:02X}",
+                            connection.connection_handle,
+                            connection.generation,
+                            reason,
+                        );
+                    }
+                    println!(
+                        "Privacy cleanup: {}",
+                        result.bond.cleanup.privacy_cleared
+                    );
+                    println!(
+                        "Bond store unchanged: {}",
+                        result.bond.bond_unchanged
+                    );
+                    println!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        result.bond.exit.hci,
+                        result.bond.exit.transport
+                    );
+                    return;
+                }
+                Err(review2_iso_smoke::IsoSmokeExecuteError::Bond(
+                    error,
+                )) => {
+                    eprintln!(
+                        "Review-2D iso-smoke session FAILED: {error:?}"
+                    );
+                    std::process::exit(1);
+                }
+                Err(review2_iso_smoke::IsoSmokeExecuteError::Probe {
+                    detail,
+                    bond,
+                }) => {
+                    eprintln!(
+                        "Review-2D iso-smoke PROBE FAILED: {detail}"
+                    );
+                    for error in &bond.cleanup.errors {
+                        eprintln!("Cleanup issue: {error}");
+                    }
+                    eprintln!(
+                        "Privacy cleanup: {}; Bond store unchanged: {}",
+                        bond.cleanup.privacy_cleared,
+                        bond.bond_unchanged
+                    );
+                    eprintln!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        bond.exit.hci, bond.exit.transport
+                    );
+                    std::process::exit(1);
+                }
+                Err(
+                    review2_iso_smoke::IsoSmokeExecuteError::ProbeAndCleanup {
+                        detail,
+                        bond,
+                    },
+                ) => {
+                    eprintln!(
+                        "Review-2D iso-smoke PROBE FAILED: {detail}"
+                    );
+                    eprintln!(
+                        "Review-2D session cleanup also FAILED: {bond:?}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if args.first().map(String::as_str) == Some("review2")
             && args.get(1).map(String::as_str) == Some("gatt-smoke")
         {
             let config = match review2_gatt_smoke::parse_gatt_smoke_args(
