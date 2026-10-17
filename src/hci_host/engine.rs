@@ -1666,6 +1666,7 @@ impl HciEngine {
                     transaction.on_command_status(*opcode, *status)
                 }
                 HciObservation::AclSubmitted { .. }
+                | HciObservation::IsoSubmitted { .. }
                 | HciObservation::CompletedPackets { .. } => {
                     FalConnectAction::Ignored
                 }
@@ -2234,6 +2235,7 @@ impl HciEngine {
                 (*opcode, *status)
             }
             HciObservation::AclSubmitted { .. }
+            | HciObservation::IsoSubmitted { .. }
             | HciObservation::CompletedPackets { .. } => return Ok(()),
         };
 
