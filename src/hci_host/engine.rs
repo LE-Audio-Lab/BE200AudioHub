@@ -40,6 +40,9 @@ use super::{
         CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
         CisCreateRequest, CisCreateState, CisCreateTransaction,
     },
+    iso_lifecycle::{
+        CigRemoveAction, CigRemoveState, CigRemoveTransaction,
+    },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
@@ -167,6 +170,8 @@ pub struct HciEngine {
     gatt_reports: VecDeque<GattReport>,
     cig_configure_state: CigConfigureState,
     cig_configure_transaction: Option<CigConfigureTransaction>,
+    cig_remove_state: CigRemoveState,
+    cig_remove_transaction: Option<CigRemoveTransaction>,
     cis_create_state: CisCreateState,
     cis_create_transaction: Option<CisCreateTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
@@ -202,6 +207,8 @@ impl HciEngine {
             gatt_reports: VecDeque::new(),
             cig_configure_state: CigConfigureState::Idle,
             cig_configure_transaction: None,
+            cig_remove_state: CigRemoveState::Idle,
+            cig_remove_transaction: None,
             cis_create_state: CisCreateState::Idle,
             cis_create_transaction: None,
             deferred_device_events: VecDeque::new(),
@@ -426,6 +433,40 @@ impl HciEngine {
 
         self.cig_configure_transaction = Some(transaction);
         self.cig_configure_state = CigConfigureState::Configuring;
+        Ok(())
+    }
+
+    pub fn cig_remove_state(&self) -> &CigRemoveState {
+        &self.cig_remove_state
+    }
+
+    pub fn begin_cig_removal(
+        &mut self,
+        cig_id: u8,
+    ) -> Result<(), EngineFault> {
+        let cis_may_be_active = match &self.cis_create_state {
+            CisCreateState::Idle => false,
+            CisCreateState::Failed(failure) => {
+                !failure.established.is_empty()
+            }
+            _ => true,
+        };
+
+        if self.attach_state != OperationalAttachState::Ready
+            || self.cig_configure_transaction.is_some()
+            || self.cig_remove_transaction.is_some()
+            || self.cis_create_transaction.is_some()
+            || cis_may_be_active
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) = CigRemoveTransaction::begin(cig_id);
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.cig_remove_transaction = Some(transaction);
+        self.cig_remove_state = CigRemoveState::Removing { cig_id };
         Ok(())
     }
 
@@ -1057,6 +1098,49 @@ impl HciEngine {
         else {
             return Ok(());
         };
+
+        if let Some(transaction) = self.cig_remove_transaction.as_mut() {
+            match transaction.on_command_complete(
+                *opcode,
+                status.unwrap_or(0xff),
+                parameters_after_status,
+            ) {
+                CigRemoveAction::Complete { cig_id } => {
+                    self.cig_remove_transaction = None;
+                    self.cig_remove_state = CigRemoveState::Removed { cig_id };
+
+                    let clear_cig = matches!(
+                        &self.cig_configure_state,
+                        CigConfigureState::Ready(allocation)
+                            if allocation.cig_id == cig_id
+                    ) || matches!(
+                        &self.cig_configure_state,
+                        CigConfigureState::Failed(failure)
+                            if failure.cig_id == cig_id
+                    );
+                    if clear_cig {
+                        self.cig_configure_state = CigConfigureState::Idle;
+                    }
+
+                    let clear_cis = matches!(
+                        &self.cis_create_state,
+                        CisCreateState::Failed(failure)
+                            if failure.cig_id == cig_id
+                                && failure.established.is_empty()
+                    );
+                    if clear_cis {
+                        self.cis_create_state = CisCreateState::Idle;
+                    }
+                    return Ok(());
+                }
+                CigRemoveAction::Failed(failure) => {
+                    self.cig_remove_transaction = None;
+                    self.cig_remove_state = CigRemoveState::Failed(failure);
+                    return Ok(());
+                }
+                CigRemoveAction::Ignored => {}
+            }
+        }
 
         let action = {
             let Some(transaction) =
@@ -2049,6 +2133,50 @@ mod tests {
             )
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn engine_removes_cig_only_after_controller_confirms_matching_id() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_cig_configuration(cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 2, 0x40, 0x00, 0x41, 0x00],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine.begin_cig_removal(1).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2065);
+        assert_eq!(
+            engine.cig_remove_state(),
+            &super::super::iso_lifecycle::CigRemoveState::Removing {
+                cig_id: 1,
+            }
+        );
+
+        engine.ingest(complete(0x2065, 0, &[1])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.cig_remove_state(),
+            &super::super::iso_lifecycle::CigRemoveState::Removed {
+                cig_id: 1,
+            }
+        );
+        assert_eq!(
+            engine.cig_configure_state(),
+            &super::super::iso::CigConfigureState::Idle
+        );
+        assert_eq!(
+            engine.cis_create_state(),
+            &super::super::iso::CisCreateState::Idle
+        );
     }
 
     #[test]
