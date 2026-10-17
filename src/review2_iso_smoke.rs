@@ -1035,12 +1035,18 @@ fn configure_cig(
     )
 }
 
+#[derive(Clone, Debug)]
+struct CreateCisProbeFailure {
+    detail: String,
+    established: Vec<EstablishedCis>,
+}
+
 fn create_cis(
     stack: &HciStack,
     tracker: &mut BondSmokeTracker,
     left: &PreparedAse,
     right: &PreparedAse,
-) -> Result<Vec<EstablishedCis>, String> {
+) -> Result<Vec<EstablishedCis>, CreateCisProbeFailure> {
     stack
         .control()
         .try_create_cis(CisCreateRequest {
@@ -1056,28 +1062,57 @@ fn create_cis(
                 },
             ],
         })
-        .map_err(|error| {
-            format!("Create CIS submit rejected: {error:?}")
+        .map_err(|error| CreateCisProbeFailure {
+            detail: format!(
+                "Create CIS submit rejected: {error:?}"
+            ),
+            established: Vec::new(),
         })?;
 
-    wait_hci(
-        stack,
-        tracker,
-        HCI_STAGE_TIMEOUT,
-        "Create CIS",
-        |report| match report {
-            HciReport::CisCreateState(CisCreateState::Ready {
-                cig_id,
-                established,
-            }) if *cig_id == CIG_ID => Some(Ok(established.clone())),
-            HciReport::CisCreateState(CisCreateState::Failed(
-                failure,
-            )) => Some(Err(format!(
-                "Create CIS failed: {failure:?}"
-            ))),
-            _ => None,
-        },
-    )
+    let deadline = Instant::now() + HCI_STAGE_TIMEOUT;
+    loop {
+        match stack.reports().try_recv() {
+            Ok(report) => {
+                tracker.observe(&report);
+                match report {
+                    HciReport::CisCreateState(
+                        CisCreateState::Ready {
+                            cig_id,
+                            established,
+                        },
+                    ) if cig_id == CIG_ID => return Ok(established),
+                    HciReport::CisCreateState(
+                        CisCreateState::Failed(failure),
+                    ) => {
+                        return Err(CreateCisProbeFailure {
+                            detail: format!(
+                                "Create CIS failed: {failure:?}"
+                            ),
+                            established: failure.established,
+                        })
+                    }
+                    _ => {}
+                }
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return Err(CreateCisProbeFailure {
+                        detail:
+                            "Create CIS: timed out".into(),
+                        established: Vec::new(),
+                    });
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err(CreateCisProbeFailure {
+                    detail:
+                        "Create CIS: HCI report lane disconnected".into(),
+                    established: Vec::new(),
+                })
+            }
+        }
+    }
 }
 
 fn cis_handle(
@@ -1562,6 +1597,7 @@ fn run_iso_probe(
     let mut prepared = Vec::new();
     let mut cig_may_exist = false;
     let mut allocated_handles: Option<[u16; 2]> = None;
+    let mut established_handles = Vec::<u16>::new();
     let mut paths_may_exist = Vec::<u16>::new();
     let mut drained = false;
 
@@ -1604,18 +1640,30 @@ fn run_iso_probe(
         enable(stack, tracker, &left, &mut next)?;
         enable(stack, tracker, &right, &mut next)?;
 
-        let established = create_cis(
+        let established = match create_cis(
             stack, tracker, &left, &right,
-        )?;
+        ) {
+            Ok(established) => established,
+            Err(failure) => {
+                established_handles = failure
+                    .established
+                    .iter()
+                    .map(|entry| entry.link.connection_handle)
+                    .collect();
+                return Err(failure.detail);
+            }
+        };
         let handles = [
             cis_handle(&established, LEFT_CIS_ID)?,
             cis_handle(&established, RIGHT_CIS_ID)?,
         ];
         if handles != allocated {
+            established_handles = handles.to_vec();
             return Err(format!(
                 "Create CIS handle mapping changed: allocated={allocated:04X?} established={handles:04X?}"
             ));
         }
+        established_handles = handles.to_vec();
 
         for handle in handles {
             paths_may_exist.push(handle);
@@ -1659,6 +1707,7 @@ fn run_iso_probe(
         for handle in handles.into_iter().rev() {
             let _ = disconnect_cis(stack, tracker, handle)?;
         }
+        established_handles.clear();
         allocated_handles = None;
 
         disable_and_release(stack, tracker, &right, &mut next)?;
@@ -1680,35 +1729,40 @@ fn run_iso_probe(
     if stage.is_err() {
         let mut cleanup_errors = Vec::new();
 
-        if let Some(handles) = allocated_handles {
-            if !drained {
-                if let Err(error) =
-                    begin_and_wait_iso_drain(stack, tracker, handles)
-                {
-                    cleanup_errors.push(format!(
-                        "ISO drain UNCONFIRMED: {error}"
-                    ));
-                }
+        if established_handles.len() == 2
+            && !paths_may_exist.is_empty()
+            && !drained
+        {
+            let handles = [
+                established_handles[0],
+                established_handles[1],
+            ];
+            if let Err(error) =
+                begin_and_wait_iso_drain(stack, tracker, handles)
+            {
+                cleanup_errors.push(format!(
+                    "ISO drain UNCONFIRMED: {error}"
+                ));
             }
+        }
 
-            for &handle in paths_may_exist.iter().rev() {
-                if let Err(error) =
-                    remove_iso_path(stack, tracker, handle)
-                {
-                    cleanup_errors.push(format!(
-                        "ISO path remove 0x{handle:04X} UNCONFIRMED: {error}"
-                    ));
-                }
+        for &handle in paths_may_exist.iter().rev() {
+            if let Err(error) =
+                remove_iso_path(stack, tracker, handle)
+            {
+                cleanup_errors.push(format!(
+                    "ISO path remove 0x{handle:04X} UNCONFIRMED: {error}"
+                ));
             }
+        }
 
-            for handle in handles.into_iter().rev() {
-                if let Err(error) =
-                    disconnect_cis(stack, tracker, handle)
-                {
-                    cleanup_errors.push(format!(
-                        "CIS disconnect 0x{handle:04X} UNCONFIRMED: {error}"
-                    ));
-                }
+        for &handle in established_handles.iter().rev() {
+            if let Err(error) =
+                disconnect_cis(stack, tracker, handle)
+            {
+                cleanup_errors.push(format!(
+                    "CIS disconnect 0x{handle:04X} UNCONFIRMED: {error}"
+                ));
             }
         }
 
