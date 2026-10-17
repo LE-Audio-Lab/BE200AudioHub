@@ -2,7 +2,7 @@
 
 > **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–6 Review continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；当前 Review 状态以 Round6 的 software/HIL 证据为准。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。Experiment historical baseline 与 Review current baseline 必须分开理解；当前 Review 状态以 Round6 §17 的仓库 continuation correction 与当前 `main` software gate 为准。
 
 ## 阅读入口
 
@@ -230,15 +230,15 @@ Shutdown: hci=Stopped transport=Cancelled
 ```text
 Review-1 Runtime + Async Transport      ✅
         ↓
-Review-2A HCI attach/capabilities/scan ✅
+Review-2A HCI attach/capabilities/scan ✅ COMPLETE + HIL
         ↓
-Review-2B ACL/privacy/stored LTK       ✅
+Review-2B ACL/privacy/stored LTK       ✅ COMPLETE + HIL
         ↓
-Review-2C ACL/L2CAP/ATT/GATT           ← NEXT
+Review-2C ACL/L2CAP/ATT/GATT           ✅ SOFTWARE COMPLETE
         ↓
-Review-2D CIG/CIS/ISO Host
+Review-2D CIG/CIS/ISO Host             ✅ SOFTWARE COMPLETE
         ↓
-Control semantic migration
+Control semantic migration             ← NEXT
         ↓
 StreamClock + IsoTxBridge
         ↓
@@ -257,3 +257,24 @@ Profiling / HIL hardening
 - [Round5.md](./Round5.md)
 - [../../docs/reference-index/README.md](../reference-index/README.md)
 
+
+
+### Review-2C / Review-2D continuation — repository truth update
+
+The Round6 conversation summary ended before the repository work did. Current `main` therefore supersedes the earlier “2C NEXT / 2D pending” navigation state while preserving that text as a historical cutoff.
+
+| Stage | Current status | Evidence / boundary |
+|---|---|---|
+| Review-2C ACL/L2CAP/ATT/GATT | **SOFTWARE COMPLETE** | async GATT transaction engine over real ACL/L2CAP/ATT path; discovery/read/write/subscription; fragmented ACL; bounded worker/mailbox |
+| Review-2D CIG/CIS lifecycle | **SOFTWARE COMPLETE** | typed Set/Remove CIG, Create/Disconnect CIS, asynchronous terminal-outcome reduction |
+| Review-2D ISO Data Path | **SOFTWARE COMPLETE** | setup/remove projection, HCI input path readiness, explicit teardown ordering |
+| Review-2D ISO SDU Host | **SOFTWARE COMPLETE** | complete-SDU boundary; pinned Bumble owns ISO sequence/PB/fragmentation/controller queue |
+| Review-2D capacity/admission | **SOFTWARE COMPLETE** | strict per-handle credit audit + pre-Bumble bounded group admission; no hidden unbounded realtime backlog |
+| Review-2D runtime lane | **SOFTWARE COMPLETE** | dedicated bounded `HciIsoTx`; budgeted worker service; stop/control/controller-event priority preserved |
+| Review-2D teardown gate | **SOFTWARE COMPLETE** | reliable drain/resume control; stale non-admitted group dropped atomically; admitted packets wait for true drain |
+| Current deterministic gate | **PASS** | 233/233 tests before documentation closeout; final test/check/build gate run after documentation sync |
+| New Review-2D HIL | **NOT CLAIMED** | external BE200/B3P facts remain inherited from sealed Experiment/R5 HIL |
+
+Key continuation commits include `b450f6ee`, `f9335386`, `260f7458`, `6bc8e696`, `7d97df43`, `9ee2e575`, `498fb5a7`, and `fbbd9327`.
+
+The next implementation stage is **Control semantic migration**. StreamClock / IsoTxBridge / synthetic media remain later stages; transport credit completion must not become media time.
