@@ -739,7 +739,7 @@ mod tests {
                 CigAllocation, CigConfig, CigConfigureState, CisAllocation,
                 CisConfig,
             },
-            mailbox::hci_mailbox,
+            mailbox::{hci_mailbox, hci_mailbox_with_iso},
             privacy::{
                 ResolvingListConfig, ResolvingPeer,
                 DEFAULT_RPA_TIMEOUT_SECONDS,
@@ -1397,6 +1397,58 @@ mod tests {
 
         control.request_stop().unwrap();
         assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    fn iso_test_group() -> IsoSduGroupRequest {
+        IsoSduGroupRequest {
+            sdus: vec![super::super::iso_tx::IsoSduRequest {
+                connection_handle: 0x0900,
+                payload: vec![0x55; 100],
+            }],
+        }
+    }
+
+    #[test]
+    fn urgent_stop_is_not_blocked_by_full_iso_data_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 1, 4, 1);
+        let iso = control.iso_tx();
+        let (transport_tx, _transport_rx) =
+            TransportTx::test_channel(4);
+
+        iso.try_submit_group(iso_test_group()).unwrap();
+        assert_eq!(
+            iso.try_submit_group(iso_test_group()),
+            Err(crate::runtime::mailbox::SendError::Full)
+        );
+        control.request_stop().unwrap();
+
+        let join = spawn_hci_worker(ports, transport_tx);
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
+    fn control_lane_is_serviced_before_iso_data_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 1, 4, 1);
+        let iso = control.iso_tx();
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(4);
+
+        control.try_begin_operational_attach().unwrap();
+        iso.try_submit_group(iso_test_group()).unwrap();
+
+        let join = spawn_hci_worker(ports, transport_tx);
+        assert_eq!(
+            recv_host_packet(&transport_rx),
+            HostPacket::Command(vec![0x02, 0x10, 0x00])
+        );
+        assert_eq!(
+            join.join(),
+            HciWorkerExit::Faulted(HciWorkerFault::Engine(
+                EngineFault::InvalidState
+            ))
+        );
     }
 
     #[test]
