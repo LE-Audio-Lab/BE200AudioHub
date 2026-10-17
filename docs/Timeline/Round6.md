@@ -1,10 +1,10 @@
-# BE200AudioHub · Round 6：Review-2A / Review-2B / Review-2C 封板 + Project Governance
+# BE200AudioHub · Round 6：Review-2A / 2B / 2C / 2D 封板 + Project Governance
 
 > **性质**：Round 6 技术总结、实现推进、静态审计、HIL 证据与纠偏记录。  
-> **时间范围**：2026-10-15—2026-10-18（本网页会话边界）。  
+> **时间范围**：2026-10-15—2026-10-18。Round6 跨越原网页会话与一次 successor-chat continuation；Round 边界按工程里程碑而非单一聊天窗口定义。  
 > **主分支**：`main`。  
-> **阶段变化**：从 Round5 已完成的 Review-1 Runtime / Async Transport 基座继续推进 HCI Host Plane；本轮完成 Review-2A、Review-2B、Review-2C 的软件实现与真实 BE200/Buds3 Pro HIL，并完成 ToolHub 构建纪律与 Apache-2.0 项目治理；Review-2D 只完成设计/旧 R5 oracle 审计后发生会话中断，后续实现属于新聊天 continuation。  
-> **重要口径**：本轮复用已有 R5/R3 成功 bond；不发起新 SMP、不重新配对、不修改持久化 BondStore。后文标记为 **Post-Round6 continuation** 的内容由后续聊天追加，不属于本 Round 网页会话本身。
+> **阶段变化**：从 Round5 已完成的 Review-1 Runtime / Async Transport 基座继续推进 HCI Host Plane；本轮最终完成 Review-2A、Review-2B、Review-2C、Review-2D 的软件实现与真实 BE200/Buds3 Pro HIL，并完成 ToolHub 构建纪律与 Apache-2.0 项目治理。Review-2D 设计阶段曾发生 connection interruption 并迁移到 successor chat，但该迁移现在只作为 Round6 内部 continuation boundary，不再视为 Round 边界。  
+> **重要口径**：本轮复用已有 R5/R3 成功 bond；不发起新 SMP、不重新配对、不修改持久化 BondStore。Round7 从 **Control semantic migration** 开始。
 
 ---
 
@@ -50,9 +50,18 @@ Project / tooling
   fail-closed git-sync-generated          ✅
   Apache-2.0 + NOTICE / third-party audit ✅
 
+Review-2D
+  typed CIG / CIS lifecycle              ✅
+  complete ISO SDU Host boundary         ✅
+  bounded pre-Bumble group admission     ✅
+  dedicated bounded HciIsoTx lane        ✅
+  ISO credit audit + drain gate          ✅
+  ASCS/CIG/CIS/ISO HIL harness           ✅
+  real BE200/Buds3 Pro HIL               ✅ PASS
+
 Round6 boundary
-  Review-2D design + old-R5 oracle audit  ✅
-  Review-2D implementation                 → continued in next chat
+  Review-2A / 2B / 2C / 2D               ✅ COMPLETE
+  next engineering Round                  → Round7 / Control semantic migration
 ```
 
 Review-2B checkpoint software gate：
@@ -63,7 +72,7 @@ cargo check PASS
 cargo build PASS
 ```
 
-本 Round 在 Review-2C 封板后的最终本地 gate 见 §17：`cargo test` **180/180 PASS**，`cargo check` PASS，`cargo build` PASS，working tree clean。
+Review-2C 封板时的软件 gate 见 §17：`cargo test` **180/180 PASS**。Round6 最终封板 gate 已推进到 §24：`cargo test` **247/247 PASS**，`cargo check` PASS，`cargo build` PASS，working tree clean。
 
 最终 Review-2B HIL：
 
@@ -744,7 +753,7 @@ bumble-rs   2026-07-
 公开 claim 必须收窄：
 
 - **不能**宣称“第一个 Windows Bluetooth Host”或“唯一 Windows LE Audio stack”；BTstack/Bumble 都有 Windows/direct-HCI precedent；
-- 当前可以事实性描述为：native Windows userspace Host takeover of commodity Intel BE200，绕过 Windows Bluetooth Host，已完成 firmware/dual encrypted ACL/real LE Audio GATT access；
+- 当前可以事实性描述为：native Windows userspace Host takeover of commodity Intel BE200，绕过 Windows Bluetooth Host，已完成 firmware/dual encrypted ACL/real LE Audio GATT，以及 real dual-CIS / HCI ISO transport + teardown HIL；
 - 等 Review 路径重新完成 CIG/CIS/ISO/LC3/WASAPI end-to-end 后，才适合使用：
   **“To our knowledge, the first publicly documented open-source implementation to take over a commodity Intel PC Bluetooth controller on native Windows and run the complete LE Audio Unicast host path to commercial TWS earbuds without the Windows Bluetooth host stack.”**
 
@@ -789,9 +798,9 @@ Bluetooth control/data:
 
 ---
 
-## 22. Round6 结束时的 Review-2D 设计交接
+## 22. Round6 内部 Chat Migration Boundary：Review-2D 设计交接
 
-2C HIL PASS 后，本轮开始设计 Review-2D，但在实际落第一笔 2D code 前多次 connection interruption，用户随后切换到新聊天继续。因此本 Round 对 2D **只声明设计/审计完成，不声明实现完成**。
+2C HIL PASS 后开始设计 Review-2D；在实际落第一笔 2D code 前多次 connection interruption，随后迁移到 successor chat 继续。**这里是聊天边界，不再作为工程 Round 边界。** Round6 的正式结束点改为 §24 的 Review-2D real HIL closure。
 
 冻结拆分：
 
@@ -819,13 +828,13 @@ Engine integration 阅读到的边界：
 - `QueueHostTransport` 已有 native ISO ↔ H4 adaptation；
 - 2D 应继续使用 `Transaction + typed Action + Engine owner + bounded report` 风格。
 
-> **Round6 网页会话到此结束。后续 2D 实现属于下一聊天，不应反向写成本 Round 已完成。**
+> **原网页会话到此结束；Round6 工程阶段继续。** 后续 §23–§24 来自 successor chat，但仍计入 Round6，因为它们完成的是同一个 Review-2D gate。
 
 ---
 
-## 23. Post-Round6 continuation：Review-2C / Review-2D 后续仓库状态（2026-10-18）
+## 23. Round6 continuation after chat migration：Review-2D 实现（2026-10-18）
 
-> 本节是对 §16 当时截点的**后续事实补充**，不改写前面的历史记录。Round6 对话末尾曾发生输出截断，因此本节只以当前 `main` 源码、Git commit 与 deterministic test 为事实源。
+> 本节来自 successor chat，是 Round6 的工程 continuation。它不改写前面“当时尚未实现 2D”的历史快照，但**正式计入 Round6 最终成果**。事实源仍按当前 `main` 源码、Git commit、deterministic test 与真实 HIL。
 
 §16 写下时，Review-2C 仍标记为 NEXT、2D 为 pending。仓库随后继续推进，实际代码已经越过该状态。
 
@@ -847,7 +856,7 @@ Engine integration 阅读到的边界：
 - bounded GATT mailbox / report surface；
 - read-only real-HIL harness `review2 gatt-smoke`。
 
-Review-2C 已在本 Round §17 达到 **software + real HIL PASS**。本 Post-Round6 continuation 不重复声明新的 2C gate，只记录后续仓库继续演进的事实。
+Review-2C 已在本 Round §17 达到 **software + real HIL PASS**。本 continuation 只承接 Review-2D，不重复声明新的 2C gate。
 
 ### 23.2 Review-2D — CIG / CIS / ISO Host
 
@@ -903,10 +912,242 @@ Review-2A attach / capabilities / scan       ✅ COMPLETE + HIL PASS
 Review-2B privacy / ACL / stored security    ✅ COMPLETE + HIL PASS
 Review-2C ACL / L2CAP / ATT / GATT           ✅ COMPLETE + HIL PASS
 Review-2D CIG / CIS / ISO Host               ✅ SOFTWARE COMPLETE
+                                              → real HIL closure in §24
 
-NEXT: Control semantic migration
+NEXT after Round6 closure: Control semantic migration
       → StreamClock + IsoTxBridge
       → Synthetic Media / First Sound
 ```
 
-本节**不宣称新的 Review-2D 真机 HIL PASS**。BE200 248×8、Buds3 Pro CIG/CIS/ISO Data Path、LC3 First Sound 等外部事实来自 sealed Experiment/R5 HIL；本轮 Review-2D 的完成门槛是将 Host semantics、queue/admission、fairness 与 teardown 约束成新的异步产品架构，并以 deterministic tests 证明。
+本节记录的是 Review-2D software-complete 截点；随后 §24 已完成新的 Review-2D 真机 HIL。sealed Experiment/R5 的 LC3 First Sound 仍是独立历史证据，不能与 Review-2D transport smoke 的 codec-opaque payload 混为同一声学 gate。
+
+
+---
+
+## 24. Round6 final closure：Review-2D Real HIL PASS + Round7 Handoff
+
+### 24.1 HIL harness 的最终边界
+
+为避免把产品 Control / Media 提前塞回 HCI Host，最终新增的 `review2 iso-smoke` 明确是 **HIL-only oracle bridge**。它复用既有 stored bond，并只为证明 Review-2D 的 controller/Host/ISO 生命周期而临时执行最小 LE Audio semantic preamble：
+
+```text
+existing stored bond
+→ resetless attach / controller identity guard
+→ pre-ACL CIS Host Support bit32 set/readback
+→ bounded passive extended scan
+→ stored peer IRK host-side resolve current RPA for both members
+→ controller RL / privacy
+→ dual stored-LTK encrypted ACL
+→ PACS Sink Audio Location → physical Left/Right
+→ ASCS Sink ASE selection
+→ Config Codec
+→ Set CIG
+→ Config QoS
+→ Enable
+→ Create dual CIS
+→ Setup HCI Input ISO Path ×2
+→ 100 stereo interval groups through HciIsoTx
+→ exact submitted/completed audit
+→ ISO drain
+→ Remove ISO Path ×2
+→ Disconnect CIS ×2
+→ Disable/Release ASE
+→ Remove CIG
+→ reverse ACL disconnect / privacy cleanup
+→ bond fingerprint unchanged
+```
+
+该 smoke **不属于产品 Control implementation**。Round7 仍需把 PACS/ASCS/CIG/CIS orchestration 正式迁入 Control semantic owner。
+
+### 24.2 HIL 前发现并修复的真实迁移遗漏
+
+#### A. CIS Host Support bit32
+
+旧 R5 已证明：BE200 在任何 LE ACL 前需要 `HCI LE Set Host Feature (0x2074)` 将 bit32 置 1，并通过 LE feature readback 验证；否则 Create CIS 可返回 `0x0C Command Disallowed`。
+
+Review-2D 最初没有这个 primitive，因此新增 typed transaction：
+
+- pre-ACL guard；
+- cached feature no-op if already enabled；
+- Set Host Feature bit32=1；
+- Command Complete status；
+- LE Read Local Supported Features readback；
+- bit32 must be observed set。
+
+#### B. 多 Sink ASE 假设错误
+
+第一次 ISO smoke 真机到达 ASCS 后失败：
+
+```text
+ASCS Sink ASE: expected exactly one characteristic UUID 0x2BC4, found 2
+```
+
+Buds3 Pro 每个 member 实际暴露 **2 个 Sink ASE**。修复重新采用 sealed R5 deterministic policy：
+
+```text
+enumerate all Sink ASE
+→ every ASE ID nonzero and unique
+→ read current state
+→ choose the lowest ASE ID among Idle Sink ASEs
+→ leave all unselected ASEs untouched
+```
+
+真机随后选择：
+
+```text
+Sink ASEs=2
+selected ASE=1
+handle=0x0046
+```
+
+#### C. pre-connect discovery gate 遗漏
+
+修复多 ASE 后，ISO smoke 连续三次在第一只 member 的 identity-FAL ACL 上 timeout，即使重新入盒/出盒仍一致。
+
+回读 sealed R5 发现真实成功顺序是：
+
+```text
+bit32 pre-ACL
+→ passive extended scan
+→ host-side IRK resolve current member RPA
+→ require 2/2 members currently connectable
+→ configure controller RL/privacy
+→ identity FAL connect
+```
+
+Review ISO smoke 原先漏掉 scan/resolve gate。恢复该 gate 后，真机观测：
+
+```text
+[R2D/DISCOVERY]
+identity=E8:C9:13:EF:2F:23 current=4E:D9:B1:8B:15:FF connectable=PASS
+identity=E8:C9:13:F6:5C:E0 current=57:A6:A5:F2:30:00 connectable=PASS
+```
+
+这一步使用 pinned Bumble SMP privacy helper 验证 RPA，不自行重写 `ah()`。
+
+### 24.3 Review-2D 最终真实 HIL
+
+最终用户在 Windows 本机执行 `review2 iso-smoke --frames 100 --confirm-iso-hil`，得到：
+
+```text
+Firmware bypass: AlreadyOperational
+Controller identity guard: PASS (44:A3:BB:36:94:1B)
+
+[R2D/ASCS]
+E8:C9:13:EF:2F:23 Sink ASEs=2 selected ASE=1 handle=0x0046
+E8:C9:13:F6:5C:E0 Sink ASEs=2 selected ASE=1 handle=0x0046
+
+Left:  identity=E8:C9:13:F6:5C:E0 CIS=0x0900
+Right: identity=E8:C9:13:EF:2F:23 CIS=0x0901
+
+Controller ISO packet window: Some(8)
+ISO Host audit:
+  frames=100
+  submitted=200
+  completed=200
+  in_flight_after=0
+
+ISO drain + reverse teardown: PASS
+
+Cleanup ACL disconnect:
+  handle=0x0801@gen2 reason=0x16
+  handle=0x0800@gen1 reason=0x16
+
+Privacy cleanup: true
+Bond store unchanged: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+这证明新的 Review 架构已经真实打通：
+
+```text
+HciIsoTx
+→ bounded Host admission
+→ Bumble HCI ISO sequence/PB/fragmentation
+→ Transport
+→ Windows BE200 USB bulk OUT
+→ BE200
+→ dual CIS
+→ Galaxy Buds3 Pro
+→ completion credit return
+→ bounded drain
+→ reverse teardown
+```
+
+100 个 stereo intervals 对应每耳 100 个 100-byte SDU；在该 verified controller configuration 下每耳 SDU 各占一个 HCI ISO packet，因此 audit 的 **200 submitted / 200 completed / 0 in-flight** 与真实 controller window=8 完全闭合。
+
+### 24.4 可听输出：额外 endpoint evidence，但不是 LC3 gate
+
+为保持 Review-2D scope，smoke payload 是 deterministic codec-opaque 100-byte pattern，而不是合法 LC3：
+
+```text
+Left  byte[i] = frame_index + i
+Right byte[i] = frame_index + i + 0x55
+(mod 256)
+```
+
+Buds3 Pro 被 ASCS 配置为 LC3/48 kHz/10 ms/100 B，因此会尝试将这些 opaque bytes 当 LC3 frame 解码。用户即使未佩戴耳机、仅拿在手上也听到了明显数字噪声。
+
+该现象只作为**补充 endpoint evidence**：SDU 已经跨过 controller/CIS 到达耳机 codec/output pipeline。它**不**计作合法 LC3、音质、时序或 acoustic First Sound 验收；Review 路径的合法 LC3 synthetic First Sound 属于 Round7 后续 Media 阶段。
+
+### 24.5 Round6 final software gate
+
+最终修复 pre-connect discovery gate 后，ToolHub 结果：
+
+```text
+cargo test --workspace --locked
+247 passed; 0 failed; 0 ignored
+
+cargo check --workspace --locked
+PASS
+
+cargo build --workspace --locked
+PASS
+
+git status
+## main...origin/main
+```
+
+相关后段 commit 锚点：
+
+- `0eab62b6` — typed CIS Host Feature bit32 transaction；
+- `c7e03520` — ISO HIL session pre-ACL bit32 gate；
+- `59a2e5a4` — cumulative ISO submitted/completed audit snapshot；
+- `17c32549` — HIL-only ASCS preparation bridge；
+- `1202e2e4` — cleanup only real Established CIS links；
+- `729d92f1` — `review2 iso-smoke` CLI；
+- `f84c5fc1` — multiple Sink ASE → lowest Idle ASE ID；
+- `3e2f890e` — restore pre-connect bonded-member discovery/RPA resolution；
+- `c361a2d1` — canonical direct `bumble-smp` lock entry。
+
+### 24.6 Round6 正式结束 / Round7 起点
+
+Round6 最终状态：
+
+```text
+Review-1  Runtime / Async Transport          ✅ inherited COMPLETE
+Review-2A Attach / Capabilities / Scan       ✅ COMPLETE + HIL PASS
+Review-2B Privacy / Dual ACL / Stored LTK    ✅ COMPLETE + HIL PASS
+Review-2C ACL / L2CAP / ATT / GATT           ✅ COMPLETE + HIL PASS
+Review-2D CIG / CIS / ISO Host               ✅ COMPLETE + HIL PASS
+```
+
+Round6 在此正式封板。**Round7 从以下工作开始：**
+
+```text
+Control semantic migration
+        ↓
+StreamBinding
+        ↓
+StreamClock + IsoTxBridge
+        ↓
+Synthetic valid-LC3 First Sound
+        ↓
+WASAPI + ASRC
+        ↓
+Lifecycle / Recovery
+        ↓
+Profiling / HIL hardening
+```
+
+Round7 的核心边界：HCI Host 以下视为 sealed substrate。Control / Media 不得重新拥有 raw CIS handle、HCI ISO sequence、PB/fragmentation、controller credit 或 USB endpoint；Number Of Completed Packets 继续只代表 transport capacity，不得推进 media time。
