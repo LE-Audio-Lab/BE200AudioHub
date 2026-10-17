@@ -40,6 +40,7 @@ use super::{
         CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
         CisCreateRequest, CisCreateState, CisCreateTransaction,
     },
+    iso_credit::{IsoCreditAudit, IsoCreditFault},
     iso_lifecycle::{
         CigRemoveAction, CigRemoveState, CigRemoveTransaction,
         CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
@@ -93,6 +94,7 @@ pub enum EngineFault {
         current_generation: Option<u64>,
     },
     AclCredit(AclCreditFault),
+    IsoCredit(IsoCreditFault),
     GattSendRejected { connection_handle: u16 },
     GattReportBacklogFull,
     DeviceEventBacklogFull,
@@ -179,6 +181,7 @@ pub struct HciEngine {
     connection_generations: BTreeMap<u16, u64>,
     next_connection_generation: u64,
     acl_credit_audit: AclCreditAudit,
+    iso_credit_audit: IsoCreditAudit,
     gatt_transactions: BTreeMap<u16, GattTransaction>,
     gatt_mtus: BTreeMap<u16, u16>,
     gatt_poisoned: BTreeMap<u16, GattRequestId>,
@@ -221,6 +224,7 @@ impl HciEngine {
             connection_generations: BTreeMap::new(),
             next_connection_generation: 1,
             acl_credit_audit: AclCreditAudit::default(),
+            iso_credit_audit: IsoCreditAudit::default(),
             gatt_transactions: BTreeMap::new(),
             gatt_mtus: BTreeMap::new(),
             gatt_poisoned: BTreeMap::new(),
@@ -1031,7 +1035,7 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
-            self.process_acl_credit_observation(&observation)?;
+            self.process_data_credit_observation(&observation)?;
             self.process_controller_identity_observation(&observation);
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
@@ -1254,7 +1258,7 @@ impl HciEngine {
         }
     }
 
-    fn process_acl_credit_observation(
+    fn process_data_credit_observation(
         &mut self,
         observation: &HciObservation,
     ) -> Result<(), EngineFault> {
@@ -1277,17 +1281,52 @@ impl HciEngine {
                     .submitted(*connection_handle)
                     .map_err(EngineFault::AclCredit)?;
             }
+            HciObservation::IsoSubmitted {
+                connection_handle,
+            } => {
+                if self.device.cis_link(*connection_handle).is_none() {
+                    return Err(EngineFault::IsoCredit(
+                        IsoCreditFault::UnknownCompletion {
+                            cis_handle: *connection_handle,
+                            completed: 0,
+                        },
+                    ));
+                }
+                self.iso_credit_audit
+                    .submitted(*connection_handle)
+                    .map_err(EngineFault::IsoCredit)?;
+            }
             HciObservation::CompletedPackets { completions } => {
                 for (connection_handle, completed) in completions {
-                    self.acl_credit_audit
-                        .completed(
-                            *connection_handle,
-                            usize::from(*completed),
-                        )
-                        .map_err(EngineFault::AclCredit)?;
+                    let completed = usize::from(*completed);
+                    if self
+                        .connection_generations
+                        .contains_key(connection_handle)
+                    {
+                        self.acl_credit_audit
+                            .completed(*connection_handle, completed)
+                            .map_err(EngineFault::AclCredit)?;
+                    } else if self.device.cis_link(*connection_handle).is_some()
+                        || self
+                            .iso_credit_audit
+                            .in_flight_on(*connection_handle)
+                            > 0
+                    {
+                        self.iso_credit_audit
+                            .completed(*connection_handle, completed)
+                            .map_err(EngineFault::IsoCredit)?;
+                    } else {
+                        return Err(EngineFault::AclCredit(
+                            AclCreditFault::UnknownCompletion {
+                                connection_handle: *connection_handle,
+                                completed,
+                            },
+                        ));
+                    }
                 }
             }
-            _ => {}
+            HciObservation::CommandComplete { .. }
+            | HciObservation::CommandStatus { .. } => {}
         }
         Ok(())
     }
@@ -1958,12 +1997,16 @@ impl HciEngine {
             }
 
             if let Some(handle) = retire_handle {
-                self.acl_credit_audit.flush(handle);
-                self.connection_generations.remove(&handle);
+                if self.connection_generations.remove(&handle).is_some() {
+                    self.acl_credit_audit.flush(handle);
+                } else {
+                    self.iso_credit_audit.flush(handle);
+                }
             }
 
             if is_flush {
                 self.acl_credit_audit.flush_all();
+                self.iso_credit_audit.flush_all();
             }
         }
         Ok(())
@@ -2298,6 +2341,11 @@ impl HciEngine {
                 self.acl_credit_audit
                     .configure(self.device.le_acl_max_in_flight())
                     .map_err(EngineFault::AclCredit)?;
+                if let Some(limit) = self.device.iso_max_in_flight() {
+                    self.iso_credit_audit
+                        .configure(limit)
+                        .map_err(EngineFault::IsoCredit)?;
+                }
                 self.attach_state = OperationalAttachState::Ready;
             } else {
                 self.attach_state = OperationalAttachState::Failed(
