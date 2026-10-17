@@ -39,6 +39,9 @@ pub enum HciObservation {
     AclSubmitted {
         connection_handle: u16,
     },
+    IsoSubmitted {
+        connection_handle: u16,
+    },
     CompletedPackets {
         completions: Vec<(u16, u16)>,
     },
@@ -259,7 +262,15 @@ impl HostTransport for QueueHostTransport {
         _controller_id: usize,
         packet: IsoDataPacket,
     ) -> bool {
-        self.send_native(HCI_ISO_DATA_PACKET, packet.to_bytes())
+        let connection_handle = packet.connection_handle;
+        let sent =
+            self.send_native(HCI_ISO_DATA_PACKET, packet.to_bytes());
+        if sent {
+            self.observations.push_back(HciObservation::IsoSubmitted {
+                connection_handle,
+            });
+        }
+        sent
     }
 
     fn drain_host_events(&mut self, _controller_id: usize) -> Vec<HciPacket> {
@@ -450,6 +461,36 @@ mod tests {
         // Keep the bounded transport lane full; the second ACL must fail and
         // must not be accounted as submitted.
         assert!(!link.send_acl_packet(0, packet));
+        assert!(link.take_observations().is_empty());
+        let _ = rx.try_recv().unwrap();
+    }
+
+    #[test]
+    fn successful_iso_submission_is_journaled_but_failed_enqueue_is_not() {
+        let (tx, rx) = tx(1);
+        let mut link = QueueHostTransport::new(tx);
+
+        let packet = IsoDataPacket {
+            connection_handle: 0x0900,
+            pb_flag: 0b10,
+            ts_flag: 0,
+            data_total_length: 7,
+            time_stamp: None,
+            packet_sequence_number: Some(1),
+            iso_sdu_length: Some(3),
+            packet_status_flag: Some(0),
+            iso_sdu_fragment: vec![1, 2, 3],
+        };
+
+        assert!(link.send_iso_packet(0, packet.clone()));
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::IsoSubmitted {
+                connection_handle: 0x0900,
+            }]
+        );
+
+        assert!(!link.send_iso_packet(0, packet));
         assert!(link.take_observations().is_empty());
         let _ = rx.try_recv().unwrap();
     }
