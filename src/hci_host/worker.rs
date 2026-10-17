@@ -204,6 +204,8 @@ fn run_loop(
                 &mut last_cis_disconnect_state,
                 &mut last_cig_remove_state,
                 &mut last_iso_path_state,
+                &mut iso_drain_state,
+                &mut last_iso_drain_state,
                 &mut last_connection_set,
                 &report_tx,
             ) {
