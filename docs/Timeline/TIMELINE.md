@@ -230,7 +230,9 @@ Shutdown: hci=Stopped transport=Cancelled
 
 `key_size=0` is not interpreted as a zero-byte encryption key; the Review success gate is the controller/Bumble encrypted connection state.
 
-### Round6 formal webpage boundary
+### Round6 internal chat-migration boundary
+
+The original Round6 webpage session ended after Review-2C HIL PASS and Review-2D design/oracle audit. Engineering work then moved to a successor chat. This is preserved as a **conversation boundary only**, not as the final Engineering Round boundary.
 
 ```text
 Review-1 Runtime + Async Transport      ✅
@@ -243,13 +245,15 @@ Review-2C ACL/L2CAP/ATT/GATT           ✅ COMPLETE + HIL
         ↓
 Review-2D design / old-R5 oracle audit ✅
         ↓
-chat migration / handoff
+chat migration
+        ↓
+Review-2D implementation + HIL         continued inside Round6
 ```
 
-### Current repository sequence (includes Post-Round6 continuation)
+### Round6 final engineering sequence
 
 ```text
-Review-1 Runtime + Async Transport      ✅
+Review-1 Runtime + Async Transport      ✅ inherited COMPLETE
         ↓
 Review-2A HCI attach/capabilities/scan ✅ COMPLETE + HIL
         ↓
@@ -257,13 +261,17 @@ Review-2B ACL/privacy/stored LTK       ✅ COMPLETE + HIL
         ↓
 Review-2C ACL/L2CAP/ATT/GATT           ✅ COMPLETE + HIL
         ↓
-Review-2D CIG/CIS/ISO Host             ✅ SOFTWARE COMPLETE
+Review-2D CIG/CIS/ISO Host             ✅ COMPLETE + HIL
         ↓
-Control semantic migration             ← NEXT
+Round6 CLOSED
+        ↓
+Round7: Control semantic migration     ← NEXT
+        ↓
+StreamBinding
         ↓
 StreamClock + IsoTxBridge
         ↓
-Synthetic realtime First Sound
+Synthetic valid-LC3 First Sound
         ↓
 WASAPI + ASRC
         ↓
@@ -272,30 +280,56 @@ Lifecycle / Recovery
 Profiling / HIL hardening
 ```
 
+### Review-2D final status
+
+| Stage | Final Round6 status | Evidence / boundary |
+|---|---|---|
+| CIG/CIS lifecycle | **SOFTWARE + HIL PASS** | typed Set/Remove CIG, Create/Disconnect CIS, asynchronous terminal-outcome reduction; dual live CIS observed on B3P |
+| ISO Data Path | **SOFTWARE + HIL PASS** | HCI Input path setup/remove projected through Bumble and exercised on both real CIS |
+| complete ISO SDU Host | **SOFTWARE + HIL PASS** | pinned Bumble owns ISO sequence/PB/fragmentation/controller queue; real packets reached BE200/Buds3 Pro |
+| capacity/admission | **SOFTWARE + HIL PASS** | pre-Bumble complete interval-group admission; controller window observed as 8 packets |
+| runtime lane | **SOFTWARE + HIL PASS** | dedicated bounded `HciIsoTx`; 100 stereo interval groups sent through real data lane |
+| credit audit | **HIL PASS** | 100 frames × 2 ears = 200 submitted / 200 completed / 0 in-flight after drain |
+| teardown gate | **HIL PASS** | ISO drain → Remove Path ×2 → Disconnect CIS ×2 → Disable/Release ASE → Remove CIG → ACL/privacy cleanup |
+| persistent safety | **HIL PASS** | bond fingerprint unchanged; no SMP/re-pairing; privacy cleanup true |
+| final deterministic gate | **PASS** | 247/247 tests; cargo check PASS; cargo build PASS; working tree clean |
+
+### Review-2D HIL evidence
+
+```text
+[R2D/DISCOVERY]
+identity=E8:C9:13:EF:2F:23 current=4E:D9:B1:8B:15:FF connectable=PASS
+identity=E8:C9:13:F6:5C:E0 current=57:A6:A5:F2:30:00 connectable=PASS
+
+[R2D/ASCS]
+E8:C9:13:EF:2F:23 Sink ASEs=2 selected ASE=1 handle=0x0046
+E8:C9:13:F6:5C:E0 Sink ASEs=2 selected ASE=1 handle=0x0046
+
+Firmware bypass: AlreadyOperational
+Controller identity guard: PASS (44:A3:BB:36:94:1B)
+
+Left:  identity=E8:C9:13:F6:5C:E0 CIS=0x0900
+Right: identity=E8:C9:13:EF:2F:23 CIS=0x0901
+
+Controller ISO packet window: Some(8)
+ISO Host audit: frames=100 submitted=200 completed=200 in_flight_after=0
+ISO drain + reverse teardown: PASS
+
+Cleanup ACL disconnect: handle=0x0801@gen2 reason=0x16
+Cleanup ACL disconnect: handle=0x0800@gen1 reason=0x16
+Privacy cleanup: true
+Bond store unchanged: true
+Shutdown: hci=Stopped transport=Cancelled
+```
+
+The codec-opaque 100-byte transport pattern caused audible digital output from the earbuds, which is useful supplementary endpoint evidence that SDUs reached the remote codec/output pipeline. It is **not** counted as valid-LC3 or acoustic First Sound; that Review-path gate belongs to Round7 Media work.
+
 ### Round6 active references
 
 - [Round6.md](./Round6.md)
 - [Round5.md](./Round5.md)
-- [../../docs/reference-index/README.md](../reference-index/README.md)
+- [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)
+- [../reference-index/README.md](../reference-index/README.md)
 
+Round7 begins at **Control semantic migration**. HCI Host below that boundary is treated as sealed substrate: raw CIS handles, HCI ISO sequence/PB/fragmentation, controller credits and USB endpoint ownership remain below Control/Media. Number Of Completed Packets continues to release transport capacity only and must never define media time.
 
-
-### Post-Round6 continuation — repository truth update
-
-The Round6 webpage session itself ended after Review-2C HIL PASS and Review-2D design/oracle audit. A later chat continued implementation. Current `main` therefore advances beyond the Round6 formal boundary while preserving that boundary as historical evidence.
-
-| Stage | Current status | Evidence / boundary |
-|---|---|---|
-| Review-2C ACL/L2CAP/ATT/GATT | **SOFTWARE + HIL PASS (Round6)** | async GATT transaction engine over real ACL/L2CAP/ATT path; discovery/read/write/subscription; fragmented ACL; bounded worker/mailbox; real dual-member read-only B3P GATT HIL |
-| Review-2D CIG/CIS lifecycle | **SOFTWARE COMPLETE** | typed Set/Remove CIG, Create/Disconnect CIS, asynchronous terminal-outcome reduction |
-| Review-2D ISO Data Path | **SOFTWARE COMPLETE** | setup/remove projection, HCI input path readiness, explicit teardown ordering |
-| Review-2D ISO SDU Host | **SOFTWARE COMPLETE** | complete-SDU boundary; pinned Bumble owns ISO sequence/PB/fragmentation/controller queue |
-| Review-2D capacity/admission | **SOFTWARE COMPLETE** | strict per-handle credit audit + pre-Bumble bounded group admission; no hidden unbounded realtime backlog |
-| Review-2D runtime lane | **SOFTWARE COMPLETE** | dedicated bounded `HciIsoTx`; budgeted worker service; stop/control/controller-event priority preserved |
-| Review-2D teardown gate | **SOFTWARE COMPLETE** | reliable drain/resume control; stale non-admitted group dropped atomically; admitted packets wait for true drain |
-| Current deterministic gate | **PASS** | 233/233 tests before documentation closeout; final test/check/build gate run after documentation sync |
-| New Review-2D HIL | **NOT CLAIMED** | external BE200/B3P facts remain inherited from sealed Experiment/R5 HIL |
-
-Key continuation commits include `b450f6ee`, `f9335386`, `260f7458`, `6bc8e696`, `7d97df43`, `9ee2e575`, `498fb5a7`, and `fbbd9327`.
-
-The next implementation stage is **Control semantic migration**. StreamClock / IsoTxBridge / synthetic media remain later stages; transport credit completion must not become media time.
