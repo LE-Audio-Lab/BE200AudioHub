@@ -1,6 +1,6 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1，Round6 记录 Review-2A/2B HCI Host 封板。旧 Round 原文不回写，新阶段以独立 Round 追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1；Round6 记录 Review-2A/2B HIL，并追加仓库实际继续完成 Review-2C/2D 的代码事实校正。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
 **时间范围**：2026-10-11—持续更新；**活动分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
@@ -16,7 +16,7 @@
 | [Round3.md](./Round3.md) | **Round3 原文**：真正完成 R2.4 两成员 SMP/Bond/CSIS、Stored LTK 验证、R3 双加密 ACL/PACS/ASCS/CAS、USB/SMP/Privacy Quirk |
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
 | [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
-| [Round6.md](./Round6.md) | **Round6**：Review-2A/2B HCI Host、Firmware Bypass、Privacy/FAL、stored-LTK、dual encrypted ACL 与真实 HIL 封板 |
+| [Round6.md](./Round6.md) | **Round6**：Review-2A/2B HIL；后续 continuation 记录 Review-2C GATT 与 Review-2D CIG/CIS/ISO Host 软件完成 |
 
 ## 推荐阅读顺序
 
@@ -52,11 +52,11 @@
 | **Review-1 Runtime + Async Transport** | **Software PASS / COMPLETE** |
 | **Review-2A Attach / Capabilities / Scan** | **Software + HIL PASS** |
 | **Review-2B Privacy / Dual ACL / Stored LTK** | **Software + HIL PASS** |
-| Review-2C ACL / L2CAP / ATT / GATT | **NEXT** |
+| **Review-2C ACL / L2CAP / ATT / GATT** | **Software COMPLETE** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
-**下一步**：Review-2C ACL / L2CAP / ATT / GATT。详见 [Round6.md](./Round6.md) 和 [TIMELINE.md](./TIMELINE.md)。
+**下一步**：Control semantic migration。Review-2C/2D 已在当前 `main` 以 deterministic software gate 封板；详见 [Round6.md](./Round6.md) §17 和 [TIMELINE.md](./TIMELINE.md)。
 
 ## 新 Round 维护规则
 
@@ -81,4 +81,6 @@ Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Rev
 - Review-1 Runtime + Async Transport：complete；
 - Review-2A Attach/Capabilities/Scan：complete + HIL PASS；
 - Review-2B Privacy/Dual ACL/Stored LTK：complete + HIL PASS；
-- Review-2C ACL/L2CAP/ATT/GATT：next。
+- Review-2C ACL/L2CAP/ATT/GATT：software complete；
+- Review-2D CIG/CIS/ISO Host：software complete；
+- 下一阶段：Control semantic migration。
