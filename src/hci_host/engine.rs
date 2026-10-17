@@ -13,7 +13,7 @@ use bumble_hci::{
 };
 use bumble_host::{
     CisControlEvent, Device, DeviceConnectionTransport, DeviceEvent,
-    HostTransport,
+    HostTransport, IsoControlEvent,
 };
 
 use crate::transport::{
@@ -42,6 +42,11 @@ use super::{
     },
     iso_lifecycle::{
         CigRemoveAction, CigRemoveState, CigRemoveTransaction,
+    },
+    iso_path::{
+        IsoDataPathConfig, IsoPathConfigError, IsoPathOperationState,
+        IsoPathRemoveAction, IsoPathRemoveTransaction, IsoPathSetupAction,
+        IsoPathSetupTransaction,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
@@ -72,6 +77,14 @@ pub enum EngineFault {
     StoredEncryptionConfig(StoredEncryptionConfigError),
     CigConfig(CigConfigError),
     CisCreateConfig(CisCreateConfigError),
+    IsoPathConfig(IsoPathConfigError),
+    IsoPathSendRejected { connection_handle: u16 },
+    UnexpectedIsoControlEvent,
+    IsoControlJournalMismatch { connection_handle: u16 },
+    IsoPathProjectionMismatch {
+        connection_handle: u16,
+        direction: u8,
+    },
     StaleConnection {
         connection_handle: u16,
         requested_generation: u64,
@@ -174,6 +187,9 @@ pub struct HciEngine {
     cig_remove_transaction: Option<CigRemoveTransaction>,
     cis_create_state: CisCreateState,
     cis_create_transaction: Option<CisCreateTransaction>,
+    iso_path_state: IsoPathOperationState,
+    iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
+    iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -211,6 +227,9 @@ impl HciEngine {
             cig_remove_transaction: None,
             cis_create_state: CisCreateState::Idle,
             cis_create_transaction: None,
+            iso_path_state: IsoPathOperationState::Idle,
+            iso_path_setup_transaction: None,
+            iso_path_remove_transaction: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -467,6 +486,107 @@ impl HciEngine {
 
         self.cig_remove_transaction = Some(transaction);
         self.cig_remove_state = CigRemoveState::Removing { cig_id };
+        Ok(())
+    }
+
+    pub fn iso_path_state(&self) -> &IsoPathOperationState {
+        &self.iso_path_state
+    }
+
+    fn cis_ready_for_iso_path(&self, connection_handle: u16) -> bool {
+        let ready = matches!(
+            &self.cis_create_state,
+            CisCreateState::Ready { established, .. }
+                if established.iter().any(|cis| {
+                    cis.link.connection_handle == connection_handle
+                })
+        );
+        ready && self.device.cis_link(connection_handle).is_some()
+    }
+
+    pub fn begin_iso_path_setup(
+        &mut self,
+        config: IsoDataPathConfig,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.iso_path_setup_transaction.is_some()
+            || self.iso_path_remove_transaction.is_some()
+            || !self.cis_ready_for_iso_path(config.connection_handle)
+            || self
+                .device
+                .iso_data_path(
+                    config.connection_handle,
+                    config.direction as u8,
+                )
+                .is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, _command) =
+            IsoPathSetupTransaction::begin(config.clone())
+                .map_err(EngineFault::IsoPathConfig)?;
+        let parameters = config.to_bumble_parameters();
+        if !self.device.setup_iso_data_path_with_parameters(
+            &mut self.link,
+            config.connection_handle,
+            parameters,
+        ) {
+            return Err(EngineFault::IsoPathSendRejected {
+                connection_handle: config.connection_handle,
+            });
+        }
+        self.check_link_fault()?;
+
+        self.iso_path_setup_transaction = Some(transaction);
+        self.iso_path_state = IsoPathOperationState::SettingUp(config);
+        Ok(())
+    }
+
+    pub fn begin_iso_path_remove(
+        &mut self,
+        connection_handle: u16,
+        directions: u8,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.iso_path_setup_transaction.is_some()
+            || self.iso_path_remove_transaction.is_some()
+            || !self.cis_ready_for_iso_path(connection_handle)
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, _command) =
+            IsoPathRemoveTransaction::begin(connection_handle, directions)
+                .map_err(EngineFault::IsoPathConfig)?;
+
+        for direction in 0..=1 {
+            if directions & (1 << direction) != 0
+                && self
+                    .device
+                    .iso_data_path(connection_handle, direction)
+                    .is_none()
+            {
+                return Err(EngineFault::InvalidState);
+            }
+        }
+
+        if !self.device.remove_iso_data_path(
+            &mut self.link,
+            connection_handle,
+            directions,
+        ) {
+            return Err(EngineFault::IsoPathSendRejected {
+                connection_handle,
+            });
+        }
+        self.check_link_fault()?;
+
+        self.iso_path_remove_transaction = Some(transaction);
+        self.iso_path_state = IsoPathOperationState::Removing {
+            connection_handle,
+            directions,
+        };
         Ok(())
     }
 
@@ -819,6 +939,7 @@ impl HciEngine {
                 self.collect_scan_observations();
                 self.process_observations()?;
                 self.process_cis_control_events()?;
+                self.process_iso_control_events()?;
                 self.process_gatt_inbox()?;
                 self.process_device_events()?;
                 self.check_link_fault()?;
@@ -896,6 +1017,141 @@ impl HciEngine {
                 continue;
             };
             self.handle_cis_create_action(action);
+        }
+        Ok(())
+    }
+
+    fn process_iso_control_events(&mut self) -> Result<(), EngineFault> {
+        for event in self.device.take_iso_control_events() {
+            match event {
+                IsoControlEvent::DataPathSetup {
+                    status,
+                    connection_handle,
+                    parameters,
+                } => {
+                    let Some(transaction) =
+                        self.iso_path_setup_transaction.as_mut()
+                    else {
+                        return Err(EngineFault::UnexpectedIsoControlEvent);
+                    };
+                    let expected = transaction.config().clone();
+                    if expected.connection_handle != connection_handle
+                        || expected.to_bumble_parameters() != parameters
+                    {
+                        return Err(EngineFault::IsoControlJournalMismatch {
+                            connection_handle,
+                        });
+                    }
+
+                    let action = transaction.on_command_complete(
+                        bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+                        status,
+                        &connection_handle.to_le_bytes(),
+                    );
+                    match action {
+                        IsoPathSetupAction::Complete {
+                            connection_handle,
+                            direction,
+                        } => {
+                            if self
+                                .device
+                                .iso_data_path(
+                                    connection_handle,
+                                    direction as u8,
+                                )
+                                != Some(&parameters)
+                            {
+                                return Err(
+                                    EngineFault::IsoPathProjectionMismatch {
+                                        connection_handle,
+                                        direction: direction as u8,
+                                    },
+                                );
+                            }
+                            self.iso_path_setup_transaction = None;
+                            self.iso_path_state =
+                                IsoPathOperationState::SetupComplete {
+                                    connection_handle,
+                                    direction,
+                                };
+                        }
+                        IsoPathSetupAction::Failed(failure) => {
+                            self.iso_path_setup_transaction = None;
+                            self.iso_path_state =
+                                IsoPathOperationState::Failed(failure);
+                        }
+                        IsoPathSetupAction::Ignored => {
+                            return Err(EngineFault::UnexpectedIsoControlEvent);
+                        }
+                    }
+                }
+                IsoControlEvent::DataPathRemoved {
+                    status,
+                    connection_handle,
+                    directions,
+                } => {
+                    let Some(transaction) =
+                        self.iso_path_remove_transaction.as_mut()
+                    else {
+                        return Err(EngineFault::UnexpectedIsoControlEvent);
+                    };
+                    if transaction.connection_handle() != connection_handle
+                        || transaction.directions() != directions
+                    {
+                        return Err(EngineFault::IsoControlJournalMismatch {
+                            connection_handle,
+                        });
+                    }
+
+                    let action = transaction.on_command_complete(
+                        bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
+                        status,
+                        &connection_handle.to_le_bytes(),
+                    );
+                    match action {
+                        IsoPathRemoveAction::Complete {
+                            connection_handle,
+                            directions,
+                        } => {
+                            for direction in 0..=1 {
+                                if directions & (1 << direction) != 0
+                                    && self
+                                        .device
+                                        .iso_data_path(
+                                            connection_handle,
+                                            direction,
+                                        )
+                                        .is_some()
+                                {
+                                    return Err(
+                                        EngineFault::IsoPathProjectionMismatch {
+                                            connection_handle,
+                                            direction,
+                                        },
+                                    );
+                                }
+                            }
+                            self.iso_path_remove_transaction = None;
+                            self.iso_path_state =
+                                IsoPathOperationState::RemoveComplete {
+                                    connection_handle,
+                                    directions,
+                                };
+                        }
+                        IsoPathRemoveAction::Failed(failure) => {
+                            self.iso_path_remove_transaction = None;
+                            self.iso_path_state =
+                                IsoPathOperationState::Failed(failure);
+                        }
+                        IsoPathRemoveAction::Ignored => {
+                            return Err(EngineFault::UnexpectedIsoControlEvent);
+                        }
+                    }
+                }
+                IsoControlEvent::TxSync { .. } => {
+                    return Err(EngineFault::UnexpectedIsoControlEvent);
+                }
+            }
         }
         Ok(())
     }
