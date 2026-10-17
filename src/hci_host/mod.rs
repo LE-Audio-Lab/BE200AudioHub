@@ -6,6 +6,7 @@ pub mod iso;
 pub mod iso_credit;
 pub mod iso_lifecycle;
 pub mod iso_path;
+pub mod iso_tx;
 pub mod link;
 pub mod mailbox;
 pub mod privacy;
