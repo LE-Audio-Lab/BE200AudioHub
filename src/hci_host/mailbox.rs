@@ -23,6 +23,7 @@ use super::{
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
     },
+    iso_credit::IsoCreditSnapshot,
     iso_host_feature::CisHostFeatureState,
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
@@ -45,6 +46,7 @@ pub enum HciCommand {
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
     EnsureCisHostFeature,
+    ReadIsoTxAudit,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     DisconnectCis { connection_handle: u16 },
@@ -77,6 +79,7 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     CisHostFeatureState(CisHostFeatureState),
+    IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
     CisDisconnectState(CisDisconnectState),
@@ -260,6 +263,14 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::EnsureCisHostFeature)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_iso_tx_audit(
+        &self,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadIsoTxAudit)
             .map_err(map_send_error)
     }
 
