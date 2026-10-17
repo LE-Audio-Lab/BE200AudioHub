@@ -52,8 +52,8 @@ use super::{
         IsoPathSetupAction, IsoPathSetupTransaction,
     },
     iso_tx::{
-        iso_group_fits, iso_group_packet_count, IsoSduConfigError,
-        IsoSduGroupConfigError, IsoSduGroupRequest, IsoSduRequest,
+        iso_group_fits, iso_group_packet_count, IsoDrainConfigError,
+        IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
         IsoSubmitOutcome,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
@@ -87,7 +87,7 @@ pub enum EngineFault {
     CisCreateConfig(CisCreateConfigError),
     IsoPathConfig(IsoPathConfigError),
     IsoPathSendRejected { connection_handle: u16 },
-    IsoSduConfig(IsoSduConfigError),
+    IsoDrainConfig(IsoDrainConfigError),
     IsoSduGroupConfig(IsoSduGroupConfigError),
     IsoControllerPoolUnavailable,
     IsoInputPathNotReady { connection_handle: u16 },
@@ -558,12 +558,41 @@ impl HciEngine {
         &self.iso_path_state
     }
 
-    pub fn submit_iso_sdu(
-        &mut self,
-        request: IsoSduRequest,
-    ) -> Result<IsoSubmitOutcome, EngineFault> {
-        let group = IsoSduGroupRequest::single(request);
-        self.submit_iso_group(&group)
+    pub fn validate_iso_drain(
+        &self,
+        request: &IsoDrainRequest,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready {
+            return Err(EngineFault::InvalidState);
+        }
+        request
+            .validate()
+            .map_err(EngineFault::IsoDrainConfig)?;
+        if request.connection_handles.iter().any(|handle| {
+            !self.cis_state_contains_established_handle(*handle)
+                || self.device.cis_link(*handle).is_none()
+        }) {
+            return Err(EngineFault::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub fn iso_outputs_drained(&self, request: &IsoDrainRequest) -> bool {
+        request
+            .connection_handles
+            .iter()
+            .all(|handle| self.device.iso_output_is_drained(*handle))
+    }
+
+    pub fn iso_input_paths_ready(&self, request: &IsoDrainRequest) -> bool {
+        request.connection_handles.iter().all(|handle| {
+            let expected = IsoDataPathConfig::hci_input(*handle)
+                .to_bumble_parameters();
+            self.device.iso_data_path(
+                *handle,
+                IsoDataPathDirection::Input as u8,
+            ) == Some(&expected)
+        })
     }
 
     pub fn submit_iso_group(
