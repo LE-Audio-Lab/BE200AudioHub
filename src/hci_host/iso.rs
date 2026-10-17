@@ -165,17 +165,13 @@ pub enum CisCreateConfigError {
     CisHandleEqualsAclHandle(u16),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CisCreateFailureKind {
     CommandStatus { status: u8 },
     DuplicateCommandStatus,
     EstablishedBeforeCommandStatus { connection_handle: u16 },
     UnexpectedEstablishedHandle(u16),
-    EstablishedStatus {
-        cis_id: u8,
-        connection_handle: u16,
-        status: u8,
-    },
+    CisEstablishmentFailed,
     DuplicateEstablishedHandle(u16),
 }
 
@@ -183,7 +179,15 @@ pub enum CisCreateFailureKind {
 pub struct CisCreateFailure {
     pub cig_id: u8,
     pub established: Vec<EstablishedCis>,
+    pub failed: Vec<CisEstablishedFailure>,
     pub kind: CisCreateFailureKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CisEstablishedFailure {
+    pub cis_id: u8,
+    pub connection_handle: u16,
+    pub status: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,6 +210,8 @@ pub struct CisCreateTransaction {
     allocation: CigAllocation,
     bindings: Vec<CisAclBinding>,
     established: std::collections::BTreeMap<u16, EstablishedCis>,
+    established_failures:
+        std::collections::BTreeMap<u16, CisEstablishedFailure>,
     command_accepted: bool,
     terminal: bool,
 }
@@ -222,6 +228,7 @@ impl CisCreateTransaction {
                 allocation,
                 bindings,
                 established: std::collections::BTreeMap::new(),
+                established_failures: std::collections::BTreeMap::new(),
                 command_accepted: false,
                 terminal: false,
             },
@@ -288,34 +295,35 @@ impl CisCreateTransaction {
             .find(|binding| binding.cis_id == cis.cis_id)
             .expect("binding completeness validated at transaction start");
 
-        if status != 0 {
-            return self.fail(CisCreateFailureKind::EstablishedStatus {
-                cis_id: cis.cis_id,
-                connection_handle: handle,
-                status,
-            });
-        }
-        if self.established.contains_key(&handle) {
+        if self.established.contains_key(&handle)
+            || self.established_failures.contains_key(&handle)
+        {
             return self.fail(
                 CisCreateFailureKind::DuplicateEstablishedHandle(handle),
             );
         }
 
-        self.established.insert(
-            handle,
-            EstablishedCis {
-                cis_id: cis.cis_id,
-                acl: binding.acl,
-                link,
-            },
-        );
-        let established = self.ordered_established();
-        if established.len() == self.allocation.cis.len() {
-            self.terminal = true;
-            CisCreateAction::Complete(established)
+        if status == 0 {
+            self.established.insert(
+                handle,
+                EstablishedCis {
+                    cis_id: cis.cis_id,
+                    acl: binding.acl,
+                    link,
+                },
+            );
         } else {
-            CisCreateAction::Progress(established)
+            self.established_failures.insert(
+                handle,
+                CisEstablishedFailure {
+                    cis_id: cis.cis_id,
+                    connection_handle: handle,
+                    status,
+                },
+            );
         }
+
+        self.finish_or_progress()
     }
 
     fn ordered_established(&self) -> Vec<EstablishedCis> {
@@ -328,11 +336,46 @@ impl CisCreateTransaction {
             .collect()
     }
 
+    fn ordered_failures(&self) -> Vec<CisEstablishedFailure> {
+        self.allocation
+            .cis
+            .iter()
+            .filter_map(|cis| {
+                self.established_failures
+                    .get(&cis.connection_handle)
+                    .copied()
+            })
+            .collect()
+    }
+
+    fn finish_or_progress(&mut self) -> CisCreateAction {
+        let observed =
+            self.established.len() + self.established_failures.len();
+        let established = self.ordered_established();
+        if observed != self.allocation.cis.len() {
+            return CisCreateAction::Progress(established);
+        }
+
+        self.terminal = true;
+        let failed = self.ordered_failures();
+        if failed.is_empty() {
+            CisCreateAction::Complete(established)
+        } else {
+            CisCreateAction::Failed(CisCreateFailure {
+                cig_id: self.allocation.cig_id,
+                established,
+                failed,
+                kind: CisCreateFailureKind::CisEstablishmentFailed,
+            })
+        }
+    }
+
     fn fail(&mut self, kind: CisCreateFailureKind) -> CisCreateAction {
         self.terminal = true;
         CisCreateAction::Failed(CisCreateFailure {
             cig_id: self.allocation.cig_id,
             established: self.ordered_established(),
+            failed: self.ordered_failures(),
             kind,
         })
     }
@@ -690,12 +733,16 @@ mod tests {
             vec![1]
         );
         assert_eq!(
-            failure.kind,
-            CisCreateFailureKind::EstablishedStatus {
+            failure.failed,
+            vec![CisEstablishedFailure {
                 cis_id: 2,
                 connection_handle: 0x0901,
                 status: 0x3e,
-            }
+            }]
+        );
+        assert_eq!(
+            failure.kind,
+            CisCreateFailureKind::CisEstablishmentFailed
         );
     }
 
@@ -708,6 +755,7 @@ mod tests {
             CisCreateAction::Failed(CisCreateFailure {
                 cig_id: 1,
                 established: vec![],
+                failed: vec![],
                 kind:
                     CisCreateFailureKind::EstablishedBeforeCommandStatus {
                         connection_handle: 0x0900,
@@ -740,6 +788,7 @@ mod tests {
             CisCreateAction::Failed(CisCreateFailure {
                 cig_id: 1,
                 established: vec![],
+                failed: vec![],
                 kind: CisCreateFailureKind::DuplicateCommandStatus,
             })
         );
@@ -765,6 +814,7 @@ mod tests {
             CisCreateAction::Failed(CisCreateFailure {
                 cig_id: 1,
                 established: vec![],
+                failed: vec![],
                 kind: CisCreateFailureKind::CommandStatus { status: 0x0c },
             })
         );
