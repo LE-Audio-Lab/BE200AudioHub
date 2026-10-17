@@ -2766,6 +2766,47 @@ mod tests {
         assert_eq!(established[1].acl, second);
         assert!(engine.device().cis_link(0x0900).is_some());
         assert!(engine.device().cis_link(0x0901).is_some());
+
+        // A remote/controller-initiated CIS teardown must update Review's
+        // live projection even when no local Disconnect transaction exists.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x01, 0x09, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(engine.device().cis_link(0x0901).is_none());
+        assert!(engine.device().cis_link(0x0900).is_some());
+        assert!(matches!(
+            engine.cis_create_state(),
+            super::super::iso::CisCreateState::Ready {
+                cig_id: 1,
+                established,
+            } if established.len() == 1
+                && established[0].link.connection_handle == 0x0900
+        ));
+        assert_eq!(
+            engine.begin_cig_removal(1),
+            Err(EngineFault::InvalidState)
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x09, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert!(engine.device().cis_link(0x0900).is_none());
+        assert_eq!(
+            engine.cis_create_state(),
+            &super::super::iso::CisCreateState::Idle
+        );
+
+        engine.begin_cig_removal(1).unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_REMOVE_CIG_COMMAND
+        );
     }
 
     #[test]
