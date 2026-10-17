@@ -1,3 +1,4 @@
+use bumble_host::IsoDataPathParameters;
 use bumble_hci::{
     codes::{
         HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
@@ -40,6 +41,16 @@ impl IsoDataPathConfig {
             codec_configuration: Vec::new(),
         }
     }
+
+    pub(crate) fn to_bumble_parameters(&self) -> IsoDataPathParameters {
+        IsoDataPathParameters {
+            direction: self.direction as u8,
+            data_path_id: self.data_path_id,
+            codec_id: self.codec_id,
+            controller_delay: self.controller_delay,
+            codec_configuration: self.codec_configuration.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +73,25 @@ pub struct IsoPathFailure {
     pub connection_handle: u16,
     pub may_have_configured: bool,
     pub kind: IsoPathFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoPathOperationState {
+    Idle,
+    SettingUp(IsoDataPathConfig),
+    SetupComplete {
+        connection_handle: u16,
+        direction: IsoDataPathDirection,
+    },
+    Removing {
+        connection_handle: u16,
+        directions: u8,
+    },
+    RemoveComplete {
+        connection_handle: u16,
+        directions: u8,
+    },
+    Failed(IsoPathFailure),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +131,10 @@ pub struct IsoPathSetupTransaction {
 }
 
 impl IsoPathSetupTransaction {
+    pub fn config(&self) -> &IsoDataPathConfig {
+        &self.config
+    }
+
     pub fn begin(
         config: IsoDataPathConfig,
     ) -> Result<(Self, Command), IsoPathConfigError> {
@@ -169,6 +203,14 @@ pub struct IsoPathRemoveTransaction {
 }
 
 impl IsoPathRemoveTransaction {
+    pub const fn connection_handle(&self) -> u16 {
+        self.connection_handle
+    }
+
+    pub const fn directions(&self) -> u8 {
+        self.directions
+    }
+
     pub fn begin(
         connection_handle: u16,
         directions: u8,
