@@ -25,6 +25,7 @@ use super::{
     },
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
+    iso_tx::IsoSduGroupRequest,
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -84,6 +85,12 @@ pub enum HciReport {
 pub struct HciControl {
     tx: Sender<HciCommand>,
     stop_tx: Sender<()>,
+    iso_tx: Sender<IsoSduGroupRequest>,
+}
+
+#[derive(Clone)]
+pub struct HciIsoTx {
+    tx: Sender<IsoSduGroupRequest>,
 }
 
 #[derive(Clone)]
@@ -99,8 +106,11 @@ pub(crate) struct HciWorkerPorts {
     pub control_rx: Receiver<HciCommand>,
     pub stop_rx: Receiver<()>,
     pub controller_rx: Receiver<ControllerPacket>,
+    pub iso_rx: Receiver<IsoSduGroupRequest>,
     pub report_tx: Sender<HciReport>,
 }
+
+const DEFAULT_ISO_DATA_CAPACITY: usize = 4;
 
 pub(crate) fn hci_mailbox(
     controller_capacity: usize,
@@ -112,19 +122,41 @@ pub(crate) fn hci_mailbox(
     HciReportInbox,
     HciWorkerPorts,
 ) {
+    hci_mailbox_with_iso(
+        controller_capacity,
+        control_capacity,
+        report_capacity,
+        DEFAULT_ISO_DATA_CAPACITY,
+    )
+}
+
+pub(crate) fn hci_mailbox_with_iso(
+    controller_capacity: usize,
+    control_capacity: usize,
+    report_capacity: usize,
+    iso_capacity: usize,
+) -> (
+    HciControl,
+    HciIngress,
+    HciReportInbox,
+    HciWorkerPorts,
+) {
     assert!(controller_capacity > 0);
     assert!(control_capacity > 0);
     assert!(report_capacity > 0);
+    assert!(iso_capacity > 0);
 
     let (control_tx, control_rx) = bounded(control_capacity);
     let (stop_tx, stop_rx) = bounded(1);
     let (controller_tx, controller_rx) = bounded(controller_capacity);
+    let (iso_tx, iso_rx) = bounded(iso_capacity);
     let (report_tx, report_rx) = bounded(report_capacity);
 
     (
         HciControl {
             tx: control_tx,
             stop_tx,
+            iso_tx,
         },
         HciIngress { tx: controller_tx },
         HciReportInbox { rx: report_rx },
@@ -132,12 +164,19 @@ pub(crate) fn hci_mailbox(
             control_rx,
             stop_rx,
             controller_rx,
+            iso_rx,
             report_tx,
         },
     )
 }
 
 impl HciControl {
+    pub fn iso_tx(&self) -> HciIsoTx {
+        HciIsoTx {
+            tx: self.iso_tx.clone(),
+        }
+    }
+
     pub fn try_begin_operational_attach(&self) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::BeginOperationalAttach)
@@ -296,6 +335,15 @@ impl HciControl {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Disconnected(_)) => Err(SendError::Disconnected),
         }
+    }
+}
+
+impl HciIsoTx {
+    pub fn try_submit_group(
+        &self,
+        request: IsoSduGroupRequest,
+    ) -> Result<(), SendError> {
+        self.tx.try_send(request).map_err(map_send_error)
     }
 }
 
@@ -552,6 +600,35 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::CancelFalConnection
+        );
+    }
+
+    #[test]
+    fn iso_data_lane_is_bounded_and_independent_from_control() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 1, 1, 1);
+        let iso = control.iso_tx();
+        let group = IsoSduGroupRequest {
+            sdus: vec![super::super::iso_tx::IsoSduRequest {
+                connection_handle: 0x0900,
+                payload: vec![1, 2, 3],
+            }],
+        };
+
+        iso.try_submit_group(group.clone()).unwrap();
+        assert_eq!(
+            iso.try_submit_group(group.clone()),
+            Err(SendError::Full)
+        );
+
+        control.try_begin_operational_attach().unwrap();
+        assert_eq!(
+            ports.iso_rx.try_recv().unwrap(),
+            group
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::BeginOperationalAttach
         );
     }
 
