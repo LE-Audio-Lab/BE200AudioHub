@@ -15,6 +15,7 @@ use crate::{
             ControllerIdentity, ControllerIdentityFailure,
             OperationalAttachState,
         },
+        iso_host_feature::CisHostFeatureState,
         mailbox::{HciReport, HciReportInbox},
         stack::{
             spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
@@ -272,6 +273,7 @@ pub enum BondSmokeRunError {
         expected: [u8; 6],
         actual: [u8; 6],
     },
+    CisHostFeatureFailed(String),
     PrivacyFailed(String),
     ConnectFailed {
         member: String,
@@ -414,6 +416,32 @@ fn wait_controller_identity(
             HciReport::ControllerIdentity(Err(failure)) => {
                 Some(Err(BondSmokeRunError::ControllerIdentity(*failure)))
             }
+            _ => None,
+        },
+    )
+}
+
+fn wait_cis_host_feature_ready(
+    reports: &HciReportInbox,
+    tracker: &mut BondSmokeTracker,
+    timeout: Duration,
+) -> Result<(), BondSmokeRunError> {
+    wait_for_report(
+        reports,
+        tracker,
+        timeout,
+        "CIS host feature",
+        |report, _| match report {
+            HciReport::CisHostFeatureState(
+                CisHostFeatureState::Ready { .. },
+            ) => Some(Ok(())),
+            HciReport::CisHostFeatureState(
+                CisHostFeatureState::Failed(failure),
+            ) => Some(Err(
+                BondSmokeRunError::CisHostFeatureFailed(
+                    format!("{failure:?}"),
+                ),
+            )),
             _ => None,
         },
     )
@@ -727,6 +755,22 @@ pub(crate) fn establish_dual_encrypted_session(
     plan: &BondSmokePlan,
     connect_timeout: Duration,
 ) -> Result<Vec<BondSmokeMemberResult>, BondSmokeRunError> {
+    establish_dual_encrypted_session_with_options(
+        stack,
+        tracker,
+        plan,
+        connect_timeout,
+        false,
+    )
+}
+
+fn establish_dual_encrypted_session_with_options(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+    plan: &BondSmokePlan,
+    connect_timeout: Duration,
+    ensure_cis_host_feature: bool,
+) -> Result<Vec<BondSmokeMemberResult>, BondSmokeRunError> {
     send_control(
         stack.control().try_begin_operational_attach(),
         "begin resetless attach",
@@ -751,6 +795,18 @@ pub(crate) fn establish_dual_encrypted_session(
             expected: plan.controller_identity_le,
             actual: identity.public_address_le,
         });
+    }
+
+    if ensure_cis_host_feature {
+        send_control(
+            stack.control().try_ensure_cis_host_feature(),
+            "ensure CIS Host Support bit32",
+        )?;
+        wait_cis_host_feature_ready(
+            stack.reports(),
+            tracker,
+            Duration::from_secs(5),
+        )?;
     }
 
     send_control(
@@ -963,6 +1019,21 @@ fn fail_open_session(
 pub(crate) fn open_dual_encrypted_bond_session(
     config: BondSmokeConfig,
 ) -> Result<DualEncryptedBondSession, BondSmokeExecuteError> {
+    open_dual_encrypted_bond_session_inner(config, false)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_dual_encrypted_bond_session_for_iso(
+    config: BondSmokeConfig,
+) -> Result<DualEncryptedBondSession, BondSmokeExecuteError> {
+    open_dual_encrypted_bond_session_inner(config, true)
+}
+
+#[cfg(windows)]
+fn open_dual_encrypted_bond_session_inner(
+    config: BondSmokeConfig,
+    ensure_cis_host_feature: bool,
+) -> Result<DualEncryptedBondSession, BondSmokeExecuteError> {
     let before = fingerprint_bond_store(&config.bond_root)
         .map_err(|error| {
             BondSmokeExecuteError::Preflight(format!(
@@ -996,11 +1067,12 @@ pub(crate) fn open_dual_encrypted_bond_session(
         format_address_le(plan.controller_identity_le);
     let stack = spawn_be200_hci_stack(HciStackConfig::default());
     let mut tracker = BondSmokeTracker::default();
-    let members = match establish_dual_encrypted_session(
+    let members = match establish_dual_encrypted_session_with_options(
         &stack,
         &mut tracker,
         &plan,
         config.connect_timeout,
+        ensure_cis_host_feature,
     ) {
         Ok(members) => members,
         Err(primary) => {
