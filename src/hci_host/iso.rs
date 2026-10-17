@@ -1,9 +1,14 @@
 use std::collections::BTreeSet;
 
 use bumble_hci::{
-    codes::HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+    codes::{
+        HCI_LE_CREATE_CIS_COMMAND,
+        HCI_LE_SET_CIG_PARAMETERS_COMMAND,
+    },
     Command,
 };
+
+use super::connection::ConnectionToken;
 
 const MAX_U24: u32 = 0x00ff_ffff;
 const MAX_CONNECTION_HANDLE: u16 = 0x0eff;
@@ -139,6 +144,135 @@ impl CigConfigureTransaction {
                 kind,
             }),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CisAclBinding {
+    pub cis_id: u8,
+    pub acl: ConnectionToken,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CisCreateConfigError {
+    EmptyAllocation,
+    BindingCountMismatch { expected: usize, actual: usize },
+    DuplicateBinding(u8),
+    MissingBinding(u8),
+    UnknownBinding(u8),
+    DuplicateCisHandle(u16),
+    CisHandleEqualsAclHandle(u16),
+}
+
+pub struct CisCreateTransaction {
+    allocation: CigAllocation,
+    bindings: Vec<CisAclBinding>,
+}
+
+impl CisCreateTransaction {
+    pub fn begin(
+        allocation: CigAllocation,
+        bindings: Vec<CisAclBinding>,
+    ) -> Result<(Self, Command), CisCreateConfigError> {
+        validate_cis_create(&allocation, &bindings)?;
+        let command = create_cis_command(&allocation, &bindings);
+        Ok((
+            Self {
+                allocation,
+                bindings,
+            },
+            command,
+        ))
+    }
+
+    pub fn allocation(&self) -> &CigAllocation {
+        &self.allocation
+    }
+
+    pub fn bindings(&self) -> &[CisAclBinding] {
+        &self.bindings
+    }
+}
+
+fn validate_cis_create(
+    allocation: &CigAllocation,
+    bindings: &[CisAclBinding],
+) -> Result<(), CisCreateConfigError> {
+    if allocation.cis.is_empty() {
+        return Err(CisCreateConfigError::EmptyAllocation);
+    }
+    if bindings.len() != allocation.cis.len() {
+        return Err(CisCreateConfigError::BindingCountMismatch {
+            expected: allocation.cis.len(),
+            actual: bindings.len(),
+        });
+    }
+
+    let allocation_ids =
+        allocation.cis.iter().map(|cis| cis.cis_id).collect::<BTreeSet<_>>();
+    let mut binding_ids = BTreeSet::new();
+    for binding in bindings {
+        if !binding_ids.insert(binding.cis_id) {
+            return Err(CisCreateConfigError::DuplicateBinding(
+                binding.cis_id,
+            ));
+        }
+        if !allocation_ids.contains(&binding.cis_id) {
+            return Err(CisCreateConfigError::UnknownBinding(
+                binding.cis_id,
+            ));
+        }
+    }
+    for cis in &allocation.cis {
+        if !binding_ids.contains(&cis.cis_id) {
+            return Err(CisCreateConfigError::MissingBinding(cis.cis_id));
+        }
+    }
+
+    let mut cis_handles = BTreeSet::new();
+    for cis in &allocation.cis {
+        if !cis_handles.insert(cis.connection_handle) {
+            return Err(CisCreateConfigError::DuplicateCisHandle(
+                cis.connection_handle,
+            ));
+        }
+        let acl = bindings
+            .iter()
+            .find(|binding| binding.cis_id == cis.cis_id)
+            .expect("binding completeness validated above")
+            .acl
+            .connection_handle;
+        if cis.connection_handle == acl {
+            return Err(CisCreateConfigError::CisHandleEqualsAclHandle(
+                cis.connection_handle,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn create_cis_command(
+    allocation: &CigAllocation,
+    bindings: &[CisAclBinding],
+) -> Command {
+    let mut cis_connection_handle =
+        Vec::with_capacity(allocation.cis.len());
+    let mut acl_connection_handle =
+        Vec::with_capacity(allocation.cis.len());
+
+    for cis in &allocation.cis {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.cis_id == cis.cis_id)
+            .expect("binding completeness validated before command build");
+        cis_connection_handle.push(cis.connection_handle);
+        acl_connection_handle.push(binding.acl.connection_handle);
+    }
+
+    Command::LeCreateCis {
+        cis_connection_handle,
+        acl_connection_handle,
     }
 }
 
@@ -287,6 +421,107 @@ mod tests {
             max_transport_latency_p_to_c: 95,
             cis: vec![cis(1), cis(2)],
         }
+    }
+
+    fn allocation() -> CigAllocation {
+        CigAllocation {
+            cig_id: 1,
+            cis: vec![
+                CisAllocation {
+                    cis_id: 1,
+                    connection_handle: 0x0900,
+                },
+                CisAllocation {
+                    cis_id: 2,
+                    connection_handle: 0x0901,
+                },
+            ],
+        }
+    }
+
+    fn token(handle: u16, generation: u64) -> ConnectionToken {
+        ConnectionToken {
+            connection_handle: handle,
+            generation,
+        }
+    }
+
+    #[test]
+    fn create_cis_command_follows_allocation_order_not_binding_order() {
+        let bindings = vec![
+            CisAclBinding {
+                cis_id: 2,
+                acl: token(0x0800, 7),
+            },
+            CisAclBinding {
+                cis_id: 1,
+                acl: token(0x0801, 8),
+            },
+        ];
+        let (_transaction, command) =
+            CisCreateTransaction::begin(allocation(), bindings).unwrap();
+        let Command::LeCreateCis {
+            cis_connection_handle,
+            acl_connection_handle,
+        } = command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(cis_connection_handle, vec![0x0900, 0x0901]);
+        assert_eq!(acl_connection_handle, vec![0x0801, 0x0800]);
+    }
+
+    #[test]
+    fn create_cis_allows_multiple_cis_on_one_acl() {
+        let bindings = vec![
+            CisAclBinding {
+                cis_id: 1,
+                acl: token(0x0800, 7),
+            },
+            CisAclBinding {
+                cis_id: 2,
+                acl: token(0x0800, 7),
+            },
+        ];
+        let (_transaction, command) =
+            CisCreateTransaction::begin(allocation(), bindings).unwrap();
+        assert_eq!(command.op_code(), HCI_LE_CREATE_CIS_COMMAND);
+    }
+
+    #[test]
+    fn create_cis_rejects_incomplete_or_unknown_bindings() {
+        assert_eq!(
+            CisCreateTransaction::begin(
+                allocation(),
+                vec![CisAclBinding {
+                    cis_id: 1,
+                    acl: token(0x0800, 7),
+                }],
+            )
+            .err(),
+            Some(CisCreateConfigError::BindingCountMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
+
+        assert_eq!(
+            CisCreateTransaction::begin(
+                allocation(),
+                vec![
+                    CisAclBinding {
+                        cis_id: 1,
+                        acl: token(0x0800, 7),
+                    },
+                    CisAclBinding {
+                        cis_id: 3,
+                        acl: token(0x0801, 8),
+                    },
+                ],
+            )
+            .err(),
+            Some(CisCreateConfigError::UnknownBinding(3))
+        );
     }
 
     #[test]
