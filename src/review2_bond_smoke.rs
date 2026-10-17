@@ -241,7 +241,8 @@ impl BondSmokeTracker {
             | HciReport::CisCreateState(_)
             | HciReport::CisDisconnectState(_)
             | HciReport::CigRemoveState(_)
-            | HciReport::IsoPathState(_) => {}
+            | HciReport::IsoPathState(_)
+            | HciReport::IsoDrainState(_) => {}
         }
     }
 
