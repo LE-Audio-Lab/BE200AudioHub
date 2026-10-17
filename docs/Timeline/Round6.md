@@ -911,8 +911,8 @@ Review-2D 当前状态：
 Review-2A attach / capabilities / scan       ✅ COMPLETE + HIL PASS
 Review-2B privacy / ACL / stored security    ✅ COMPLETE + HIL PASS
 Review-2C ACL / L2CAP / ATT / GATT           ✅ COMPLETE + HIL PASS
-Review-2D CIG / CIS / ISO Host               ✅ SOFTWARE COMPLETE
-                                              → real HIL closure in §24
+Review-2D CIG / CIS / ISO Host               ✅ SOFTWARE COMPLETE AT THIS CHECKPOINT
+                                              → final COMPLETE + HIL PASS in §24
 
 NEXT after Round6 closure: Control semantic migration
       → StreamClock + IsoTxBridge
