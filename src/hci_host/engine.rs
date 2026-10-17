@@ -42,6 +42,8 @@ use super::{
     },
     iso_lifecycle::{
         CigRemoveAction, CigRemoveState, CigRemoveTransaction,
+        CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
+        CisDisconnectTransaction,
     },
     iso_path::{
         IsoDataPathConfig, IsoPathConfigError, IsoPathOperationState,
@@ -187,6 +189,8 @@ pub struct HciEngine {
     cig_remove_transaction: Option<CigRemoveTransaction>,
     cis_create_state: CisCreateState,
     cis_create_transaction: Option<CisCreateTransaction>,
+    cis_disconnect_state: CisDisconnectState,
+    cis_disconnect_transaction: Option<CisDisconnectTransaction>,
     iso_path_state: IsoPathOperationState,
     iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
     iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
@@ -227,6 +231,8 @@ impl HciEngine {
             cig_remove_transaction: None,
             cis_create_state: CisCreateState::Idle,
             cis_create_transaction: None,
+            cis_disconnect_state: CisDisconnectState::Idle,
+            cis_disconnect_transaction: None,
             iso_path_state: IsoPathOperationState::Idle,
             iso_path_setup_transaction: None,
             iso_path_remove_transaction: None,
@@ -464,17 +470,28 @@ impl HciEngine {
         cig_id: u8,
     ) -> Result<(), EngineFault> {
         let cis_may_be_active = match &self.cis_create_state {
-            CisCreateState::Idle => false,
-            CisCreateState::Failed(failure) => {
-                !failure.established.is_empty()
-            }
-            _ => true,
+            CisCreateState::Ready { established, .. } => established.iter().any(
+                |entry| {
+                    self.device
+                        .cis_link(entry.link.connection_handle)
+                        .is_some()
+                },
+            ),
+            CisCreateState::Failed(failure) => failure.established.iter().any(
+                |entry| {
+                    self.device
+                        .cis_link(entry.link.connection_handle)
+                        .is_some()
+                },
+            ),
+            _ => false,
         };
 
         if self.attach_state != OperationalAttachState::Ready
             || self.cig_configure_transaction.is_some()
             || self.cig_remove_transaction.is_some()
             || self.cis_create_transaction.is_some()
+            || self.cis_disconnect_transaction.is_some()
             || cis_may_be_active
         {
             return Err(EngineFault::InvalidState);
@@ -486,6 +503,38 @@ impl HciEngine {
 
         self.cig_remove_transaction = Some(transaction);
         self.cig_remove_state = CigRemoveState::Removing { cig_id };
+        Ok(())
+    }
+
+    pub fn cis_disconnect_state(&self) -> &CisDisconnectState {
+        &self.cis_disconnect_state
+    }
+
+    pub fn begin_cis_disconnect(
+        &mut self,
+        connection_handle: u16,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.disconnect_transaction.is_some()
+            || self.cis_disconnect_transaction.is_some()
+            || self.iso_path_setup_transaction.is_some()
+            || self.iso_path_remove_transaction.is_some()
+            || self.cig_remove_transaction.is_some()
+            || self.device.cis_link(connection_handle).is_none()
+            || self.device.iso_data_path(connection_handle, 0).is_some()
+            || self.device.iso_data_path(connection_handle, 1).is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) =
+            CisDisconnectTransaction::begin(connection_handle);
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.cis_disconnect_transaction = Some(transaction);
+        self.cis_disconnect_state =
+            CisDisconnectState::Submitting { connection_handle };
         Ok(())
     }
 
@@ -676,6 +725,7 @@ impl HciEngine {
     ) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.disconnect_transaction.is_some()
+            || self.cis_disconnect_transaction.is_some()
         {
             return Err(EngineFault::InvalidState);
         }
@@ -984,6 +1034,7 @@ impl HciEngine {
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
+            self.process_cis_disconnect_observation(&observation)?;
             self.process_stored_encryption_observation(&observation)?;
             self.process_cig_observation(&observation)?;
             self.process_scan_observation(&observation)?;
@@ -1507,6 +1558,60 @@ impl HciEngine {
         self.handle_disconnect_action(action)
     }
 
+    fn process_cis_disconnect_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let HciObservation::CommandStatus { opcode, status } = observation else {
+            return Ok(());
+        };
+        if *opcode != HCI_DISCONNECT_COMMAND {
+            return Ok(());
+        }
+
+        let action = {
+            let Some(transaction) =
+                self.cis_disconnect_transaction.as_mut()
+            else {
+                return Ok(());
+            };
+            transaction.on_command_status(*opcode, *status)
+        };
+        self.handle_cis_disconnect_action(action);
+        Ok(())
+    }
+
+    fn handle_cis_disconnect_action(
+        &mut self,
+        action: CisDisconnectAction,
+    ) {
+        match action {
+            CisDisconnectAction::AwaitEvent { connection_handle } => {
+                self.cis_disconnect_state =
+                    CisDisconnectState::AwaitingEvent {
+                        connection_handle,
+                    };
+            }
+            CisDisconnectAction::Disconnected {
+                connection_handle,
+                event_reason,
+            } => {
+                self.cis_disconnect_transaction = None;
+                self.cis_disconnect_state =
+                    CisDisconnectState::Disconnected {
+                        connection_handle,
+                        event_reason,
+                    };
+            }
+            CisDisconnectAction::Failed(failure) => {
+                self.cis_disconnect_transaction = None;
+                self.cis_disconnect_state =
+                    CisDisconnectState::Failed(failure);
+            }
+            CisDisconnectAction::Ignored => {}
+        }
+    }
+
     fn handle_disconnect_action(
         &mut self,
         action: DisconnectAction,
@@ -1819,6 +1924,7 @@ impl HciEngine {
             let mut consumed = false;
             consumed |= self.process_gatt_device_event(&event)?;
             consumed |= self.process_disconnect_device_event(&event)?;
+            consumed |= self.process_cis_disconnect_device_event(&event)?;
             consumed |=
                 self.process_stored_encryption_device_event(&event)?;
             consumed |= self.process_fal_connection_device_event(&event)?;
@@ -1922,6 +2028,47 @@ impl HciEngine {
         }
 
         self.handle_stored_encryption_action(action)?;
+        Ok(true)
+    }
+
+    fn process_cis_disconnect_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Result<bool, EngineFault> {
+        let cis_event = match event {
+            DeviceEvent::Disconnected {
+                connection_handle,
+                reason,
+            } => Some(CisDisconnectEvent::Disconnected {
+                connection_handle: *connection_handle,
+                reason: *reason,
+            }),
+            DeviceEvent::DisconnectionFailed {
+                connection_handle,
+                status,
+            } => Some(CisDisconnectEvent::Failed {
+                connection_handle: *connection_handle,
+                status: *status,
+            }),
+            _ => None,
+        };
+        let Some(cis_event) = cis_event else {
+            return Ok(false);
+        };
+
+        let action = {
+            let Some(transaction) =
+                self.cis_disconnect_transaction.as_mut()
+            else {
+                return Ok(false);
+            };
+            transaction.on_event(cis_event)
+        };
+        if matches!(action, CisDisconnectAction::Ignored) {
+            return Ok(false);
+        }
+
+        self.handle_cis_disconnect_action(action);
         Ok(true)
     }
 
