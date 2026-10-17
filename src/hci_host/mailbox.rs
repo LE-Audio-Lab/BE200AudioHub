@@ -20,7 +20,10 @@ use super::{
         ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
     gatt::{GattReport, GattRequest, GattRequestId},
-    iso::{CigConfig, CigConfigureState},
+    iso::{
+        CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
+    },
+    iso_lifecycle::CigRemoveState,
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -39,6 +42,8 @@ pub enum HciCommand {
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
     ConfigureCig(CigConfig),
+    CreateCis(CisCreateRequest),
+    RemoveCig { cig_id: u8 },
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -60,6 +65,8 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     CigConfigureState(CigConfigureState),
+    CisCreateState(CisCreateState),
+    CigRemoveState(CigRemoveState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
 }
@@ -200,6 +207,21 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::ConfigureCig(config))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_create_cis(
+        &self,
+        request: CisCreateRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::CreateCis(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_remove_cig(&self, cig_id: u8) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::RemoveCig { cig_id })
             .map_err(map_send_error)
     }
 
@@ -344,6 +366,34 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::ConfigureCig(config)
+        );
+    }
+
+    #[test]
+    fn cis_lifecycle_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+
+        let request = CisCreateRequest {
+            cig_id: 1,
+            bindings: vec![super::super::iso::CisAclBinding {
+                cis_id: 1,
+                acl: ConnectionToken {
+                    connection_handle: 0x0800,
+                    generation: 7,
+                },
+            }],
+        };
+        control.try_create_cis(request.clone()).unwrap();
+        control.try_remove_cig(1).unwrap();
+
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::CreateCis(request)
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::RemoveCig { cig_id: 1 }
         );
     }
 
