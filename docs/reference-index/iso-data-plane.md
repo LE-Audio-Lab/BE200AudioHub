@@ -77,6 +77,14 @@ Defines bounded controller capacity.
 
 Adds pending data without changing media time.
 
+Review-2D caveat:
+
+- the controller `max_in_flight` window is bounded;
+- the pinned implementation's waiting `VecDeque` is not capacity-bounded;
+- `Device::send_iso_sdu()` can therefore accept more fragments while controller credits are exhausted.
+
+BE200AudioHub must not use that internal waiting queue as its realtime backlog. HCI performs complete interval-group admission before calling `send_iso_sdu()`. Normal groups may not move Host pending packets beyond the controller window. A legal group whose own fragmentation exceeds that window may be admitted only from a fully drained state, so at most one such logical group can occupy Host waiting state.
+
 ### `poll_ready()`
 
 Only emits data while in-flight count is below configured maximum.
@@ -231,7 +239,9 @@ For every ISO Host implementation test:
 10. completion on one handle cannot release another handle;
 11. over-completion faults;
 12. disconnect flushes only affected handle;
-13. queue full never advances StreamClock.
+13. queue full never advances StreamClock;
+14. a fast producer cannot move an unbounded realtime backlog into Bumble's waiting queue;
+15. group admission is decided before any member is enqueued, so local backpressure cannot create a one-ear partial interval.
 
 ## Credit tests
 
