@@ -34,6 +34,10 @@ use super::{
         GattRequestId, GattResult, GattTransaction, GattValueEvent,
         ATT_DEFAULT_MTU,
     },
+    iso::{
+        CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
+        CigConfigureTransaction,
+    },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
         ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
@@ -61,6 +65,7 @@ pub enum EngineFault {
     FalConnectConfig(FalConnectConfigError),
     DisconnectConfig(DisconnectConfigError),
     StoredEncryptionConfig(StoredEncryptionConfigError),
+    CigConfig(CigConfigError),
     StaleConnection {
         connection_handle: u16,
         requested_generation: u64,
@@ -157,6 +162,8 @@ pub struct HciEngine {
     gatt_mtus: BTreeMap<u16, u16>,
     gatt_poisoned: BTreeMap<u16, GattRequestId>,
     gatt_reports: VecDeque<GattReport>,
+    cig_configure_state: CigConfigureState,
+    cig_configure_transaction: Option<CigConfigureTransaction>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -188,6 +195,8 @@ impl HciEngine {
             gatt_mtus: BTreeMap::new(),
             gatt_poisoned: BTreeMap::new(),
             gatt_reports: VecDeque::new(),
+            cig_configure_state: CigConfigureState::Idle,
+            cig_configure_transaction: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -385,6 +394,32 @@ impl HciEngine {
 
     pub fn gatt_in_flight_count(&self) -> usize {
         self.gatt_transactions.len()
+    }
+
+    pub fn cig_configure_state(&self) -> &CigConfigureState {
+        &self.cig_configure_state
+    }
+
+    pub fn begin_cig_configuration(
+        &mut self,
+        config: CigConfig,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.cig_configure_transaction.is_some()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        let (transaction, command) =
+            CigConfigureTransaction::begin(config)
+                .map_err(EngineFault::CigConfig)?;
+
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+
+        self.cig_configure_transaction = Some(transaction);
+        self.cig_configure_state = CigConfigureState::Configuring;
+        Ok(())
     }
 
     pub fn begin_stored_encryption(
@@ -740,6 +775,7 @@ impl HciEngine {
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
             self.process_stored_encryption_observation(&observation)?;
+            self.process_cig_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
         Ok(())
@@ -882,6 +918,48 @@ impl HciEngine {
                 self.privacy_state = ControllerPrivacyState::Failed(failure);
             }
             PrivacyAction::Ignored => {}
+        }
+        Ok(())
+    }
+
+    fn process_cig_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        let HciObservation::CommandComplete {
+            opcode,
+            status,
+            parameters_after_status,
+        } = observation
+        else {
+            return Ok(());
+        };
+
+        let action = {
+            let Some(transaction) =
+                self.cig_configure_transaction.as_mut()
+            else {
+                return Ok(());
+            };
+            transaction.on_command_complete(
+                *opcode,
+                status.unwrap_or(0xff),
+                parameters_after_status,
+            )
+        };
+
+        match action {
+            CigConfigureAction::Complete(allocation) => {
+                self.cig_configure_transaction = None;
+                self.cig_configure_state =
+                    CigConfigureState::Ready(allocation);
+            }
+            CigConfigureAction::Failed(failure) => {
+                self.cig_configure_transaction = None;
+                self.cig_configure_state =
+                    CigConfigureState::Failed(failure);
+            }
+            CigConfigureAction::Ignored => {}
         }
         Ok(())
     }
@@ -1725,6 +1803,71 @@ mod tests {
         ];
         event.extend_from_slice(extra);
         ControllerPacket::Event(event)
+    }
+
+    fn cig_config() -> super::super::iso::CigConfig {
+        let cis = |cis_id| super::super::iso::CisConfig {
+            cis_id,
+            max_sdu_c_to_p: 100,
+            max_sdu_p_to_c: 0,
+            phy_c_to_p: 2,
+            phy_p_to_c: 1,
+            rtn_c_to_p: 13,
+            rtn_p_to_c: 0,
+        };
+        super::super::iso::CigConfig {
+            cig_id: 1,
+            sdu_interval_c_to_p: 10_000,
+            sdu_interval_p_to_c: 10_000,
+            worst_case_sca: 0,
+            packing: 0,
+            framing: 0,
+            max_transport_latency_c_to_p: 95,
+            max_transport_latency_p_to_c: 95,
+            cis: vec![cis(1), cis(2)],
+        }
+    }
+
+    #[test]
+    fn engine_drives_cig_configuration_from_completion_journal() {
+        let (mut engine, rx) = engine(16);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine.begin_cig_configuration(cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        assert_eq!(
+            engine.cig_configure_state(),
+            &super::super::iso::CigConfigureState::Configuring
+        );
+
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 2, 0x40, 0x00, 0x41, 0x00],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.cig_configure_state(),
+            &super::super::iso::CigConfigureState::Ready(
+                super::super::iso::CigAllocation {
+                    cig_id: 1,
+                    cis: vec![
+                        super::super::iso::CisAllocation {
+                            cis_id: 1,
+                            connection_handle: 0x0040,
+                        },
+                        super::super::iso::CisAllocation {
+                            cis_id: 2,
+                            connection_handle: 0x0041,
+                        },
+                    ],
+                }
+            )
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
 
     #[test]
