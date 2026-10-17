@@ -437,6 +437,10 @@ mod tests {
                 GattFailure, GattFailureKind, GattOperation, GattReport,
                 GattRequest,
             },
+            iso::{
+                CigAllocation, CigConfig, CigConfigureState, CisAllocation,
+                CisConfig,
+            },
             mailbox::hci_mailbox,
             privacy::{
                 ResolvingListConfig, ResolvingPeer,
@@ -804,6 +808,102 @@ mod tests {
             }
             other => panic!("expected connected report, got {other:?}"),
         }
+
+        control.request_stop().unwrap();
+        assert_eq!(join.join(), HciWorkerExit::Stopped);
+    }
+
+    #[test]
+    fn worker_routes_cig_configuration_through_bounded_mailbox() {
+        let (control, ingress, reports, ports) =
+            hci_mailbox(32, 8, 24);
+        let (transport_tx, transport_rx) =
+            TransportTx::test_channel(32);
+        let join = spawn_hci_worker(ports, transport_tx);
+
+        control.try_begin_operational_attach().unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_report(&reports);
+
+        let mut supported =
+            vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
+        supported.resize(2 + 0x44, 0);
+        ingress
+            .try_send_controller(ControllerPacket::Event(supported))
+            .unwrap();
+        let _ = recv_host_packet(&transport_rx);
+        let _ = recv_host_packet(&transport_rx);
+
+        for event in [
+            vec![0x0e, 0x04, 0x01, 0x01, 0x0c, 0x00],
+            vec![0x0e, 0x04, 0x01, 0x01, 0x20, 0x00],
+        ] {
+            ingress
+                .try_send_controller(ControllerPacket::Event(event))
+                .unwrap();
+        }
+        let _ = recv_report(&reports);
+        let _ = recv_report(&reports);
+
+        let cis = |cis_id| CisConfig {
+            cis_id,
+            max_sdu_c_to_p: 100,
+            max_sdu_p_to_c: 0,
+            phy_c_to_p: 2,
+            phy_p_to_c: 1,
+            rtn_c_to_p: 13,
+            rtn_p_to_c: 0,
+        };
+        control
+            .try_configure_cig(CigConfig {
+                cig_id: 1,
+                sdu_interval_c_to_p: 10_000,
+                sdu_interval_p_to_c: 10_000,
+                worst_case_sca: 0,
+                packing: 0,
+                framing: 0,
+                max_transport_latency_c_to_p: 95,
+                max_transport_latency_p_to_c: 95,
+                cis: vec![cis(1), cis(2)],
+            })
+            .unwrap();
+
+        let HostPacket::Command(command) =
+            recv_host_packet(&transport_rx)
+        else {
+            panic!("expected Set CIG command");
+        };
+        assert_eq!(u16::from_le_bytes([command[0], command[1]]), 0x2062);
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::CigConfigureState(CigConfigureState::Configuring)
+        );
+
+        ingress
+            .try_send_controller(ControllerPacket::Event(vec![
+                0x0e, 0x0a, 0x01, 0x62, 0x20, 0x00,
+                0x01, 0x02, 0x40, 0x00, 0x41, 0x00,
+            ]))
+            .unwrap();
+
+        assert_eq!(
+            recv_report(&reports),
+            HciReport::CigConfigureState(CigConfigureState::Ready(
+                CigAllocation {
+                    cig_id: 1,
+                    cis: vec![
+                        CisAllocation {
+                            cis_id: 1,
+                            connection_handle: 0x0040,
+                        },
+                        CisAllocation {
+                            cis_id: 2,
+                            connection_handle: 0x0041,
+                        },
+                    ],
+                }
+            ))
+        );
 
         control.request_stop().unwrap();
         assert_eq!(join.join(), HciWorkerExit::Stopped);
