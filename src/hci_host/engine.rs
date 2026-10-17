@@ -516,10 +516,12 @@ impl HciEngine {
     ) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.disconnect_transaction.is_some()
+            || self.cis_create_transaction.is_some()
             || self.cis_disconnect_transaction.is_some()
             || self.iso_path_setup_transaction.is_some()
             || self.iso_path_remove_transaction.is_some()
             || self.cig_remove_transaction.is_some()
+            || !self.cis_state_contains_established_handle(connection_handle)
             || self.device.cis_link(connection_handle).is_none()
             || self.device.iso_data_path(connection_handle, 0).is_some()
             || self.device.iso_data_path(connection_handle, 1).is_some()
@@ -2031,6 +2033,50 @@ impl HciEngine {
         Ok(true)
     }
 
+    fn cis_state_contains_established_handle(
+        &self,
+        connection_handle: u16,
+    ) -> bool {
+        match &self.cis_create_state {
+            CisCreateState::Ready { established, .. } => established
+                .iter()
+                .any(|cis| cis.link.connection_handle == connection_handle),
+            CisCreateState::Failed(failure) => failure
+                .established
+                .iter()
+                .any(|cis| cis.link.connection_handle == connection_handle),
+            _ => false,
+        }
+    }
+
+    fn retire_established_cis(&mut self, connection_handle: u16) -> bool {
+        let mut become_idle = false;
+        let known = match &mut self.cis_create_state {
+            CisCreateState::Ready { established, .. } => {
+                let before = established.len();
+                established.retain(|cis| {
+                    cis.link.connection_handle != connection_handle
+                });
+                let known = established.len() != before;
+                become_idle = known && established.is_empty();
+                known
+            }
+            CisCreateState::Failed(failure) => {
+                let before = failure.established.len();
+                failure.established.retain(|cis| {
+                    cis.link.connection_handle != connection_handle
+                });
+                failure.established.len() != before
+            }
+            _ => false,
+        };
+
+        if become_idle {
+            self.cis_create_state = CisCreateState::Idle;
+        }
+        known
+    }
+
     fn process_cis_disconnect_device_event(
         &mut self,
         event: &DeviceEvent,
@@ -2056,20 +2102,43 @@ impl HciEngine {
             return Ok(false);
         };
 
-        let action = {
-            let Some(transaction) =
-                self.cis_disconnect_transaction.as_mut()
-            else {
-                return Ok(false);
-            };
-            transaction.on_event(cis_event)
+        let successful_disconnect = match &cis_event {
+            CisDisconnectEvent::Disconnected {
+                connection_handle,
+                reason,
+            } => Some((*connection_handle, *reason)),
+            CisDisconnectEvent::Failed { .. } => None,
         };
-        if matches!(action, CisDisconnectAction::Ignored) {
-            return Ok(false);
+
+        let action = self
+            .cis_disconnect_transaction
+            .as_mut()
+            .map(|transaction| transaction.on_event(cis_event));
+
+        if let Some(action) = action {
+            if !matches!(action, CisDisconnectAction::Ignored) {
+                if let Some((connection_handle, _)) = successful_disconnect {
+                    if !self.retire_established_cis(connection_handle) {
+                        return Err(EngineFault::InvalidState);
+                    }
+                }
+                self.handle_cis_disconnect_action(action);
+                return Ok(true);
+            }
         }
 
-        self.handle_cis_disconnect_action(action);
-        Ok(true)
+        if let Some((connection_handle, reason)) = successful_disconnect {
+            if self.retire_established_cis(connection_handle) {
+                self.cis_disconnect_state =
+                    CisDisconnectState::Disconnected {
+                        connection_handle,
+                        event_reason: reason,
+                    };
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     fn process_disconnect_device_event(
