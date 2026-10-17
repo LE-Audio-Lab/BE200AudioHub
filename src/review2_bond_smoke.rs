@@ -233,6 +233,7 @@ impl BondSmokeTracker {
             HciReport::StoredEncryptionState(state) => {
                 self.encryption = Some(*state)
             }
+            HciReport::CisHostFeatureState(_) => {}
             HciReport::ConnectionSet(snapshot) => {
                 self.connection_set = snapshot.clone()
             }
