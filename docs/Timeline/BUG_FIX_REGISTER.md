@@ -224,14 +224,26 @@ HIL 第三次的 Controller 实测：C→P PHY 2M，Transport Latency **63,210 �
 | **R6R-18** | Long-chat resume caused a duplicate HIL executor/helper draft | Full-file reread showed existing executor; remove duplicate rather than patching conflicts. Cargo duplicate-definition errors prevented merge | **Code + final 151/151** |
 | **R6R-19** | `Cargo.lock` was immediately redirtied after restore, blocking ff-only pull | Cargo/rust-analyzer regenerated lock for new direct dependencies. Commit canonical lock remotely, then reset local branch to origin after confirming Cargo.lock was the only local diff | **Local Git verification** |
 | **R6R-20** | New set_size guard broke an old test fixture | Production guard was correct; fixture lacked `set_size`. Add `set_size: 2` to fixture; no production relaxation | **151/151 tests** |
+| **R6R-21** | Upstream synchronous `GattClient/AttTransport::request()` was tempting to expose as Review GATT API | Synchronous request/wait violates HciContext ownership and timeout policy. Keep Bumble `Device` as ACL/L2CAP/ATT substrate but port discovery/read/write reducer into event-driven typed GATT FSM | **Code + 180/180 + Review-2C HIL** |
+| **R6R-22** | ATT requester timeout/cancel could let a late response be correlated to a later request on the same fixed bearer | ATT has no wire cancel. After local cancel, mark that handle's fixed bearer poisoned until real disconnect; late response is reported/dropped; new request gets `BearerPoisoned` | **Deterministic tests** |
+| **R6R-23** | CAS Included Service discovery cannot assume every include declaration carries UUID inline | ATT include declaration may be 6-byte form with UUID or 4-byte form requiring a follow-up Read of the included service declaration. Implement both, required for CAS→CSIS | **Deterministic tests + B3P HIL CSIS=true** |
+| **R6R-24** | ATT Error Response could be accepted solely because an error arrived while a request was active | Error response also carries `request_opcode_in_error`; require exact match with current request opcode, otherwise Protocol failure | **Deterministic regression test** |
+| **R6R-25** | A happy-path ATT response in one HCI ACL packet would not prove real fragmentation/reassembly ownership | Add response fragmented across HCI ACL pieces; first fragment must not complete transaction, final continuation completes only after Bumble ACL/L2CAP reassembly | **Deterministic regression test** |
+| **R6R-26** | Direct `bumble-att` dependency initially left local lock regeneration fighting ff-only sync | Commit canonical lock remotely and make normal Cargo operations use `--workspace --locked`; dependency changes must land manifest+lock together before local pull | **ToolHub local verification** |
+| **R6R-27** | Generic recovery via `git reset --hard` would violate ToolHub's fixed-capability design | Add fail-closed `git-sync-generated`: only sole unstaged Cargo.lock, clean index, incoming canonical lock, fast-forward; otherwise refuse. Keep generic reset/restore unavailable | **ToolHub operation verified; clean tree correctly refused** |
+| **R6R-28** | First locked `cargo-test` after ToolHub hardening failed with E0063 missing `GattCharacteristic.declaration_handle` | Earlier warning-cleanup accidentally removed the initializer field. Restore `declaration_handle`; rerun test/check/build | **180/180; check/build PASS; git clean** |
 
 ### Round6 closed gates
 
 ```text
 Review-2A attach/capabilities/scan     software + HIL PASS
 Review-2B privacy/dual ACL/stored LTK software + HIL PASS
+Review-2C ACL/L2CAP/ATT/GATT          software + HIL PASS
 Bond mutation                         NONE; fingerprint unchanged
-Next                                  Review-2C ACL/L2CAP/ATT/GATT
+ToolHub normal Cargo gates            --workspace --locked
+Round6 webpage boundary               Review-2D design/oracle audit + handoff
 ```
 
-See [Round6.md](./Round6.md) for the complete implementation and HIL chronology.
+Post-Round6 continuation later completed Review-2D software and moved the current repository next step to Control semantic migration; that later code state is not retroactively counted as a Round6 implementation result.
+
+See [Round6.md](./Round6.md) for the complete implementation/HIL chronology and the explicit separation between Round6 §17–§22 and Post-Round6 §23.
