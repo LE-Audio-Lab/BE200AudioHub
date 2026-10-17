@@ -143,6 +143,64 @@ pub fn iso_group_fits(
         .is_some_and(|total| total <= admission_limit)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsoDrainRequest {
+    pub connection_handles: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsoDrainConfigError {
+    Empty,
+    TooManyHandles { count: usize },
+    InvalidConnectionHandle(u16),
+    DuplicateConnectionHandle(u16),
+}
+
+impl IsoDrainRequest {
+    pub fn validate(&self) -> Result<(), IsoDrainConfigError> {
+        if self.connection_handles.is_empty() {
+            return Err(IsoDrainConfigError::Empty);
+        }
+        if self.connection_handles.len() > MAX_ISO_SDU_GROUP_MEMBERS {
+            return Err(IsoDrainConfigError::TooManyHandles {
+                count: self.connection_handles.len(),
+            });
+        }
+
+        let mut handles = BTreeSet::new();
+        for &handle in &self.connection_handles {
+            if handle > MAX_HCI_CONNECTION_HANDLE {
+                return Err(
+                    IsoDrainConfigError::InvalidConnectionHandle(handle),
+                );
+            }
+            if !handles.insert(handle) {
+                return Err(
+                    IsoDrainConfigError::DuplicateConnectionHandle(handle),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoDrainState {
+    Idle,
+    Draining(IsoDrainRequest),
+    Drained(IsoDrainRequest),
+}
+
+pub fn iso_group_touches_handles(
+    group: &IsoSduGroupRequest,
+    handles: &BTreeSet<u16>,
+) -> bool {
+    group
+        .sdus
+        .iter()
+        .any(|sdu| handles.contains(&sdu.connection_handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +210,50 @@ mod tests {
             connection_handle: handle,
             payload: vec![0; length],
         }
+    }
+
+    #[test]
+    fn drain_request_is_bounded_and_handle_unique() {
+        IsoDrainRequest {
+            connection_handles: vec![0x0900, 0x0901],
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            IsoDrainRequest {
+                connection_handles: vec![],
+            }
+            .validate(),
+            Err(IsoDrainConfigError::Empty)
+        );
+        assert_eq!(
+            IsoDrainRequest {
+                connection_handles: vec![0x0900, 0x0901, 0x0902],
+            }
+            .validate(),
+            Err(IsoDrainConfigError::TooManyHandles { count: 3 })
+        );
+        assert_eq!(
+            IsoDrainRequest {
+                connection_handles: vec![0x0900, 0x0900],
+            }
+            .validate(),
+            Err(IsoDrainConfigError::DuplicateConnectionHandle(
+                0x0900,
+            ))
+        );
+    }
+
+    #[test]
+    fn drain_handle_match_is_group_atomic() {
+        let group = IsoSduGroupRequest {
+            sdus: vec![sdu(0x0900, 100), sdu(0x0901, 100)],
+        };
+        let handles = [0x0901].into_iter().collect();
+        assert!(iso_group_touches_handles(&group, &handles));
+
+        let other = [0x0902].into_iter().collect();
+        assert!(!iso_group_touches_handles(&group, &other));
     }
 
     #[test]
