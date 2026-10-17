@@ -1,6 +1,6 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1；Round6 的网页会话边界记录 Review-2A/2B/2C 软件与真实 HIL、ToolHub 构建纪律和 Apache-2.0 项目治理，并明确在 Review-2D 设计审计后切换到新聊天。Round6 文末保留后续聊天追加的 Post-Round6 continuation，用于记录当前仓库继续完成 Review-2D 的事实。旧 Round 原文不回写，新阶段以独立 Round 追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1；Round6 跨越原网页会话与 successor-chat continuation，最终完成 Review-2A/2B/2C/2D 的软件实现与真实 HIL、ToolHub 构建纪律和 Apache-2.0 项目治理。聊天迁移只作为 Round6 内部历史边界，不再视为 Engineering Round 边界；Round7 从 Control semantic migration 开始。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
 **时间范围**：2026-10-11—持续更新；**活动分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
@@ -16,7 +16,7 @@
 | [Round3.md](./Round3.md) | **Round3 原文**：真正完成 R2.4 两成员 SMP/Bond/CSIS、Stored LTK 验证、R3 双加密 ACL/PACS/ASCS/CAS、USB/SMP/Privacy Quirk |
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
 | [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
-| [Round6.md](./Round6.md) | **Round6**：Review-2A/2B/2C software + HIL、ToolHub locked workflow、Apache-2.0 governance；网页会话止于 Review-2D 设计审计，文末 Post-Round6 continuation 记录后续 2D 软件完成 |
+| [Round6.md](./Round6.md) | **Round6**：Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部发生 chat migration，但 Round6 最终在 Review-2D HIL 后封板 |
 
 ## 推荐阅读顺序
 
@@ -53,10 +53,11 @@
 | **Review-2A Attach / Capabilities / Scan** | **Software + HIL PASS** |
 | **Review-2B Privacy / Dual ACL / Stored LTK** | **Software + HIL PASS** |
 | **Review-2C ACL / L2CAP / ATT / GATT** | **Software + HIL PASS** |
+| **Review-2D CIG / CIS / ISO Host** | **Software + HIL PASS** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
-**下一步**：Control semantic migration。Round6 本轮自身已完成 Review-2C software + real HIL；Review-2D 的 software-complete 状态来自文末 **Post-Round6 continuation**，不是 Round6 网页会话内完成。详见 [Round6.md](./Round6.md) §17–§23 和 [TIMELINE.md](./TIMELINE.md)。
+**下一步 / Round7 起点**：Control semantic migration。Round6 已正式完成 Review-2A/2B/2C/2D；Review-2D successor-chat implementation 与 real HIL 现在计入 Round6 工程成果。详见 [Round6.md](./Round6.md) §17–§24 和 [TIMELINE.md](./TIMELINE.md)。
 
 ## 新 Round 维护规则
 
@@ -82,5 +83,6 @@ Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Rev
 - Review-2A Attach/Capabilities/Scan：complete + HIL PASS；
 - Review-2B Privacy/Dual ACL/Stored LTK：complete + HIL PASS；
 - Review-2C ACL/L2CAP/ATT/GATT：complete + real HIL PASS；
-- Review-2D CIG/CIS/ISO Host：software complete；
-- 下一阶段：Control semantic migration。
+- Review-2D CIG/CIS/ISO Host：complete + real HIL PASS；
+- Round6：正式封板；
+- Round7：从 Control semantic migration 开始。
