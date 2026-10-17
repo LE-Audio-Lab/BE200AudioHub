@@ -8,6 +8,7 @@ mod review2;
 mod review2_bond;
 mod review2_bond_smoke;
 mod review2_gatt_smoke;
+mod review2_iso_smoke;
 
 fn main() {
     #[cfg(windows)]
