@@ -25,7 +25,7 @@ use super::{
     },
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
-    iso_tx::IsoSduGroupRequest,
+    iso_tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -52,6 +52,8 @@ pub enum HciCommand {
         connection_handle: u16,
         directions: u8,
     },
+    BeginIsoDrain(IsoDrainRequest),
+    ResumeIsoData(IsoDrainRequest),
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -77,6 +79,7 @@ pub enum HciReport {
     CisDisconnectState(CisDisconnectState),
     CigRemoveState(CigRemoveState),
     IsoPathState(IsoPathOperationState),
+    IsoDrainState(IsoDrainState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
 }
@@ -306,6 +309,24 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_begin_iso_drain(
+        &self,
+        request: IsoDrainRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BeginIsoDrain(request))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_resume_iso_data(
+        &self,
+        request: IsoDrainRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ResumeIsoData(request))
+            .map_err(map_send_error)
+    }
+
     pub fn try_begin_gatt(
         &self,
         request: GattRequest,
@@ -513,6 +534,27 @@ mod tests {
                 connection_handle: 0x0900,
                 directions: 0x01,
             }
+        );
+    }
+
+    #[test]
+    fn iso_drain_gate_uses_reliable_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox(1, 2, 1);
+        let request = IsoDrainRequest {
+            connection_handles: vec![0x0900, 0x0901],
+        };
+
+        control.try_begin_iso_drain(request.clone()).unwrap();
+        control.try_resume_iso_data(request.clone()).unwrap();
+
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::BeginIsoDrain(request.clone())
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::ResumeIsoData(request)
         );
     }
 
