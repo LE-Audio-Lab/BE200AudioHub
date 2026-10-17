@@ -486,3 +486,94 @@ Phase 8 Clock discipline / ASRC         pending
 > **Review-2C：在已经封板的 dual encrypted ACL / generation / credit substrate 上迁移 ACL routing、L2CAP、ATT、GATT 与 encrypted service access。**
 
 除非新的 HIL 或 deterministic regression 给出明确证据，不重新打开 Pairing、Bond、Review-2A attach 或 Review-2B privacy/connection/stored-LTK。
+
+
+---
+
+## 17. Later continuation correction：Review-2C / Review-2D 实际代码状态（2026-10-18）
+
+> 本节是对 §16 当时截点的**后续事实补充**，不改写前面的历史记录。Round6 对话末尾曾发生输出截断，因此本节只以当前 `main` 源码、Git commit 与 deterministic test 为事实源。
+
+§16 写下时，Review-2C 仍标记为 NEXT、2D 为 pending。仓库随后继续推进，实际代码已经越过该状态。
+
+### 17.1 Review-2C — ACL / L2CAP / ATT / GATT
+
+当前 Review 路径已经具备：
+
+- 真实 ACL → L2CAP → fixed ATT bearer 数据路径；
+- fragmented HCI ACL reassembly；
+- per-ACL request isolation；
+- MTU exchange；
+- primary / included service discovery；
+- characteristic / descriptor discovery；
+- short / long read；
+- write request / write command；
+- subscribe / unsubscribe；
+- notification / indication；
+- encrypted-current-connection gate；
+- bounded GATT mailbox / report surface；
+- read-only real-HIL harness `review2 gatt-smoke`。
+
+因此 **Review-2C 软件实现已 COMPLETE**。本节不声明新的 2C HIL gate；真实 Buds attribute/service assumptions 仍以已有实验/HIL 证据和显式 HIL harness 为边界。
+
+### 17.2 Review-2D — CIG / CIS / ISO Host
+
+Review-2D 当前实现完成：
+
+1. typed CIG configure / remove transaction；
+2. typed Create CIS request + asynchronous Command Status / LE CIS Established reducer；
+3. dual-CIS partial-failure collection与显式 disconnect lifecycle；
+4. HCI ISO Data Path setup / remove transaction与 Device projection consistency check；
+5. strict ISO packet submitted/completed audit，per-handle completion、over-completion fault、disconnect-local flush；
+6. complete ISO SDU Host boundary：HCI sequence、PB、fragmentation、controller packet queue 由 pinned Bumble Host owning；
+7. **bounded interval-group admission**：在进入 Bumble queue 前按真实 controller ISO packet length/window 计算完整 group 所需 fragments；
+8. 独立 bounded `HciIsoTx` realtime data lane，不复用 reliable control mailbox；
+9. HCI worker budget/fairness：stop → bounded control → bounded controller events → bounded ISO group service；
+10. controller credit 满时只保留一个 HCI-worker pending group，并停止继续 drain data lane，避免把 realtime backlog 搬进 Bumble 内部 unbounded waiting `VecDeque`；
+11. reliable ISO drain/resume gate：teardown 前先 block 对应 CIS、整组丢弃尚未 Host-admit 的 stale realtime data，再等待已经提交的 Host/controller packets 真实 drain；
+12. stop/control 在 ISO data pressure 下仍保持可服务，确定性测试锁定该优先级。
+
+关键实现锚点：
+
+- `b450f6ee` — complete ISO SDU through HCI engine；
+- `f9335386` — bounded interval-group admission model；
+- `260f7458` — engine-side pre-Bumble group admission；
+- `2678827a` / `6bc8e696` — dedicated ISO data lane + worker fairness；
+- `7d97df43` — 248 B × 8 controller-window deterministic integration；
+- `9ee2e575` — drain gate / teardown protection；
+- `498fb5a7` — ISO data pressure fairness tests；
+- `fbbd9327` — keep public submission boundary group-only。
+
+### 17.3 为什么额外做 Host admission
+
+Pinned Bumble `DataPacketQueue` 只限制 controller `max_in_flight`；其 waiting packet `VecDeque` 本身没有容量上限。因此仅在 Bridge→HCI 入口使用 bounded mailbox 仍不够：如果 HCI worker 持续消费 mailbox，realtime backlog 会被转移到 Bumble 内部并重新变成无界延迟。
+
+Review-2D 的规则因此冻结为：
+
+> **在调用 `Device::send_iso_sdu()` 之前，对完整 interval group 做 admission。正常 group 不得使 Host pending packet 数超过 controller window；一个自身 fragmentation 已大于 window 的合法 group 只能从完全 drained 状态进入。**
+
+对于 sealed B3P First Sound 参数，历史 HIL 已知 BE200 报告 ISO pool = **248 B × 8 packets**，48 kHz / 10 ms / 100 B mono-per-ear 每耳各占一个 HCI ISO packet，因此正常情况下一个 8-packet window 最多容纳四个 stereo intervals。该数值只作为已知硬件 fixture；runtime 使用实际 controller capability，不硬编码 8。
+
+### 17.4 Review-2D deterministic gate
+
+完成本节代码后，本地 ToolHub 当前软件门槛：
+
+```text
+cargo test --workspace --locked
+233 passed; 0 failed; 0 ignored
+```
+
+Review-2D 当前状态：
+
+```text
+Review-2A attach / capabilities / scan       ✅ COMPLETE + HIL PASS
+Review-2B privacy / ACL / stored security    ✅ COMPLETE + HIL PASS
+Review-2C ACL / L2CAP / ATT / GATT           ✅ SOFTWARE COMPLETE
+Review-2D CIG / CIS / ISO Host               ✅ SOFTWARE COMPLETE
+
+NEXT: Control semantic migration
+      → StreamClock + IsoTxBridge
+      → Synthetic Media / First Sound
+```
+
+本节**不宣称新的 Review-2D 真机 HIL PASS**。BE200 248×8、Buds3 Pro CIG/CIS/ISO Data Path、LC3 First Sound 等外部事实来自 sealed Experiment/R5 HIL；本轮 Review-2D 的完成门槛是将 Host semantics、queue/admission、fairness 与 teardown 约束成新的异步产品架构，并以 deterministic tests 证明。
