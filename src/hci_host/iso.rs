@@ -598,6 +598,124 @@ mod tests {
         }
     }
 
+    fn bindings() -> Vec<CisAclBinding> {
+        vec![
+            CisAclBinding {
+                cis_id: 1,
+                acl: token(0x0800, 7),
+            },
+            CisAclBinding {
+                cis_id: 2,
+                acl: token(0x0801, 8),
+            },
+        ]
+    }
+
+    fn link(handle: u16) -> CisLinkInfo {
+        CisLinkInfo {
+            connection_handle: handle,
+            cig_sync_delay: 40_000,
+            cis_sync_delay: 20_000,
+            transport_latency_c_to_p: 35_000,
+            transport_latency_p_to_c: 0,
+            phy_c_to_p: 2,
+            phy_p_to_c: 1,
+            nse: 2,
+            bn_c_to_p: 1,
+            bn_p_to_c: 0,
+            ft_c_to_p: 2,
+            ft_p_to_c: 0,
+            max_pdu_c_to_p: 100,
+            max_pdu_p_to_c: 0,
+            iso_interval: 8,
+        }
+    }
+
+    #[test]
+    fn create_cis_accepts_out_of_order_established_events() {
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings()).unwrap();
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::AwaitingEstablished
+        );
+
+        let CisCreateAction::Progress(first) =
+            transaction.on_established(0, link(0x0901))
+        else {
+            panic!("expected partial CIS progress");
+        };
+        assert_eq!(
+            first.iter().map(|cis| cis.cis_id).collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let CisCreateAction::Complete(done) =
+            transaction.on_established(0, link(0x0900))
+        else {
+            panic!("expected completed CIS set");
+        };
+        assert_eq!(
+            done.iter().map(|cis| cis.cis_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(done[0].acl, token(0x0800, 7));
+        assert_eq!(done[1].acl, token(0x0801, 8));
+    }
+
+    #[test]
+    fn create_cis_failure_preserves_already_established_links() {
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings()).unwrap();
+        assert_eq!(
+            transaction.on_command_status(HCI_LE_CREATE_CIS_COMMAND, 0),
+            CisCreateAction::AwaitingEstablished
+        );
+        assert!(matches!(
+            transaction.on_established(0, link(0x0900)),
+            CisCreateAction::Progress(_)
+        ));
+
+        let CisCreateAction::Failed(failure) =
+            transaction.on_established(0x3e, link(0x0901))
+        else {
+            panic!("expected typed establishment failure");
+        };
+        assert_eq!(failure.cig_id, 1);
+        assert_eq!(
+            failure.established
+                .iter()
+                .map(|cis| cis.cis_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            failure.kind,
+            CisCreateFailureKind::EstablishedStatus {
+                cis_id: 2,
+                connection_handle: 0x0901,
+                status: 0x3e,
+            }
+        );
+    }
+
+    #[test]
+    fn create_cis_established_before_command_status_is_failure() {
+        let (mut transaction, _) =
+            CisCreateTransaction::begin(allocation(), bindings()).unwrap();
+        assert_eq!(
+            transaction.on_established(0, link(0x0900)),
+            CisCreateAction::Failed(CisCreateFailure {
+                cig_id: 1,
+                established: vec![],
+                kind:
+                    CisCreateFailureKind::EstablishedBeforeCommandStatus {
+                        connection_handle: 0x0900,
+                    },
+            })
+        );
+    }
+
     #[test]
     fn create_cis_command_status_must_succeed_once() {
         let bindings = vec![
