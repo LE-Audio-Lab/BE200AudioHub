@@ -24,7 +24,7 @@ use crate::{
     architecture::types::AudioSide,
     hci_host::{
         connection::ConnectionToken,
-        gatt:{
+        gatt::{
             GattCharacteristic, GattOperation, GattReport, GattRequest,
             GattResult, GattValueEvent,
         },
