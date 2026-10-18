@@ -20,7 +20,8 @@ use crate::{
 };
 
 use super::audio_snapshot::{
-    AudioMemberSnapshot, AudioSetSnapshot, SinkAseSnapshot,
+    AudioMemberSnapshot, AudioSetSnapshot, GattCharacteristicRange,
+    SinkAseSnapshot,
 };
 
 pub const FIRST_STREAM_FORMAT: LeAudioFormat = LeAudioFormat {
@@ -61,7 +62,7 @@ pub struct PlannedSink {
     pub connection: ConnectionToken,
     pub ase_id: u8,
     pub ase_value_handle: u16,
-    pub ascs_control_point_handle: u16,
+    pub ascs_control_point: GattCharacteristicRange,
     pub audio_location: AudioLocation,
     pub codec_id: CodingFormat,
     pub codec_specific_configuration: CodecSpecificConfiguration,
@@ -254,8 +255,7 @@ fn plan_member(
         connection: member.connection,
         ase_id: ase.status.ase_id,
         ase_value_handle: ase.value_handle,
-        ascs_control_point_handle:
-            member.ascs.control_point_handle,
+        ascs_control_point: member.ascs.control_point,
         audio_location: allocation,
         codec_id: CodingFormat::LC3,
         codec_specific_configuration:
@@ -300,7 +300,7 @@ fn select_idle_ase(
         })?;
 
     if ase.value_handle == 0
-        || member.ascs.control_point_handle == 0
+        || member.ascs.control_point.value_handle == 0
     {
         return Err(CodecPlanError::InvalidAseHandle {
             member_index: member.member_index,
@@ -418,7 +418,12 @@ mod tests {
                 service: service(),
                 // Deliberately reversed: policy must choose ASE ID 1.
                 sink_ases: vec![ase(2, 0x49), ase(1, 0x46)],
-                control_point_handle: 0x43,
+                control_point: GattCharacteristicRange {
+                    declaration_handle: 0x42,
+                    value_handle: 0x43,
+                    end_group_handle: 0x45,
+                    properties: 0x12,
+                },
             },
             cas: CasSnapshot {
                 service: service(),
