@@ -12,6 +12,14 @@ pub struct GattServiceRange {
     pub end_handle: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GattCharacteristicRange {
+    pub declaration_handle: u16,
+    pub value_handle: u16,
+    pub end_group_handle: u16,
+    pub properties: u8,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SinkAseSnapshot {
     pub declaration_handle: u16,
@@ -38,7 +46,7 @@ pub struct PacsSinkSnapshot {
 pub struct AscsSinkSnapshot {
     pub service: GattServiceRange,
     pub sink_ases: Vec<SinkAseSnapshot>,
-    pub control_point_handle: u16,
+    pub control_point: GattCharacteristicRange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,7 +176,12 @@ mod tests {
                         details: AseStatusDetails::None,
                     },
                 }],
-                control_point_handle: 9,
+                control_point: GattCharacteristicRange {
+                    declaration_handle: 8,
+                    value_handle: 9,
+                    end_group_handle: 10,
+                    properties: 0x12,
+                },
             },
             cas: CasSnapshot {
                 service,
