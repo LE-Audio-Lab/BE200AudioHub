@@ -5397,16 +5397,17 @@ mod tests {
         )));
         let left_read = only_read_gatt(&actions);
 
+        let left_enabling = streaming_status_bytes(
+            &machine,
+            AudioSide::Left,
+            AseState::ENABLING,
+        );
         let actions = complete_gatt(
             &mut machine,
             &left_read,
             GattResult::Value {
                 attribute_handle: 0x0046,
-                value: streaming_status_bytes(
-                    &machine,
-                    AudioSide::Left,
-                    AseState::ENABLING,
-                ),
+                value: left_enabling,
             },
         );
         assert!(actions.contains(&ControlAction::ArmTimer(
@@ -5424,16 +5425,17 @@ mod tests {
             .unwrap();
         let left_confirm = only_read_gatt(&actions);
 
+        let left_streaming = streaming_status_bytes(
+            &machine,
+            AudioSide::Left,
+            AseState::STREAMING,
+        );
         let actions = complete_gatt(
             &mut machine,
             &left_confirm,
             GattResult::Value {
                 attribute_handle: 0x0046,
-                value: streaming_status_bytes(
-                    &machine,
-                    AudioSide::Left,
-                    AseState::STREAMING,
-                ),
+                value: left_streaming,
             },
         );
         assert_eq!(
@@ -5455,16 +5457,17 @@ mod tests {
         )));
 
         let right_read = only_read_gatt(&actions);
+        let right_streaming = streaming_status_bytes(
+            &machine,
+            AudioSide::Right,
+            AseState::STREAMING,
+        );
         let actions = complete_gatt(
             &mut machine,
             &right_read,
             GattResult::Value {
                 attribute_handle: 0x0046,
-                value: streaming_status_bytes(
-                    &machine,
-                    AudioSide::Right,
-                    AseState::STREAMING,
-                ),
+                value: right_streaming,
             },
         );
 
