@@ -175,7 +175,7 @@ mod tests {
     use crate::{
         platform::test_backend::TestBackend,
         runtime::mailbox,
-        transport::packet::ControllerPacket,
+        plane::l2_transport::packet::ControllerPacket,
     };
 
     fn reactor(

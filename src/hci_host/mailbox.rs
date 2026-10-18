@@ -5,7 +5,7 @@ use crossbeam_channel::{
 use crate::{
     architecture::types::{SessionId, StreamId},
     runtime::mailbox::{RecvError, SendError},
-    transport::{
+    plane::l2_transport::{
         packet::ControllerPacket,
         sink::{ControllerPacketSink, PacketSinkError},
     },
