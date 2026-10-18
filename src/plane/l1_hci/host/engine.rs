@@ -3925,8 +3925,20 @@ mod tests {
         assert_eq!(telemetry.completed_packets, 0);
         assert_eq!(telemetry.retired_packets, 0);
         assert_eq!(telemetry.in_flight_packets, 1);
-        assert!(engine.take_iso_telemetry_dirty());
-        assert!(!engine.take_iso_telemetry_dirty());
+        let Some(HciConditionUpdate::Telemetry(published)) =
+            engine.take_condition_telemetry_update()
+        else {
+            panic!("dirty ISO telemetry must publish one coalesced update");
+        };
+        assert_eq!(published.submitted_packets, 1);
+        assert_eq!(published.retired_packets, 0);
+        assert!(engine.take_condition_telemetry_update().is_none());
+        assert!(matches!(
+            engine.force_condition_update(),
+            HciConditionUpdate::Final { iso_telemetry, .. }
+                if iso_telemetry.submitted_packets == 1
+                    && iso_telemetry.retired_packets == 0
+        ));
 
         engine
             .ingest(ControllerPacket::Event(vec![
@@ -3941,7 +3953,20 @@ mod tests {
         assert_eq!(telemetry.completed_packets, 0);
         assert_eq!(telemetry.retired_packets, 1);
         assert_eq!(telemetry.in_flight_packets, 0);
-        assert!(engine.take_iso_telemetry_dirty());
+        let Some(HciConditionUpdate::Telemetry(published)) =
+            engine.take_condition_telemetry_update()
+        else {
+            panic!("teardown retirement must mark aggregate telemetry dirty");
+        };
+        assert_eq!(published.completed_packets, 0);
+        assert_eq!(published.retired_packets, 1);
+        assert!(engine.take_condition_telemetry_update().is_none());
+        assert!(matches!(
+            engine.force_condition_update(),
+            HciConditionUpdate::Final { iso_telemetry, .. }
+                if iso_telemetry.completed_packets == 0
+                    && iso_telemetry.retired_packets == 1
+        ));
 
         assert!(matches!(
             engine.iso_telemetry_trace_snapshot().last(),

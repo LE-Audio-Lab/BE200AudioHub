@@ -290,6 +290,15 @@ mod tests {
             StepOutcome::Faulted(TransportFault::HciInboxFull)
         );
         assert_eq!(reactor.state(), ReactorState::Faulted);
+        assert_eq!(
+            reactor.condition_update(),
+            TransportConditionUpdate {
+                state: TransportState::Faulted,
+                rx_packets: 1,
+                tx_packets: 0,
+                faults: 1,
+            }
+        );
     }
 
     #[test]
@@ -312,6 +321,7 @@ mod tests {
 
         let writes = reactor.backend.recorded_writes();
         assert_eq!(writes.len(), 3);
+        assert_eq!(reactor.condition_update().tx_packets, 3);
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Command));
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Acl));
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Iso));

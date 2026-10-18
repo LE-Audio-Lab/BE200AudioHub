@@ -317,8 +317,33 @@ mod tests {
         assert_eq!(telemetry.submitted_intervals, 1);
         assert_eq!(telemetry.dropped_backpressure_intervals, 1);
         assert_eq!(telemetry.fallback_intervals, 0);
-        assert!(bridge.take_telemetry_dirty());
-        assert!(!bridge.take_telemetry_dirty());
+        let Some(MediaConditionUpdate::Telemetry(published)) =
+            bridge.take_condition_telemetry_update()
+        else {
+            panic!("dirty bridge telemetry must publish one coalesced update");
+        };
+        assert_eq!(published.submitted_intervals, 1);
+        assert_eq!(published.dropped_backpressure_intervals, 1);
+        assert!(bridge.take_condition_telemetry_update().is_none());
+
+        let final_state = MediaConditionState {
+            state: crate::plane::l1_media::interface::condition::MediaState::Draining,
+            produced_frame: Some(FrameId(1)),
+            source_ring_fill_frames: 0,
+            encoded_ring_fill_frames: 0,
+            asrc_ratio: 1.0,
+            clock: None,
+        };
+        assert!(matches!(
+            bridge.force_condition_update(final_state),
+            MediaConditionUpdate::Final {
+                state,
+                bridge_telemetry,
+            } if state == final_state
+                && bridge_telemetry.submitted_intervals == 1
+                && bridge_telemetry.dropped_backpressure_intervals == 1
+        ));
+
         assert!(matches!(
             bridge.telemetry_trace_snapshot().last(),
             Some(MediaBridgeTraceRecord::DroppedBackpressure { frame_id: FrameId(1), .. })
