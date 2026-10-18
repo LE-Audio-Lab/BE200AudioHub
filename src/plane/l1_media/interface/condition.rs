@@ -1,6 +1,7 @@
-//! Coarse L1-Media condition projection.
+//! L1-Media condition updates.
 //!
-//! Only already-aggregated telemetry may be attached to this update.
+//! State and aggregate telemetry are separate so coalesced metrics can never
+//! overwrite a newer semantic Media state.
 
 use crate::plane::l1_media::{
     clock::frame::FrameId,
@@ -33,17 +34,16 @@ pub struct StreamClockSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MediaConditionUpdate {
+pub struct MediaConditionState {
     pub state: MediaState,
     pub produced_frame: Option<FrameId>,
     pub source_ring_fill_frames: u32,
     pub encoded_ring_fill_frames: u32,
     pub asrc_ratio: f64,
     pub clock: Option<StreamClockSnapshot>,
-    pub bridge_telemetry: Option<MediaBridgeTelemetrySnapshot>,
 }
 
-impl MediaConditionUpdate {
+impl MediaConditionState {
     pub const fn initial() -> Self {
         Self {
             state: MediaState::Stopped,
@@ -52,7 +52,16 @@ impl MediaConditionUpdate {
             encoded_ring_fill_frames: 0,
             asrc_ratio: 1.0,
             clock: None,
-            bridge_telemetry: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MediaConditionUpdate {
+    State(MediaConditionState),
+    Telemetry(MediaBridgeTelemetrySnapshot),
+    Final {
+        state: MediaConditionState,
+        bridge_telemetry: MediaBridgeTelemetrySnapshot,
+    },
 }

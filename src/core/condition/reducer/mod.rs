@@ -46,12 +46,12 @@ impl ConditionReducer {
     }
     pub(super) fn hci(bb: &mut Blackboard, scope: ConditionScope, update: HciConditionUpdate) -> ConditionChange {
         if !Self::accepts_scope(bb, scope) { return Self::stale(bb); }
-        let changed = bb.hci.replace(update);
+        let changed = bb.hci.apply(update);
         Self::finish(bb, changed)
     }
     pub(super) fn media(bb: &mut Blackboard, scope: ConditionScope, update: MediaConditionUpdate) -> ConditionChange {
         if !Self::accepts_scope(bb, scope) { return Self::stale(bb); }
-        let changed = bb.media.replace(update);
+        let changed = bb.media.apply(update);
         Self::finish(bb, changed)
     }
     pub(super) fn transport(bb: &mut Blackboard, scope: ConditionScope, update: TransportConditionUpdate) -> ConditionChange {

@@ -1,6 +1,7 @@
-//! Coarse L1-HCI condition projection.
+//! L1-HCI condition updates.
 //!
-//! Raw HCI events and raw telemetry trace records never cross this boundary.
+//! State changes are immediate. High-rate telemetry is published separately at
+//! a bounded/coalesced cadence. Final combines both for fault/teardown flush.
 
 use crate::{
     core::lifecycle::StreamId,
@@ -10,6 +11,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HciHostState {
     Detached,
+    Attaching,
     Ready,
     StreamBound,
     Streaming,
@@ -17,22 +19,30 @@ pub enum HciHostState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HciConditionUpdate {
+pub struct HciConditionState {
     pub state: HciHostState,
     pub stream_id: Option<StreamId>,
-    pub controller_iso_capacity: u16,
-    pub controller_iso_in_flight: u16,
-    pub iso_telemetry: Option<HciIsoTelemetrySnapshot>,
+    pub controller_iso_capacity: Option<usize>,
+    pub controller_iso_in_flight: usize,
 }
 
-impl HciConditionUpdate {
+impl HciConditionState {
     pub const fn initial() -> Self {
         Self {
             state: HciHostState::Detached,
             stream_id: None,
-            controller_iso_capacity: 0,
+            controller_iso_capacity: None,
             controller_iso_in_flight: 0,
-            iso_telemetry: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HciConditionUpdate {
+    State(HciConditionState),
+    Telemetry(HciIsoTelemetrySnapshot),
+    Final {
+        state: HciConditionState,
+        iso_telemetry: HciIsoTelemetrySnapshot,
+    },
 }
