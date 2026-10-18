@@ -13,12 +13,108 @@ use review::{
         iso_smoke as review2_iso_smoke,
     },
     round7::first_sound as round7_first_sound,
+    round8::current_path as round8_current_path,
 };
 
 fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("round8")
+            && args.get(1).map(String::as_str)
+                == Some("control-first-sound")
+        {
+            let config =
+                match round8_current_path::parse_current_path_args(
+                    &args[2..],
+                ) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!(
+                            "Round8 current-path HIL argument error: {error}"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+
+            println!(
+                "Round8 current-path HIL: Core Command/Condition -> current ControlPlane -> typed HCI -> confirmed StreamBinding -> valid LC3/StreamClock/Bridge -> logical HCI ISO -> StopControl reverse teardown"
+            );
+            println!("Target set: {}", config.target_name);
+            println!(
+                "Frames: {} × 10 ms; LC3 48 kHz mono/ear, 100 B/ear",
+                config.frames
+            );
+            println!(
+                "Frozen transport policy: CIG=1, Left CIS=1, Right CIS=2, 2M, RTN=13, max transport latency=95 ms, presentation delay=40 ms."
+            );
+            println!(
+                "SAFETY: first run with both earbuds OUT of your ears."
+            );
+
+            match round8_current_path::execute_current_path(config) {
+                Ok(result) => {
+                    let submitted = result
+                        .audit_after
+                        .total_submitted
+                        .saturating_sub(
+                            result.audit_before.total_submitted
+                        );
+                    let completed = result
+                        .audit_after
+                        .total_completed
+                        .saturating_sub(
+                            result.audit_before.total_completed
+                        );
+
+                    println!(
+                        "Firmware bypass: {:?}",
+                        result.firmware
+                    );
+                    println!(
+                        "Stored controller identity: {}",
+                        result.controller_identity
+                    );
+                    println!(
+                        "Current Control setup path: PASS"
+                    );
+                    println!(
+                        "Product data plane: valid LC3 -> StreamClock -> IsoTxBridge -> logical HCI route: PASS"
+                    );
+                    println!(
+                        "ISO Host audit: frames={} submitted={} completed={} in_flight_after={}",
+                        result.frames,
+                        submitted,
+                        completed,
+                        result.audit_after.in_flight
+                    );
+                    println!(
+                        "Controller ISO packet window: {:?}",
+                        result.audit_before.limit
+                    );
+                    println!(
+                        "StopControl reverse teardown -> Control Idle: PASS"
+                    );
+                    println!(
+                        "Bond store unchanged: {}",
+                        result.bond_unchanged
+                    );
+                    println!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        result.exit.hci,
+                        result.exit.transport
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Round8 current-path HIL FAILED: {error}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
         if args.first().map(String::as_str) == Some("round7")
             && args.get(1).map(String::as_str) == Some("first-sound")
         {
