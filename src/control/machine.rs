@@ -11,6 +11,7 @@ use crate::hci_host::{
     iso_host_feature::{
         CisHostFeatureFailure, CisHostFeatureState,
     },
+    gatt::{GattReport, GattRequest, GattRequestId},
     mailbox::HciReport,
     privacy::{
         ControllerPrivacyState, PrivacyFailure, ResolvingListConfig,
@@ -22,6 +23,13 @@ use crate::hci_host::{
 };
 
 use super::{
+    audio_discovery::{
+        AudioDiscoveryAction, AudioDiscoveryFailure,
+        AudioDiscoveryMachine,
+    },
+    audio_snapshot::{
+        AudioMemberSnapshot, AudioSetSnapshot,
+    },
     discovery::{
         resolve_connectable_members, ControlDiscoveryError,
         ResolvedMemberPresence,
@@ -43,6 +51,8 @@ pub enum ControlPhase {
     SecuringMember { member_index: usize },
     AwaitingSetConnected,
     SetConnected,
+    DiscoveringAudioMember { member_index: usize },
+    AudioSetDiscovered,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -61,6 +71,10 @@ pub enum ControlTimer {
     CancelConnect { member_index: usize },
     Encryption { member_index: usize },
     SetProjection,
+    Gatt {
+        member_index: usize,
+        request_id: GattRequestId,
+    },
     CleanupDisconnect(ConnectionToken),
     CleanupPrivacy,
 }
@@ -86,6 +100,11 @@ pub enum ControlAction {
         connection: ConnectionToken,
     },
     ClearControllerPrivacy,
+    BeginGatt(GattRequest),
+    CancelGatt {
+        connection: ConnectionToken,
+        request_id: GattRequestId,
+    },
     ArmTimer(ControlTimer),
     DisarmTimer(ControlTimer),
 }
@@ -128,6 +147,15 @@ pub enum ControlFailure {
         actual: ConnectionToken,
     },
     ConnectionSetMismatch,
+    AudioDiscovery {
+        member_index: usize,
+        failure: AudioDiscoveryFailure,
+    },
+    AudioDiscoveryTimeout {
+        member_index: usize,
+        request_id: GattRequestId,
+    },
+    AudioSet(String),
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -151,6 +179,10 @@ pub struct ControlMachine {
     rollback_queue: Vec<ConnectionToken>,
     rollback_current: Option<ConnectionToken>,
     cleanup_failures: Vec<ControlCleanupFailure>,
+    next_gatt_request_id: GattRequestId,
+    audio_discovery: Option<AudioDiscoveryMachine>,
+    audio_members: Vec<AudioMemberSnapshot>,
+    audio_set: Option<AudioSetSnapshot>,
     failure: Option<ControlFailure>,
 }
 
@@ -167,6 +199,10 @@ impl ControlMachine {
             rollback_queue: Vec::new(),
             rollback_current: None,
             cleanup_failures: Vec::new(),
+            next_gatt_request_id: 1,
+            audio_discovery: None,
+            audio_members: Vec::new(),
+            audio_set: None,
             failure: None,
         })
     }
@@ -185,6 +221,21 @@ impl ControlMachine {
 
     pub fn connections(&self) -> [Option<ConnectionToken>; 2] {
         self.connections
+    }
+
+    pub fn audio_set(&self) -> Option<&AudioSetSnapshot> {
+        self.audio_set.as_ref()
+    }
+
+    pub fn begin_audio_discovery(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::SetConnected {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.audio_members.clear();
+        self.audio_set = None;
+        self.start_audio_member_discovery(0)
     }
 
     pub fn start(&mut self) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -260,6 +311,44 @@ impl ControlMachine {
                     ),
                 );
                 self.finish_rollback()
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::Gatt {
+                    member_index,
+                    request_id,
+                },
+            ) if self.phase
+                == ControlPhase::DiscoveringAudioMember {
+                    member_index,
+                }
+                && self
+                    .audio_discovery
+                    .as_ref()
+                    .and_then(|value| value.pending_request_id())
+                    == Some(request_id) =>
+            {
+                let connection = self.connections[member_index]
+                    .expect("audio discovery requires live connection");
+                self.audio_discovery = None;
+                let mut actions = vec![
+                    ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    },
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ),
+                ];
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AudioDiscoveryTimeout {
+                        member_index,
+                        request_id,
+                    },
+                )?);
+                Ok(actions)
             }
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupDisconnect(connection),
@@ -656,7 +745,148 @@ impl ControlMachine {
                 self.finish_rollback()
             }
 
+            (
+                ControlPhase::DiscoveringAudioMember { member_index },
+                HciReport::Gatt(report),
+            ) => self.on_audio_gatt_report(member_index, report),
+
             _ => Ok(Vec::new()),
+        }
+    }
+
+    fn start_audio_member_discovery(
+        &mut self,
+        member_index: usize,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let connection = self.connections[member_index]
+            .expect("audio discovery requires connected member");
+        let mut discovery = AudioDiscoveryMachine::new(
+            member_index,
+            connection,
+            self.next_gatt_request_id,
+        );
+        let action = discovery.start().map_err(|failure| {
+            ControlFailure::AudioDiscovery {
+                member_index,
+                failure,
+            }
+        })?;
+        self.next_gatt_request_id = discovery.next_request_id();
+        self.audio_discovery = Some(discovery);
+        self.phase = ControlPhase::DiscoveringAudioMember {
+            member_index,
+        };
+        self.translate_audio_action(member_index, None, action)
+    }
+
+    fn on_audio_gatt_report(
+        &mut self,
+        member_index: usize,
+        report: &GattReport,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut discovery = self
+            .audio_discovery
+            .take()
+            .expect("audio discovery phase missing member FSM");
+        let pending = discovery.pending_request_id();
+        let outcome = discovery.on_gatt_report(report);
+        self.next_gatt_request_id = discovery.next_request_id();
+
+        match outcome {
+            Ok(AudioDiscoveryAction::Ignored) => {
+                self.audio_discovery = Some(discovery);
+                Ok(Vec::new())
+            }
+            Ok(action) => {
+                self.audio_discovery = if matches!(
+                    action,
+                    AudioDiscoveryAction::Complete(_)
+                ) {
+                    None
+                } else {
+                    Some(discovery)
+                };
+                self.translate_audio_action(
+                    member_index,
+                    pending,
+                    action,
+                )
+            }
+            Err(failure) => {
+                self.audio_discovery = None;
+                let mut actions = Vec::new();
+                if let Some(request_id) = pending {
+                    actions.push(ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ));
+                }
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AudioDiscovery {
+                        member_index,
+                        failure,
+                    },
+                )?);
+                Ok(actions)
+            }
+        }
+    }
+
+    fn translate_audio_action(
+        &mut self,
+        member_index: usize,
+        completed_request: Option<GattRequestId>,
+        action: AudioDiscoveryAction,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut actions = Vec::new();
+        if let Some(request_id) = completed_request {
+            actions.push(ControlAction::DisarmTimer(
+                ControlTimer::Gatt {
+                    member_index,
+                    request_id,
+                },
+            ));
+        }
+
+        match action {
+            AudioDiscoveryAction::BeginGatt(request) => {
+                let request_id = request.request_id;
+                actions.push(ControlAction::BeginGatt(request));
+                actions.push(ControlAction::ArmTimer(
+                    ControlTimer::Gatt {
+                        member_index,
+                        request_id,
+                    },
+                ));
+                Ok(actions)
+            }
+            AudioDiscoveryAction::Complete(snapshot) => {
+                self.audio_members.push(snapshot);
+                if member_index + 1 < self.plan.members.len() {
+                    actions.extend(
+                        self.start_audio_member_discovery(
+                            member_index + 1,
+                        )?,
+                    );
+                    return Ok(actions);
+                }
+
+                let set = AudioSetSnapshot {
+                    members: std::mem::take(&mut self.audio_members),
+                };
+                if let Err(error) = set.validate_dual_sink() {
+                    actions.extend(self.begin_rollback(
+                        ControlFailure::AudioSet(error),
+                    )?);
+                    return Ok(actions);
+                }
+                self.audio_set = Some(set);
+                self.phase = ControlPhase::AudioSetDiscovered;
+                Ok(actions)
+            }
+            AudioDiscoveryAction::Ignored => Ok(actions),
         }
     }
 
@@ -1390,6 +1620,99 @@ mod tests {
                 member_index: 0,
             }
         );
+    }
+
+    fn machine_at_set_connected() -> ControlMachine {
+        let mut machine = ControlMachine::new(plan()).unwrap();
+        machine.phase = ControlPhase::SetConnected;
+        machine.privacy_active = true;
+        machine.connections = [
+            Some(ConnectionToken {
+                connection_handle: 0x0800,
+                generation: 1,
+            }),
+            Some(ConnectionToken {
+                connection_handle: 0x0801,
+                generation: 2,
+            }),
+        ];
+        machine
+    }
+
+    #[test]
+    fn audio_discovery_starts_from_set_connected_on_member_zero() {
+        let mut machine = machine_at_set_connected();
+        let actions = machine.begin_audio_discovery().unwrap();
+
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::DiscoveringAudioMember {
+                member_index: 0,
+            }
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                ControlAction::BeginGatt(GattRequest {
+                    connection,
+                    operation: crate::hci_host::gatt::GattOperation::
+                        ExchangeMtu { client_rx_mtu: 247 },
+                    ..
+                }),
+                ControlAction::ArmTimer(ControlTimer::Gatt {
+                    member_index: 0,
+                    ..
+                })
+            ] if connection.connection_handle == 0x0800
+        ));
+    }
+
+    #[test]
+    fn audio_discovery_gatt_failure_rolls_back_connected_set() {
+        let mut machine = machine_at_set_connected();
+        let actions = machine.begin_audio_discovery().unwrap();
+        let request = match &actions[0] {
+            ControlAction::BeginGatt(request) => request.clone(),
+            other => panic!("unexpected action {other:?}"),
+        };
+
+        let failure = crate::hci_host::gatt::GattFailure {
+            request_id: request.request_id,
+            connection: request.connection,
+            kind: crate::hci_host::gatt::GattFailureKind::Att {
+                request_opcode: 0x02,
+                attribute_handle: 0,
+                error_code: 0x0E,
+            },
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Failed(failure.clone()),
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            actions.first(),
+            Some(ControlAction::DisarmTimer(
+                ControlTimer::Gatt {
+                    member_index: 0,
+                    request_id,
+                }
+            )) if *request_id == request.request_id
+        ));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectAcl { connection }
+                if connection.connection_handle == 0x0801
+        )));
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::AudioDiscovery {
+                member_index: 0,
+                failure: AudioDiscoveryFailure::Gatt(actual),
+            }) if actual == &failure
+        ));
     }
 
     #[test]
