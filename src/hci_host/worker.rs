@@ -23,8 +23,7 @@ use super::{
     iso_path::IsoPathOperationState,
     iso_tx::{
         iso_group_touches_handles, IsoDataGroupRequest,
-        IsoDrainRequest, IsoDrainState, IsoSduGroupRequest,
-        IsoSubmitOutcome,
+        IsoDrainRequest, IsoDrainState, IsoSubmitOutcome,
     },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
@@ -1011,6 +1010,7 @@ mod tests {
                 CigAllocation, CigConfig, CigConfigureState, CisAllocation,
                 CisConfig,
             },
+            iso_tx::IsoSduGroupRequest,
             mailbox::{hci_mailbox, hci_mailbox_with_iso},
             privacy::{
                 ResolvingListConfig, ResolvingPeer,
