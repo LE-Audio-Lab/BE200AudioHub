@@ -807,7 +807,7 @@ mod tests {
 
     use crate::{
         architecture::types::AudioSide,
-        control::audio_snapshot::GattCharacteristicRange,
+        plane::l1_control::discovery::snapshot::GattCharacteristicRange,
         plane::l1_hci::{
             acl::connection::ConnectionToken,
             gatt::transaction::{

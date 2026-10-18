@@ -3094,7 +3094,7 @@ impl ControlMachine {
     fn planned_sink(
         &self,
         side: AudioSide,
-    ) -> Result<&crate::control::codec_plan::PlannedSink, ControlFailure> {
+    ) -> Result<&crate::plane::l1_control::planning::codec::PlannedSink, ControlFailure> {
         let plan = self.codec_plan.as_ref().ok_or(
             ControlFailure::InvalidStartState(self.phase),
         )?;
@@ -3832,7 +3832,7 @@ mod tests {
     use bumble_smp::privacy::resolvable_private_address;
 
     use crate::{
-        control::plan::ControlMemberPlan,
+        plane::l1_control::model::set_plan::ControlMemberPlan,
         plane::l1_hci::{
             host::engine::{
                 ControllerCapabilities, ControllerIdentity, PacketPoolSnapshot,
@@ -4417,15 +4417,15 @@ mod tests {
         connection_handle: u16,
         generation: u64,
         location: bumble_profiles::bap::AudioLocation,
-    ) -> crate::control::codec_plan::PlannedSink {
+    ) -> crate::plane::l1_control::planning::codec::PlannedSink {
         use bumble_hci::CodingFormat;
         use bumble_profiles::bap::{
             CodecSpecificConfiguration, FrameDuration,
             SamplingFrequency,
         };
-        use crate::control::audio_snapshot::GattCharacteristicRange;
+        use crate::plane::l1_control::discovery::snapshot::GattCharacteristicRange;
 
-        crate::control::codec_plan::PlannedSink {
+        crate::plane::l1_control::planning::codec::PlannedSink {
             side,
             member_index,
             connection: ConnectionToken {
@@ -6516,7 +6516,7 @@ mod tests {
             le_audio::Metadata,
             pacs::{AudioContexts, PacCodecCapabilities, PacRecord},
         };
-        use crate::control::audio_snapshot::{
+        use crate::plane::l1_control::discovery::snapshot::{
             AscsSinkSnapshot, CasSnapshot, GattServiceRange,
             PacsSinkSnapshot, SinkAseSnapshot,
         };
@@ -6579,7 +6579,7 @@ mod tests {
                         },
                     }],
                     control_point:
-                        crate::control::audio_snapshot::GattCharacteristicRange {
+                        crate::plane::l1_control::discovery::snapshot::GattCharacteristicRange {
                             declaration_handle: 8,
                             value_handle: 9,
                             end_group_handle: 10,

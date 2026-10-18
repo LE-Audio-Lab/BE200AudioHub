@@ -81,7 +81,7 @@ impl ControlPlane {
 mod tests {
     use crate::architecture::control::ControlState;
 
-    use super::crate::plane::l1_control::engine::machine::ControlPhase;
+    use crate::plane::l1_control::engine::machine::ControlPhase;
 
     #[test]
     fn exported_snapshot_coarsens_internal_control_phases() {

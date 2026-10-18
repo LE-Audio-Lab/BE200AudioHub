@@ -343,7 +343,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::control::audio_snapshot::{
+    use crate::plane::l1_control::discovery::snapshot::{
         AscsSinkSnapshot, CasSnapshot, GattServiceRange,
         PacsSinkSnapshot, SinkAseSnapshot,
     };

@@ -151,7 +151,7 @@ mod tests {
     use bumble_smp::privacy::resolvable_private_address;
 
     use crate::{
-        control::plan::{
+        plane::l1_control::model::set_plan::{
             ControlMemberPlan, ControlSetPlan,
         },
         plane::l1_hci::acl::{
