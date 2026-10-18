@@ -5306,6 +5306,231 @@ mod tests {
         assert!(machine.iso_paths_ready().is_empty());
     }
 
+    fn drive_to_iso_paths_ready() -> ControlMachine {
+        let mut machine = drive_to_cis_established();
+        let left = CisRef {
+            cig_id: 1,
+            cis_id: 1,
+        };
+        let right = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+
+        machine.begin_iso_path_setup().unwrap();
+        machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::SetupComplete {
+                    cis: left,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::SetupComplete {
+                    cis: right,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ))
+            .unwrap();
+        assert_eq!(machine.phase(), ControlPhase::IsoPathsReady);
+        machine
+    }
+
+    fn streaming_status_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+        state: AseState,
+    ) -> Vec<u8> {
+        use bumble_profiles::{
+            ascs::{AseEndpoint, AudioRole},
+            le_audio::Metadata,
+        };
+
+        let enable = match side {
+            AudioSide::Left => &machine.enable_plan().unwrap().left,
+            AudioSide::Right => &machine.enable_plan().unwrap().right,
+        };
+        let qos = match side {
+            AudioSide::Left => &machine.qos_plan().unwrap().left,
+            AudioSide::Right => &machine.qos_plan().unwrap().right,
+        };
+
+        let mut endpoint =
+            AseEndpoint::new(enable.ase_id, AudioRole::Sink);
+        endpoint.state = state;
+        endpoint.qos = qos.expected_readback();
+        endpoint.metadata =
+            Metadata::from_bytes(&enable.metadata).unwrap();
+        endpoint.value().unwrap()
+    }
+
+    fn only_read_gatt(actions: &[ControlAction]) -> GattRequest {
+        let request = only_begin_gatt(actions);
+        assert!(matches!(
+            request.operation,
+            crate::hci_host::gatt::GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        ));
+        request
+    }
+
+    #[test]
+    fn streaming_gate_retries_left_then_confirms_both_ears() {
+        use crate::hci_host::gatt::GattResult;
+
+        let mut machine = drive_to_iso_paths_ready();
+
+        let actions = machine.begin_streaming_gate().unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::AwaitingStreaming {
+                side: AudioSide::Left,
+            }
+        );
+        assert!(actions.contains(&ControlAction::ArmTimer(
+            ControlTimer::StreamingDeadline {
+                side: AudioSide::Left,
+            },
+        )));
+        let left_read = only_read_gatt(&actions);
+
+        let actions = complete_gatt(
+            &mut machine,
+            &left_read,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: streaming_status_bytes(
+                    &machine,
+                    AudioSide::Left,
+                    AseState::ENABLING,
+                ),
+            },
+        );
+        assert!(actions.contains(&ControlAction::ArmTimer(
+            ControlTimer::StreamingProbe {
+                side: AudioSide::Left,
+            },
+        )));
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::StreamingProbe {
+                    side: AudioSide::Left,
+                },
+            ))
+            .unwrap();
+        let left_confirm = only_read_gatt(&actions);
+
+        let actions = complete_gatt(
+            &mut machine,
+            &left_confirm,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: streaming_status_bytes(
+                    &machine,
+                    AudioSide::Left,
+                    AseState::STREAMING,
+                ),
+            },
+        );
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::AwaitingStreaming {
+                side: AudioSide::Right,
+            }
+        );
+        assert!(machine.streaming_status(AudioSide::Left).is_some());
+        assert!(actions.contains(&ControlAction::DisarmTimer(
+            ControlTimer::StreamingDeadline {
+                side: AudioSide::Left,
+            },
+        )));
+        assert!(actions.contains(&ControlAction::ArmTimer(
+            ControlTimer::StreamingDeadline {
+                side: AudioSide::Right,
+            },
+        )));
+
+        let right_read = only_read_gatt(&actions);
+        let actions = complete_gatt(
+            &mut machine,
+            &right_read,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: streaming_status_bytes(
+                    &machine,
+                    AudioSide::Right,
+                    AseState::STREAMING,
+                ),
+            },
+        );
+
+        assert_eq!(machine.phase(), ControlPhase::StreamingReady);
+        assert!(machine.streaming_status(AudioSide::Left).is_some());
+        assert!(machine.streaming_status(AudioSide::Right).is_some());
+        assert!(actions.contains(&ControlAction::DisarmTimer(
+            ControlTimer::StreamingDeadline {
+                side: AudioSide::Right,
+            },
+        )));
+    }
+
+    #[test]
+    fn streaming_deadline_cancels_read_then_rolls_back_paths_first() {
+        let mut machine = drive_to_iso_paths_ready();
+        let actions = machine.begin_streaming_gate().unwrap();
+        let read = only_read_gatt(&actions);
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::StreamingDeadline {
+                    side: AudioSide::Left,
+                },
+            ))
+            .unwrap();
+
+        let cancel_index = actions
+            .iter()
+            .position(|action| {
+                *action == ControlAction::CancelGatt {
+                    connection: read.connection,
+                    request_id: read.request_id,
+                }
+            })
+            .expect("deadline must cancel the active GATT read");
+        let remove_index = actions
+            .iter()
+            .position(|action| matches!(
+                action,
+                ControlAction::RemoveIsoPathByRef {
+                    cis: CisRef {
+                        cig_id: 1,
+                        cis_id: 2,
+                    },
+                    directions: 0x01,
+                }
+            ))
+            .expect("stream rollback must begin with right ISO path");
+
+        assert!(cancel_index < remove_index);
+        assert!(!actions[..remove_index].iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectCisByRef { .. }
+                | ControlAction::RemoveCig { .. }
+                | ControlAction::DisconnectAcl { .. }
+        )));
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::StreamingDeadline {
+                side: AudioSide::Left,
+            })
+        ));
+    }
+
     #[test]
     fn partial_cis_failure_disconnects_cis_releases_ases_then_removes_cig() {
         use crate::hci_host::iso::{
