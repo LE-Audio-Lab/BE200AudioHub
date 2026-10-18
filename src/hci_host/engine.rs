@@ -1683,6 +1683,18 @@ impl HciEngine {
                                     );
                                 }
                             }
+                            if directions
+                                & (1 << IsoDataPathDirection::Input as u8)
+                                != 0
+                            {
+                                if let Some(cis) =
+                                    self.cis_ref_for_handle(
+                                        connection_handle,
+                                    )
+                                {
+                                    self.stream_routes.remove_cis(cis);
+                                }
+                            }
                             self.iso_path_remove_transaction = None;
                             self.iso_path_state =
                                 IsoPathOperationState::RemoveComplete {
