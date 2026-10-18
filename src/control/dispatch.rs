@@ -119,12 +119,12 @@ pub fn dispatch_control_action(
 mod tests {
     use crate::{
         architecture::types::{SessionId, StreamId},
-        hci_host::{
-            iso::CisRef,
-            mailbox::{
-                hci_mailbox_with_iso, HciCommand,
-            },
-            stream_route::StereoStreamRouteBinding,
+        hci_host::mailbox::{
+            hci_mailbox_with_iso, HciCommand,
+        },
+        plane::l1_hci::iso::{
+            cig_cis::CisRef,
+            route::StereoStreamRouteBinding,
         },
     };
 

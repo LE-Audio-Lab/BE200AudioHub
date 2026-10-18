@@ -152,10 +152,8 @@ mod tests {
             media::EncodedStereoFrame,
             types::{FrameId, SessionId, StreamId},
         },
-        hci_host::{
-            iso_tx::IsoDataGroupRequest,
-            mailbox::hci_mailbox_with_iso,
-        },
+        hci_host::mailbox::hci_mailbox_with_iso,
+        plane::l1_hci::iso::tx::IsoDataGroupRequest,
     };
 
     use super::*;

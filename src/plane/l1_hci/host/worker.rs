@@ -1004,16 +1004,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::{
-        hci_host::{
-            iso::{
-                CigAllocation, CigConfig, CigConfigureState, CisAllocation,
-                CisConfig,
-            },
-            iso_tx::IsoSduGroupRequest,
-            mailbox::{hci_mailbox, hci_mailbox_with_iso},
-        },
+        hci_host::mailbox::{hci_mailbox, hci_mailbox_with_iso},
         plane::{
             l1_hci::{
+                iso::{
+                    cig_cis::{
+                        CigAllocation, CigConfig, CigConfigureState,
+                        CisAllocation, CisConfig,
+                    },
+                    tx::IsoSduGroupRequest,
+                },
                 acl::{
                     connection::{
                         FalConnectRequest, LeInitiationParameters, LePeerIdentity,
