@@ -84,6 +84,9 @@ use crate::{
             telemetry::{
                 HciIsoTelemetrySnapshot, HciIsoTraceRecord, HciTelemetry,
             },
+            interface::condition::{
+                HciConditionState, HciConditionUpdate, HciHostState,
+            },
         },
         l2_transport::{
             packet::ControllerPacket,
@@ -764,6 +767,44 @@ impl HciEngine {
 
     pub fn take_iso_telemetry_dirty(&mut self) -> bool {
         self.telemetry.take_iso_dirty()
+    }
+
+    pub fn condition_state(&self) -> HciConditionState {
+        let state = match self.attach_state {
+            OperationalAttachState::Idle => HciHostState::Detached,
+            OperationalAttachState::Discovering => HciHostState::Attaching,
+            OperationalAttachState::Ready => HciHostState::Ready,
+            OperationalAttachState::Failed(_) => HciHostState::Faulted,
+        };
+        let iso = self.iso_credit_audit.snapshot();
+        HciConditionState {
+            state,
+            stream_id: None,
+            controller_iso_capacity: iso.limit,
+            controller_iso_in_flight: iso.in_flight,
+        }
+    }
+
+    pub fn condition_state_update(&self) -> HciConditionUpdate {
+        HciConditionUpdate::State(self.condition_state())
+    }
+
+    pub fn take_condition_telemetry_update(
+        &mut self,
+    ) -> Option<HciConditionUpdate> {
+        if !self.telemetry.take_iso_dirty() {
+            return None;
+        }
+        Some(HciConditionUpdate::Telemetry(
+            self.telemetry.iso_snapshot(),
+        ))
+    }
+
+    pub fn force_condition_update(&self) -> HciConditionUpdate {
+        HciConditionUpdate::Final {
+            state: self.condition_state(),
+            iso_telemetry: self.telemetry.iso_snapshot(),
+        }
     }
 
     pub fn iso_path_state(&self) -> &IsoPathOperationState {

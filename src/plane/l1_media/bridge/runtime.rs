@@ -15,6 +15,9 @@ use crate::{
                 MediaBridgeTelemetrySnapshot, MediaBridgeTraceRecord,
                 MediaTelemetry,
             },
+            interface::condition::{
+                MediaConditionState, MediaConditionUpdate,
+            },
         },
     },
     runtime::mailbox::SendError,
@@ -99,6 +102,27 @@ impl LogicalIsoTxBridge {
 
     pub fn take_telemetry_dirty(&mut self) -> bool {
         self.telemetry.take_bridge_dirty()
+    }
+
+    pub fn take_condition_telemetry_update(
+        &mut self,
+    ) -> Option<MediaConditionUpdate> {
+        if !self.telemetry.take_bridge_dirty() {
+            return None;
+        }
+        Some(MediaConditionUpdate::Telemetry(
+            self.telemetry.bridge_snapshot(),
+        ))
+    }
+
+    pub fn force_condition_update(
+        &self,
+        state: MediaConditionState,
+    ) -> MediaConditionUpdate {
+        MediaConditionUpdate::Final {
+            state,
+            bridge_telemetry: self.telemetry.bridge_snapshot(),
+        }
     }
 
     pub fn next_deadline_us(

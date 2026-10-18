@@ -9,6 +9,9 @@ use super::{
         reassembly::{PacketReassembler, ReassemblyError},
         ControllerPacketKind, HostPacket,
     },
+    interface::condition::{
+        TransportConditionUpdate, TransportState,
+    },
     sink::{ControllerPacketSink, PacketSinkError},
 };
 
@@ -46,6 +49,9 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     event_rx: PacketReassembler,
     acl_rx: PacketReassembler,
     iso_rx: PacketReassembler,
+    rx_packets: u64,
+    tx_packets: u64,
+    faults: u64,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -57,11 +63,30 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             event_rx: PacketReassembler::new(ControllerPacketKind::Event),
             acl_rx: PacketReassembler::new(ControllerPacketKind::Acl),
             iso_rx: PacketReassembler::new(ControllerPacketKind::Iso),
+            rx_packets: 0,
+            tx_packets: 0,
+            faults: 0,
         }
     }
 
     pub fn state(&self) -> ReactorState {
         self.state
+    }
+
+    pub fn condition_update(&self) -> TransportConditionUpdate {
+        let state = match self.state {
+            ReactorState::Stopped | ReactorState::Detached => {
+                TransportState::Detached
+            }
+            ReactorState::Running => TransportState::Ready,
+            ReactorState::Faulted => TransportState::Faulted,
+        };
+        TransportConditionUpdate {
+            state,
+            rx_packets: self.rx_packets,
+            tx_packets: self.tx_packets,
+            faults: self.faults,
+        }
     }
 
     pub fn start(&mut self) -> Result<(), TransportFault> {
@@ -93,10 +118,13 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             HostPacket::Acl(bytes) => (TxEndpoint::Acl, bytes),
             HostPacket::Iso(bytes) => (TxEndpoint::Iso, bytes),
         };
-        self.backend
-            .submit_write(endpoint, bytes)
-            .map(|_| ())
-            .map_err(TransportFault::Backend)
+        match self.backend.submit_write(endpoint, bytes) {
+            Ok(_) => {
+                self.tx_packets = self.tx_packets.saturating_add(1);
+                Ok(())
+            }
+            Err(error) => Err(TransportFault::Backend(error)),
+        }
     }
 
     pub fn step(&mut self) -> StepOutcome {
@@ -144,6 +172,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
                     PacketSinkError::Disconnected => TransportFault::HciInboxDisconnected,
                 });
             }
+            self.rx_packets = self.rx_packets.saturating_add(1);
         }
 
         if self.state == ReactorState::Running {
@@ -164,6 +193,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
     fn fail(&mut self, fault: TransportFault) -> StepOutcome {
         self.state = ReactorState::Faulted;
+        self.faults = self.faults.saturating_add(1);
         self.backend.cancel_all();
         StepOutcome::Faulted(fault)
     }
