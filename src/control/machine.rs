@@ -3090,6 +3090,202 @@ mod tests {
         machine
     }
 
+    fn drive_to_qos_planned() -> ControlMachine {
+        let mut machine = machine_at_codec_planned();
+
+        let actions = machine.begin_codec_configuration().unwrap();
+        let actions = drive_ase_prepare(&mut machine, actions);
+        let actions =
+            drive_config_codec(&mut machine, AudioSide::Left, actions);
+        let actions = drive_ase_prepare(&mut machine, actions);
+        let _actions =
+            drive_config_codec(&mut machine, AudioSide::Right, actions);
+        assert_eq!(machine.phase(), ControlPhase::CodecConfigured);
+
+        machine.plan_iso().unwrap();
+        let _ = machine.begin_cig_configuration().unwrap();
+        machine
+            .on_hci_report(&HciReport::CigConfigureState(
+                CigConfigureState::Ready(CigAllocation {
+                    cig_id: 1,
+                    cis: vec![
+                        crate::hci_host::iso::CisAllocation {
+                            cis_id: 1,
+                            connection_handle: 0x0900,
+                        },
+                        crate::hci_host::iso::CisAllocation {
+                            cis_id: 2,
+                            connection_handle: 0x0901,
+                        },
+                    ],
+                }),
+            ))
+            .unwrap();
+        assert_eq!(machine.phase(), ControlPhase::CigConfigured);
+
+        machine.plan_qos().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::QosPlanned);
+        machine
+    }
+
+    fn qos_status_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseEndpoint, AudioRole,
+        };
+
+        let planned = match side {
+            AudioSide::Left => &machine.qos_plan().unwrap().left,
+            AudioSide::Right => &machine.qos_plan().unwrap().right,
+        };
+        let mut endpoint =
+            AseEndpoint::new(planned.parameters.ase_id, AudioRole::Sink);
+        endpoint.state = AseState::QOS_CONFIGURED;
+        endpoint.qos = planned.expected_readback();
+        endpoint.value().unwrap()
+    }
+
+    fn qos_cp_success_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+
+        let ase_id = match side {
+            AudioSide::Left => {
+                machine.qos_plan().unwrap().left.parameters.ase_id
+            }
+            AudioSide::Right => {
+                machine.qos_plan().unwrap().right.parameters.ase_id
+            }
+        };
+        AseControlResponse {
+            opcode: AseOpcode::ConfigQos,
+            responses: vec![AseResponse {
+                ase_id,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    fn drive_config_qos(
+        machine: &mut ControlMachine,
+        side: AudioSide,
+        actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::hci_host::gatt::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        let actions = complete_gatt(
+            machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(ControlTimer::Gatt { .. })
+        )));
+
+        assert!(machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0043,
+                        value: qos_cp_success_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let actions = machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0046,
+                        value: qos_status_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap();
+        let readback = only_begin_gatt(&actions);
+        assert_eq!(
+            readback.operation,
+            GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        );
+
+        complete_gatt(
+            machine,
+            &readback,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: qos_status_bytes(machine, side),
+            },
+        )
+    }
+
+    #[test]
+    fn qos_configuration_runs_left_then_right_to_qos_configured() {
+        let mut machine = drive_to_qos_planned();
+
+        let actions = machine.begin_qos_configuration().unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::ConfiguringQos {
+                side: AudioSide::Left,
+            }
+        );
+
+        let actions =
+            drive_config_qos(&mut machine, AudioSide::Left, actions);
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::ConfiguringQos {
+                side: AudioSide::Right,
+            }
+        );
+        assert!(machine.qos_status(AudioSide::Left).is_some());
+
+        let actions =
+            drive_config_qos(&mut machine, AudioSide::Right, actions);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(
+                ControlTimer::AseOperation {
+                    side: AudioSide::Right,
+                }
+            )
+        )));
+        assert_eq!(machine.phase(), ControlPhase::QosConfigured);
+        assert!(machine.qos_status(AudioSide::Left).is_some());
+        assert!(machine.qos_status(AudioSide::Right).is_some());
+    }
+
     #[test]
     fn set_cig_success_reaches_cig_configured_without_retaining_raw_handles() {
         let mut machine = machine_at_codec_configured();
