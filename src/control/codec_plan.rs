@@ -331,7 +331,7 @@ fn supports_policy(
 #[cfg(test)]
 mod tests {
     use bumble_profiles::{
-        ascs::{AseStatus, AseStatusDetails},
+        ascs::AseStatusDetails,
         bap::{
             CodecSpecificCapabilities, SupportedFrameDuration,
             SupportedSamplingFrequency,
