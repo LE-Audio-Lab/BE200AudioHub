@@ -105,26 +105,6 @@ impl AsePrepareMachine {
         }
 
         let start = self.sink.ase_value_handle.saturating_add(1);
-        let end = self
-            .sink
-            .ase_value_handle
-            .max(self.sink.ase_value_handle)
-            .saturating_add(
-                self.sink
-                    .codec_specific_configuration
-                    .codec_frames_per_sdu
-                    .map(|_| 0)
-                    .unwrap_or(0),
-            );
-        let end = self
-            .sink
-            .ascs_control_point
-            .value_handle
-            .checked_sub(1)
-            .unwrap_or(self.sink.ase_value_handle);
-
-        // The selected ASE's actual end-group handle is not derivable from the
-        // control point. The planner therefore must preserve it explicitly.
         let ase_end = self.sink.ase_end_group_handle;
         if start > ase_end {
             return self.fail(
