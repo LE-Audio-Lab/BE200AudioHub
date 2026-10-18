@@ -4,6 +4,7 @@ mod platform;
 mod transport;
 mod media;
 mod stream_clock;
+mod iso_tx_bridge;
 mod control;
 
 mod hci_host;
