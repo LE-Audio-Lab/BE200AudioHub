@@ -78,6 +78,7 @@ use crate::plane::l1_control::{
     },
     model::{
         confirmed_status::ConfirmedStatus,
+        planned_configuration::PlannedConfiguration,
         set_plan::{ControlPlanError, ControlSetPlan},
     },
     operation::rollback::RollbackOperation,
@@ -373,17 +374,14 @@ pub enum ControlEvent {
 pub struct ControlMachine {
     plan: ControlSetPlan,
     confirmed: ConfirmedStatus,
+    planned: PlannedConfiguration,
     rollback: RollbackOperation,
     phase: ControlPhase,
     next_gatt_request_id: GattRequestId,
     audio_discovery: Option<AudioDiscoveryMachine>,
     audio_members: Vec<AudioMemberSnapshot>,
-    codec_plan: Option<StereoCodecPlan>,
     ase_prepare: Option<AsePrepareMachine>,
     ase_operation: Option<AseOperationMachine>,
-    iso_plan: Option<StereoIsoPlan>,
-    qos_plan: Option<StereoQosPlan>,
-    enable_plan: Option<StereoEnablePlan>,
     cig_may_exist: bool,
     iso_paths_may_exist: BTreeSet<CisRef>,
     streaming_gate: Option<StreamingGateMachine>,
@@ -397,17 +395,14 @@ impl ControlMachine {
         Ok(Self {
             plan,
             confirmed: ConfirmedStatus::new(),
+            planned: PlannedConfiguration::new(),
             rollback: RollbackOperation::new(),
             phase: ControlPhase::Idle,
             next_gatt_request_id: 1,
             audio_discovery: None,
             audio_members: Vec::new(),
-            codec_plan: None,
             ase_prepare: None,
             ase_operation: None,
-            iso_plan: None,
-            qos_plan: None,
-            enable_plan: None,
             cig_may_exist: false,
             iso_paths_may_exist: BTreeSet::new(),
             streaming_gate: None,
@@ -491,7 +486,7 @@ impl ControlMachine {
     }
 
     pub fn codec_plan(&self) -> Option<&StereoCodecPlan> {
-        self.codec_plan.as_ref()
+        self.planned.codec_plan.as_ref()
     }
 
     pub fn prepared_ase(
@@ -509,11 +504,11 @@ impl ControlMachine {
     }
 
     pub fn iso_plan(&self) -> Option<&StereoIsoPlan> {
-        self.iso_plan.as_ref()
+        self.planned.iso_plan.as_ref()
     }
 
     pub fn qos_plan(&self) -> Option<&StereoQosPlan> {
-        self.qos_plan.as_ref()
+        self.planned.qos_plan.as_ref()
     }
 
     pub fn qos_status(
@@ -524,7 +519,7 @@ impl ControlMachine {
     }
 
     pub fn enable_plan(&self) -> Option<&StereoEnablePlan> {
-        self.enable_plan.as_ref()
+        self.planned.enable_plan.as_ref()
     }
 
     pub fn enable_status(
@@ -568,12 +563,10 @@ impl ControlMachine {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
 
-        let codec = self
-            .codec_plan
+        let codec = self.planned.codec_plan
             .as_ref()
             .expect("StreamingReady requires codec plan");
-        let qos = self
-            .qos_plan
+        let qos = self.planned.qos_plan
             .as_ref()
             .expect("StreamingReady requires QoS plan");
         let left = self
@@ -650,8 +643,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::Enabled {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let request = self
-            .iso_plan
+        let request = self.planned.iso_plan
             .as_ref()
             .expect("Enabled requires ISO plan")
             .cis_create_request();
@@ -673,21 +665,18 @@ impl ControlMachine {
         if self.phase != ControlPhase::QosConfigured {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let codec = self
-            .codec_plan
+        let codec = self.planned.codec_plan
             .as_ref()
             .expect("QosConfigured requires codec plan");
-        let iso = self
-            .iso_plan
+        let iso = self.planned.iso_plan
             .as_ref()
             .expect("QosConfigured requires ISO plan");
-        let qos = self
-            .qos_plan
+        let qos = self.planned.qos_plan
             .as_ref()
             .expect("QosConfigured requires QoS plan");
         let plan = plan_first_enable(codec, iso, qos)
             .map_err(ControlFailure::EnablePlan)?;
-        self.enable_plan = Some(plan);
+        self.planned.enable_plan = Some(plan);
         self.confirmed.enable_statuses = [None, None];
         self.confirmed.live_cis.clear();
         self.phase = ControlPhase::EnablePlanned;
@@ -709,19 +698,17 @@ impl ControlMachine {
         if self.phase != ControlPhase::CigConfigured {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let codec = self
-            .codec_plan
+        let codec = self.planned.codec_plan
             .as_ref()
             .expect("CigConfigured requires codec plan");
-        let iso = self
-            .iso_plan
+        let iso = self.planned.iso_plan
             .as_ref()
             .expect("CigConfigured requires ISO plan");
         let plan = plan_first_qos(codec, iso)
             .map_err(ControlFailure::QosPlan)?;
-        self.qos_plan = Some(plan);
+        self.planned.qos_plan = Some(plan);
         self.confirmed.qos_statuses = [None, None];
-        self.enable_plan = None;
+        self.planned.enable_plan = None;
         self.confirmed.enable_statuses = [None, None];
         self.confirmed.live_cis.clear();
         self.phase = ControlPhase::QosPlanned;
@@ -743,16 +730,15 @@ impl ControlMachine {
         if self.phase != ControlPhase::CodecConfigured {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let codec = self
-            .codec_plan
+        let codec = self.planned.codec_plan
             .as_ref()
             .expect("CodecConfigured requires codec plan");
         let plan = plan_first_iso(codec)
             .map_err(ControlFailure::IsoPlan)?;
-        self.iso_plan = Some(plan);
-        self.qos_plan = None;
+        self.planned.iso_plan = Some(plan);
+        self.planned.qos_plan = None;
         self.confirmed.qos_statuses = [None, None];
-        self.enable_plan = None;
+        self.planned.enable_plan = None;
         self.confirmed.enable_statuses = [None, None];
         self.phase = ControlPhase::IsoPlanned;
         Ok(())
@@ -764,8 +750,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::IsoPlanned {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let plan = self
-            .iso_plan
+        let plan = self.planned.iso_plan
             .as_ref()
             .expect("IsoPlanned requires ISO plan");
         self.phase = ControlPhase::ConfiguringCig;
@@ -799,11 +784,11 @@ impl ControlMachine {
             .expect("AudioSetDiscovered requires snapshot");
         let plan = plan_first_stream(set)
             .map_err(ControlFailure::CodecPlan)?;
-        self.codec_plan = Some(plan);
-        self.iso_plan = None;
-        self.qos_plan = None;
+        self.planned.codec_plan = Some(plan);
+        self.planned.iso_plan = None;
+        self.planned.qos_plan = None;
         self.confirmed.qos_statuses = [None, None];
-        self.enable_plan = None;
+        self.planned.enable_plan = None;
         self.confirmed.enable_statuses = [None, None];
         self.cig_may_exist = false;
         self.rollback.cig_pending = false;
@@ -823,8 +808,8 @@ impl ControlMachine {
         }
         self.audio_members.clear();
         self.confirmed.audio_set = None;
-        self.codec_plan = None;
-        self.iso_plan = None;
+        self.planned.codec_plan = None;
+        self.planned.iso_plan = None;
         self.cig_may_exist = false;
         self.rollback.cig_pending = false;
         self.ase_prepare = None;
@@ -1229,8 +1214,7 @@ impl ControlMachine {
                 ControlTimer::CigConfig,
             ) if self.phase == ControlPhase::ConfiguringCig =>
             {
-                let cig_id = self
-                    .iso_plan
+                let cig_id = self.planned.iso_plan
                     .as_ref()
                     .expect("ConfiguringCig requires ISO plan")
                     .cig_id;
@@ -1249,8 +1233,7 @@ impl ControlMachine {
                 ControlTimer::CisCreate,
             ) if self.phase == ControlPhase::CreatingCis =>
             {
-                let cig_id = self
-                    .iso_plan
+                let cig_id = self.planned.iso_plan
                     .as_ref()
                     .expect("CreatingCis requires ISO plan")
                     .cig_id;
@@ -1760,8 +1743,7 @@ impl ControlMachine {
                     CigConfigureState::Ready(allocation),
                 ),
             ) => {
-                let plan = self
-                    .iso_plan
+                let plan = self.planned.iso_plan
                     .as_ref()
                     .expect("ConfiguringCig requires ISO plan");
                 if !cig_allocation_matches_plan(allocation, plan) {
@@ -1842,8 +1824,7 @@ impl ControlMachine {
                     *cig_id,
                     established_cis_ids,
                 ) {
-                    let plan = self
-                        .iso_plan
+                    let plan = self.planned.iso_plan
                         .as_ref()
                         .expect("CreatingCis requires ISO plan");
                     let mut expected =
@@ -2147,8 +2128,7 @@ impl ControlMachine {
                     CigRemoveState::Removed { cig_id },
                 ),
             ) if self.rollback.cig_pending
-                && self
-                    .iso_plan
+                && self.planned.iso_plan
                     .as_ref()
                     .map(|plan| plan.cig_id)
                     == Some(*cig_id) =>
@@ -2303,8 +2283,7 @@ impl ControlMachine {
             .as_ref()
             .expect("streaming gate requires prepared ASE")
             .clone();
-        let context = self
-            .enable_plan
+        let context = self.planned.enable_plan
             .as_ref()
             .expect("streaming gate requires Enable plan")
             .context;
@@ -2552,13 +2531,11 @@ impl ControlMachine {
             .expect("QoS requires prepared ASE control")
             .clone();
         let planned = match side {
-            AudioSide::Left => &self
-                .qos_plan
+            AudioSide::Left => &self.planned.qos_plan
                 .as_ref()
                 .expect("QosPlanned requires QoS plan")
                 .left,
-            AudioSide::Right => &self
-                .qos_plan
+            AudioSide::Right => &self.planned.qos_plan
                 .as_ref()
                 .expect("QosPlanned requires QoS plan")
                 .right,
@@ -2597,13 +2574,11 @@ impl ControlMachine {
             .expect("Enable requires prepared ASE control")
             .clone();
         let planned = match side {
-            AudioSide::Left => &self
-                .enable_plan
+            AudioSide::Left => &self.planned.enable_plan
                 .as_ref()
                 .expect("EnablePlanned requires Enable plan")
                 .left,
-            AudioSide::Right => &self
-                .enable_plan
+            AudioSide::Right => &self.planned.enable_plan
                 .as_ref()
                 .expect("EnablePlanned requires Enable plan")
                 .right,
@@ -2959,8 +2934,7 @@ impl ControlMachine {
         side: AudioSide,
         status: &AseStatus,
     ) -> Result<(), String> {
-        let plan = self
-            .qos_plan
+        let plan = self.planned.qos_plan
             .as_ref()
             .ok_or_else(|| "missing QoS plan".to_string())?;
         let planned = match side {
@@ -2988,8 +2962,7 @@ impl ControlMachine {
     ) -> Result<(), String> {
         use bumble_profiles::le_audio::MetadataTag;
 
-        let plan = self
-            .enable_plan
+        let plan = self.planned.enable_plan
             .as_ref()
             .ok_or_else(|| "missing Enable plan".to_string())?;
         let planned = match side {
@@ -3046,7 +3019,7 @@ impl ControlMachine {
         &self,
         side: AudioSide,
     ) -> Result<&crate::plane::l1_control::planning::codec::PlannedSink, ControlFailure> {
-        let plan = self.codec_plan.as_ref().ok_or(
+        let plan = self.planned.codec_plan.as_ref().ok_or(
             ControlFailure::InvalidStartState(self.phase),
         )?;
         Ok(match side {
@@ -3195,7 +3168,7 @@ impl ControlMachine {
         &self,
         side: AudioSide,
     ) -> Option<CisRef> {
-        let plan = self.iso_plan.as_ref()?;
+        let plan = self.planned.iso_plan.as_ref()?;
         Some(CisRef {
             cig_id: plan.cig_id,
             cis_id: plan.cis_id(side),
@@ -3226,8 +3199,7 @@ impl ControlMachine {
         cig_id: u8,
         cis_id: u8,
     ) -> Result<CisRef, ControlFailure> {
-        let plan = self
-            .iso_plan
+        let plan = self.planned.iso_plan
             .as_ref()
             .ok_or(ControlFailure::InvalidStartState(self.phase))?;
         if cig_id != plan.cig_id
@@ -3265,7 +3237,7 @@ impl ControlMachine {
         cig_id: u8,
         cis_ids: &[u8],
     ) -> bool {
-        let Some(plan) = self.iso_plan.as_ref() else {
+        let Some(plan) = self.planned.iso_plan.as_ref() else {
             return false;
         };
         if cig_id != plan.cig_id || cis_ids.len() != 2 {
@@ -3607,8 +3579,7 @@ impl ControlMachine {
             if self.rollback.cig_pending {
                 return Ok(Vec::new());
             }
-            let cig_id = self
-                .iso_plan
+            let cig_id = self.planned.iso_plan
                 .as_ref()
                 .expect("CIG cleanup requires ISO plan")
                 .cig_id;
@@ -4412,7 +4383,7 @@ mod tests {
 
         let mut machine = machine_at_set_connected();
         machine.phase = ControlPhase::CodecPlanned;
-        machine.codec_plan = Some(StereoCodecPlan {
+        machine.planned.codec_plan = Some(StereoCodecPlan {
             format: LeAudioFormat {
                 sample_rate_hz: 48_000,
                 frame_duration_us: 10_000,
@@ -4842,8 +4813,8 @@ mod tests {
         };
 
         let planned = match side {
-            AudioSide::Left => &machine.qos_plan().unwrap().left,
-            AudioSide::Right => &machine.qos_plan().unwrap().right,
+            AudioSide::Left => &machine.planned.qos_plan().unwrap().left,
+            AudioSide::Right => &machine.planned.qos_plan().unwrap().right,
         };
         let mut endpoint =
             AseEndpoint::new(planned.parameters.ase_id, AudioRole::Sink);
@@ -4863,10 +4834,10 @@ mod tests {
 
         let ase_id = match side {
             AudioSide::Left => {
-                machine.qos_plan().unwrap().left.parameters.ase_id
+                machine.planned.qos_plan().unwrap().left.parameters.ase_id
             }
             AudioSide::Right => {
-                machine.qos_plan().unwrap().right.parameters.ase_id
+                machine.planned.qos_plan().unwrap().right.parameters.ase_id
             }
         };
         AseControlResponse {
@@ -5016,15 +4987,15 @@ mod tests {
         };
 
         let planned = match side {
-            AudioSide::Left => &machine.enable_plan().unwrap().left,
-            AudioSide::Right => &machine.enable_plan().unwrap().right,
+            AudioSide::Left => &machine.planned.enable_plan().unwrap().left,
+            AudioSide::Right => &machine.planned.enable_plan().unwrap().right,
         };
         let qos = match side {
             AudioSide::Left => {
-                &machine.qos_plan().unwrap().left
+                &machine.planned.qos_plan().unwrap().left
             }
             AudioSide::Right => {
-                &machine.qos_plan().unwrap().right
+                &machine.planned.qos_plan().unwrap().right
             }
         };
 
@@ -5048,10 +5019,10 @@ mod tests {
 
         let ase_id = match side {
             AudioSide::Left => {
-                machine.enable_plan().unwrap().left.ase_id
+                machine.planned.enable_plan().unwrap().left.ase_id
             }
             AudioSide::Right => {
-                machine.enable_plan().unwrap().right.ase_id
+                machine.planned.enable_plan().unwrap().right.ase_id
             }
         };
 
@@ -5308,7 +5279,7 @@ mod tests {
     #[test]
     fn create_cis_success_uses_only_semantic_cis_refs() {
         let mut machine = drive_to_enabled();
-        let plan = machine.iso_plan().unwrap().clone();
+        let plan = machine.planned.iso_plan().unwrap().clone();
 
         let actions = machine.begin_cis_creation().unwrap();
         assert_eq!(
@@ -5653,12 +5624,12 @@ mod tests {
         };
 
         let enable = match side {
-            AudioSide::Left => &machine.enable_plan().unwrap().left,
-            AudioSide::Right => &machine.enable_plan().unwrap().right,
+            AudioSide::Left => &machine.planned.enable_plan().unwrap().left,
+            AudioSide::Right => &machine.planned.enable_plan().unwrap().right,
         };
         let qos = match side {
-            AudioSide::Left => &machine.qos_plan().unwrap().left,
-            AudioSide::Right => &machine.qos_plan().unwrap().right,
+            AudioSide::Left => &machine.planned.qos_plan().unwrap().left,
+            AudioSide::Right => &machine.planned.qos_plan().unwrap().right,
         };
 
         let mut endpoint =
@@ -6298,7 +6269,7 @@ mod tests {
 
         machine.plan_iso().unwrap();
         assert_eq!(machine.phase(), ControlPhase::IsoPlanned);
-        let plan = machine.iso_plan().unwrap().clone();
+        let plan = machine.planned.iso_plan().unwrap().clone();
         assert_eq!(plan.cig_id, 1);
         assert_eq!(plan.left.cis_id, 1);
         assert_eq!(plan.right.cis_id, 2);
@@ -6343,7 +6314,7 @@ mod tests {
         // Control retains only the semantic plan. The controller-assigned
         // 0x0900/0x0901 handles from CigAllocation are intentionally not
         // represented in ControlMachine state.
-        assert_eq!(machine.iso_plan().unwrap(), &plan);
+        assert_eq!(machine.planned.iso_plan().unwrap(), &plan);
     }
 
     #[test]
@@ -6550,7 +6521,7 @@ mod tests {
 
         machine.plan_codec().unwrap();
         assert_eq!(machine.phase(), ControlPhase::CodecPlanned);
-        let plan = machine.codec_plan().unwrap();
+        let plan = machine.planned.codec_plan().unwrap();
         assert_eq!(plan.left.member_index, 1);
         assert_eq!(plan.right.member_index, 0);
         assert_eq!(plan.format.sample_rate_hz, 48_000);
