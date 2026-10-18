@@ -135,13 +135,17 @@ mod tests {
             control::LeAudioFormat,
             types::AudioSide,
         },
-        control::{
-            audio_snapshot::GattCharacteristicRange,
-            codec_plan::{PlannedSink, StereoCodecPlan},
-            iso_plan::plan_first_iso,
-            qos_plan::plan_first_qos,
+        plane::{
+            l1_control::{
+                discovery::snapshot::GattCharacteristicRange,
+                planning::{
+                    codec::{PlannedSink, StereoCodecPlan},
+                    iso::plan_first_iso,
+                    qos::plan_first_qos,
+                },
+            },
+            l1_hci::acl::connection::ConnectionToken,
         },
-        plane::l1_hci::acl::connection::ConnectionToken,
     };
 
     use super::*;

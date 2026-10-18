@@ -359,13 +359,15 @@ mod tests {
 
     use crate::{
         architecture::types::AudioSide,
-        control::{
-            audio_snapshot::GattCharacteristicRange,
-            codec_plan::PlannedSink,
-        },
-        plane::l1_hci::{
+        plane::{
+            l1_control::{
+                discovery::snapshot::GattCharacteristicRange,
+                planning::codec::PlannedSink,
+            },
+            l1_hci::{
             acl::connection::ConnectionToken,
             gatt::transaction::{GattResult, GattValueEvent},
+            },
         },
     };
 
