@@ -1,10 +1,10 @@
-pub mod runtime;
-
 //! Initial interval-group scheduler for the Media -> HCI boundary.
 //!
 //! This core is deterministic and I/O-free. MediaRt owns it alongside the
 //! encoded frame store. It follows LocalStreamClock's absolute grid and never
 //! waits for HCI/controller progress.
+
+pub mod runtime;
 
 use crate::{
     architecture::{
