@@ -3791,6 +3791,127 @@ mod tests {
     }
 
     #[test]
+    fn iso_teardown_retires_pending_packet_without_counting_completion() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        assert!(engine.device_mut().configure_controller_packet_pools(
+            None,
+            None,
+            Some(bumble_host::ControllerBufferInfo {
+                data_packet_length: 248,
+                total_num_data_packets: 8,
+            }),
+        ));
+        engine.iso_credit_audit.configure(8).unwrap();
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let acl = engine.connection_set_snapshot().connections[0].token();
+
+        engine.begin_cig_configuration(single_cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 1, 0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_cis_creation(
+                crate::plane::l1_hci::iso::cig_cis::CisCreateRequest {
+                    cig_id: 1,
+                    bindings: vec![
+                        crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
+                            cis_id: 1,
+                            acl,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let create_opcode = command_opcode(rx.try_recv().unwrap());
+        engine.ingest(command_status(create_opcode, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine.ingest(cis_established(0x0900, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_iso_path_setup(
+                crate::plane::l1_hci::iso::path::IsoDataPathConfig::hci_input(
+                    0x0900,
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND
+        );
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let group = crate::plane::l1_hci::iso::tx::IsoSduGroupRequest {
+            sdus: vec![crate::plane::l1_hci::iso::tx::IsoSduRequest {
+                connection_handle: 0x0900,
+                payload: vec![0x5a; 100],
+            }],
+        };
+        assert_eq!(
+            engine.submit_iso_group(&group).unwrap(),
+            crate::plane::l1_hci::iso::tx::IsoSubmitOutcome::Accepted
+        );
+        engine.poll_until_quiescent().unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), HostPacket::Iso(_)));
+        assert_eq!(engine.iso_credit_audit.in_flight(), 1);
+
+        let telemetry = engine.iso_telemetry_snapshot();
+        assert_eq!(telemetry.submitted_packets, 1);
+        assert_eq!(telemetry.completed_packets, 0);
+        assert_eq!(telemetry.retired_packets, 0);
+        assert_eq!(telemetry.in_flight_packets, 1);
+        assert!(engine.take_iso_telemetry_dirty());
+        assert!(!engine.take_iso_telemetry_dirty());
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x05, 0x04, 0x00, 0x00, 0x09, 0x16,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(engine.iso_credit_audit.in_flight(), 0);
+        let telemetry = engine.iso_telemetry_snapshot();
+        assert_eq!(telemetry.submitted_packets, 1);
+        assert_eq!(telemetry.completed_packets, 0);
+        assert_eq!(telemetry.retired_packets, 1);
+        assert_eq!(telemetry.in_flight_packets, 0);
+        assert!(engine.take_iso_telemetry_dirty());
+
+        assert!(matches!(
+            engine.iso_telemetry_trace_snapshot().last(),
+            Some(crate::plane::l1_hci::telemetry::HciIsoTraceRecord::Retired {
+                cis_handle: Some(0x0900),
+                count: 1,
+                in_flight: 0,
+            })
+        ));
+    }
+
+    #[test]
     fn engine_sets_up_and_removes_hci_input_path_through_bumble_projection() {
         let (mut engine, rx) = engine(32);
         make_minimal_attach_ready(&mut engine, &rx);
