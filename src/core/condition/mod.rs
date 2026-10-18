@@ -14,7 +14,7 @@ use crate::{
     core::{
         condition::interface::{
             ConditionChange, ConditionScope, RuntimeStatus,
-            StartControlAdmission, StreamHandoffAdmission,
+            StartControlAdmission, StopControlAdmission, StreamHandoffAdmission,
         },
         lifecycle::{LifecycleSnapshot, SessionId},
     },
@@ -57,6 +57,19 @@ impl Condition {
         } else {
             StartControlAdmission::ControlNotIdle
         }
+    }
+
+    pub fn stop_control_admission(&self) -> StopControlAdmission {
+        let control = self.blackboard.control.value();
+        if control.state == ControlState::Idle {
+            return StopControlAdmission::ControlIdle;
+        }
+        if control.state != ControlState::StreamReady
+            || control.stream_id.is_none()
+        {
+            return StopControlAdmission::ControlNotBound;
+        }
+        StopControlAdmission::Allowed
     }
 
     pub fn stream_handoff_admission(&self, session_id: SessionId) -> StreamHandoffAdmission {

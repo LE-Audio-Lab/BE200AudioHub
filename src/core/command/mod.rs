@@ -18,7 +18,7 @@ mod tests {
         core::{
             command::admission::{admit, CommandAdmissionError},
             condition::{
-                interface::{ConditionScope, StreamHandoffAdmission},
+                interface::{ConditionScope, StopControlAdmission, StreamHandoffAdmission},
                 Condition,
             },
             lifecycle::{
@@ -91,3 +91,26 @@ mod tests {
         );
     }
 }
+
+
+    #[test]
+    fn stop_control_requires_a_bound_stream_projection() {
+        let mut condition = test_condition();
+        condition.apply_control(
+            ConditionScope::session(Generation(7), SessionId(11)),
+            ControlConditionUpdate {
+                state: ControlState::StreamReady,
+                stream_id: Some(StreamId(99)),
+                format: None,
+            },
+        );
+        assert_eq!(admit(&condition, CoreCommand::StopControl), Ok(()));
+
+        let condition = test_condition();
+        assert_eq!(
+            admit(&condition, CoreCommand::StopControl),
+            Err(CommandAdmissionError::StopControl(
+                StopControlAdmission::ControlIdle,
+            )),
+        );
+    }

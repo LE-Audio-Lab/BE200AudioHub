@@ -31,6 +31,13 @@ pub struct ConditionChange {
 pub enum StartControlAdmission { Allowed, ControlNotIdle }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopControlAdmission {
+    Allowed,
+    ControlIdle,
+    ControlNotBound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamHandoffAdmission {
     Allowed,
     SessionMismatch,

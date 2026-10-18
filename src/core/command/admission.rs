@@ -1,7 +1,7 @@
 use crate::core::{
     command::types::CoreCommand,
     condition::{
-        interface::{StartControlAdmission, StreamHandoffAdmission},
+        interface::{StartControlAdmission, StopControlAdmission, StreamHandoffAdmission},
         Condition,
     },
 };
@@ -9,6 +9,7 @@ use crate::core::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandAdmissionError {
     StartControl(StartControlAdmission),
+    StopControl(StopControlAdmission),
     StreamHandoff(StreamHandoffAdmission),
 }
 
@@ -20,6 +21,10 @@ pub fn admit(
         CoreCommand::StartControl => match condition.start_control_admission() {
             StartControlAdmission::Allowed => Ok(()),
             denied => Err(CommandAdmissionError::StartControl(denied)),
+        },
+        CoreCommand::StopControl => match condition.stop_control_admission() {
+            StopControlAdmission::Allowed => Ok(()),
+            denied => Err(CommandAdmissionError::StopControl(denied)),
         },
         CoreCommand::BeginStreamHandoff { session_id, .. } => {
             match condition.stream_handoff_admission(session_id) {
