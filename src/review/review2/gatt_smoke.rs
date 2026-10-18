@@ -6,7 +6,7 @@ use std::{
 use bumble::Uuid;
 
 use crate::{
-    hci_host::mailbox::HciReport,
+    plane::l1_hci::interface::mailbox::HciReport,
     plane::l1_hci::{
         acl::connection::ConnectionToken,
         gatt::transaction::{

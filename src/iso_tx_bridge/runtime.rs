@@ -10,7 +10,7 @@ use crate::{
         media::EncodedStereoFrame,
         types::FrameId,
     },
-    hci_host::mailbox::HciLogicalIsoTx,
+    plane::l1_hci::interface::mailbox::HciLogicalIsoTx,
     runtime::mailbox::SendError,
 };
 
@@ -152,7 +152,7 @@ mod tests {
             media::EncodedStereoFrame,
             types::{FrameId, SessionId, StreamId},
         },
-        hci_host::mailbox::hci_mailbox_with_iso,
+        plane::l1_hci::interface::mailbox::hci_mailbox_with_iso,
         plane::l1_hci::iso::tx::IsoDataGroupRequest,
     };
 

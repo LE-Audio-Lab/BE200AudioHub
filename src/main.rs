@@ -7,7 +7,6 @@ mod stream_clock;
 mod iso_tx_bridge;
 mod control;
 
-mod hci_host;
 mod review;
 
 use review::{

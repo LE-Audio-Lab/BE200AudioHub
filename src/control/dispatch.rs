@@ -5,7 +5,7 @@
 //! timer actions are returned to the Core timer owner as directives.
 
 use crate::{
-    hci_host::mailbox::HciControl,
+    plane::l1_hci::interface::mailbox::HciControl,
     runtime::mailbox::SendError,
 };
 
@@ -119,7 +119,7 @@ pub fn dispatch_control_action(
 mod tests {
     use crate::{
         architecture::types::{SessionId, StreamId},
-        hci_host::mailbox::{
+        plane::l1_hci::interface::mailbox::{
             hci_mailbox_with_iso, HciCommand,
         },
         plane::l1_hci::iso::{

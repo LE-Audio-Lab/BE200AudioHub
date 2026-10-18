@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    hci_host::mailbox::{HciReport, HciReportInbox},
+    plane::l1_hci::interface::mailbox::{HciReport, HciReportInbox},
     plane::l1_hci::{
         iso::feature::CisHostFeatureState,
         host::{
@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn queued_report_wait_updates_tracker_before_matching() {
         let (_control, _ingress, reports, ports) =
-            crate::hci_host::mailbox::hci_mailbox(2, 2, 4);
+            crate::plane::l1_hci::interface::mailbox::hci_mailbox(2, 2, 4);
         ports
             .report_tx
             .try_send(HciReport::ControllerPrivacyState(

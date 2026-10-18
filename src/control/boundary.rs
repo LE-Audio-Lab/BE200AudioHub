@@ -13,7 +13,7 @@ use crate::{
         control::{ControlSnapshot, StreamBinding},
         types::{SessionId, StreamId},
     },
-    hci_host::mailbox::HciReport,
+    plane::l1_hci::interface::mailbox::HciReport,
 };
 
 use super::machine::{ControlAction, ControlTimer};

@@ -6,3 +6,4 @@ pub mod acl;
 pub mod gatt;
 pub mod host;
 pub mod iso;
+pub mod interface;

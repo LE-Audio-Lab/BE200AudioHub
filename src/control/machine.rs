@@ -9,7 +9,7 @@ use crate::{
         control::{ControlSnapshot, ControlState, StreamBinding, StreamTopology},
         types::{AudioSide, SessionId, StreamId},
     },
-    hci_host::mailbox::HciReport,
+    plane::l1_hci::interface::mailbox::HciReport,
     plane::l1_hci::{
         iso::{
             cig_cis::{

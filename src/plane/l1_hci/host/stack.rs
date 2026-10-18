@@ -1,5 +1,5 @@
 use crate::{
-    hci_host::mailbox::{
+    plane::l1_hci::interface::mailbox::{
         hci_mailbox_with_iso, HciControl, HciIsoTx, HciLogicalIsoTx,
         HciReportInbox,
     },

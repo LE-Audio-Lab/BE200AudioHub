@@ -9,7 +9,7 @@ use crate::{
 };
 
 use crate::{
-    hci_host::mailbox::{HciReport, HciReportInbox},
+    plane::l1_hci::interface::mailbox::{HciReport, HciReportInbox},
     plane::l1_hci::host::{
         engine::{OperationalAttachState, PassiveScanState},
         stack::{spawn_be200_hci_stack, HciStackConfig, HciStackExit},
@@ -191,7 +191,7 @@ fn wait_until<T>(
 mod tests {
     use super::*;
     use crate::{
-        hci_host::mailbox::hci_mailbox,
+        plane::l1_hci::interface::mailbox::hci_mailbox,
         plane::l1_hci::host::engine::ControllerCapabilities,
     };
 
