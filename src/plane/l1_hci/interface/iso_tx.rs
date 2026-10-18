@@ -34,6 +34,10 @@ impl HciIsoTx {
 }
 
 impl HciLogicalIsoTx {
+    pub(crate) fn new(tx: Sender<IsoDataGroupRequest>) -> Self {
+        Self { tx }
+    }
+
     pub fn try_submit_group(
         &self,
         request: LogicalIsoSduGroupRequest,

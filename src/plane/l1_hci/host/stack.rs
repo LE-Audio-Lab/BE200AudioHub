@@ -1,7 +1,9 @@
 use crate::{
-    plane::l1_hci::interface::mailbox::{
-        hci_mailbox_with_iso, HciControl, HciIsoTx, HciLogicalIsoTx,
-        HciReportInbox,
+    plane::l1_hci::interface::{
+        command::HciControl,
+        iso_tx::{HciIsoTx, HciLogicalIsoTx},
+        mailbox::hci_mailbox_with_iso,
+        report::HciReportInbox,
     },
     platform::backend::{BackendError, DeviceBackend},
     plane::l2_transport::worker::{

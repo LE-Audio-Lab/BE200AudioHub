@@ -119,8 +119,9 @@ pub fn dispatch_control_action(
 mod tests {
     use crate::{
         architecture::types::{SessionId, StreamId},
-        plane::l1_hci::interface::mailbox::{
-            hci_mailbox_with_iso, HciCommand,
+        plane::l1_hci::interface::{
+            command::HciCommand,
+            mailbox::hci_mailbox_with_iso,
         },
         plane::l1_hci::iso::{
             cig_cis::CisRef,

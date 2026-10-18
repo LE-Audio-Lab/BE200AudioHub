@@ -102,20 +102,15 @@ use crate::{
     architecture::types::{SessionId, StreamId},
     plane::l1_hci::{
         acl::{
-            connection::{ConnectionToken, FalConnectRequest},
+            connection::ConnectionToken,
             security::StoredEncryptionRequest,
-        },
-        gatt::transaction::GattRequest,
-        interface::{
-            command::HciCommand,
-            iso_tx::{HciIsoTx, HciLogicalIsoTx},
         },
         iso::{
             cig_cis::{CigConfig, CisCreateRequest, CisRef},
             path::IsoDataPathConfig,
             route::StereoStreamRouteBinding,
             tx::{
-                IsoDataGroupRequest, IsoDrainRequest, IsoSduGroupRequest,
+                IsoDrainRequest, IsoSduGroupRequest,
                 LogicalIsoSduGroupRequest,
             },
         },
