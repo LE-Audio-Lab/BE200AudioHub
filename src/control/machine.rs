@@ -56,6 +56,9 @@ use super::{
         resolve_connectable_members, ControlDiscoveryError,
         ResolvedMemberPresence,
     },
+    enable_plan::{
+        plan_first_enable, EnablePlanError, StereoEnablePlan,
+    },
     iso_plan::{
         plan_first_iso, IsoPlanError, StereoIsoPlan,
     },
@@ -91,6 +94,9 @@ pub enum ControlPhase {
     QosPlanned,
     ConfiguringQos { side: AudioSide },
     QosConfigured,
+    EnablePlanned,
+    Enabling { side: AudioSide },
+    Enabled,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -236,6 +242,11 @@ pub enum ControlFailure {
         side: AudioSide,
         detail: String,
     },
+    EnablePlan(EnablePlanError),
+    EnableReadbackMismatch {
+        side: AudioSide,
+        detail: String,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -271,6 +282,8 @@ pub struct ControlMachine {
     iso_plan: Option<StereoIsoPlan>,
     qos_plan: Option<StereoQosPlan>,
     qos_statuses: [Option<AseStatus>; 2],
+    enable_plan: Option<StereoEnablePlan>,
+    enable_statuses: [Option<AseStatus>; 2],
     cig_may_exist: bool,
     rollback_cig_pending: bool,
     failure: Option<ControlFailure>,
@@ -301,6 +314,8 @@ impl ControlMachine {
             iso_plan: None,
             qos_plan: None,
             qos_statuses: [None, None],
+            enable_plan: None,
+            enable_statuses: [None, None],
             cig_may_exist: false,
             rollback_cig_pending: false,
             failure: None,
@@ -360,6 +375,52 @@ impl ControlMachine {
         self.qos_statuses[side_index(side)].as_ref()
     }
 
+    pub fn enable_plan(&self) -> Option<&StereoEnablePlan> {
+        self.enable_plan.as_ref()
+    }
+
+    pub fn enable_status(
+        &self,
+        side: AudioSide,
+    ) -> Option<&AseStatus> {
+        self.enable_statuses[side_index(side)].as_ref()
+    }
+
+    pub fn plan_enable(
+        &mut self,
+    ) -> Result<(), ControlFailure> {
+        if self.phase != ControlPhase::QosConfigured {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let codec = self
+            .codec_plan
+            .as_ref()
+            .expect("QosConfigured requires codec plan");
+        let iso = self
+            .iso_plan
+            .as_ref()
+            .expect("QosConfigured requires ISO plan");
+        let qos = self
+            .qos_plan
+            .as_ref()
+            .expect("QosConfigured requires QoS plan");
+        let plan = plan_first_enable(codec, iso, qos)
+            .map_err(ControlFailure::EnablePlan)?;
+        self.enable_plan = Some(plan);
+        self.enable_statuses = [None, None];
+        self.phase = ControlPhase::EnablePlanned;
+        Ok(())
+    }
+
+    pub fn begin_enable(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::EnablePlanned {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.start_enable(AudioSide::Left)
+    }
+
     pub fn plan_qos(
         &mut self,
     ) -> Result<(), ControlFailure> {
@@ -378,6 +439,8 @@ impl ControlMachine {
             .map_err(ControlFailure::QosPlan)?;
         self.qos_plan = Some(plan);
         self.qos_statuses = [None, None];
+        self.enable_plan = None;
+        self.enable_statuses = [None, None];
         self.phase = ControlPhase::QosPlanned;
         Ok(())
     }
@@ -406,6 +469,8 @@ impl ControlMachine {
         self.iso_plan = Some(plan);
         self.qos_plan = None;
         self.qos_statuses = [None, None];
+        self.enable_plan = None;
+        self.enable_statuses = [None, None];
         self.phase = ControlPhase::IsoPlanned;
         Ok(())
     }
@@ -456,6 +521,8 @@ impl ControlMachine {
         self.iso_plan = None;
         self.qos_plan = None;
         self.qos_statuses = [None, None];
+        self.enable_plan = None;
+        self.enable_statuses = [None, None];
         self.cig_may_exist = false;
         self.rollback_cig_pending = false;
         self.ase_prepare = None;
@@ -1260,7 +1327,8 @@ impl ControlMachine {
             ) => self.on_ase_prepare_gatt_report(side, report),
             (
                 ControlPhase::ConfiguringCodec { side }
-                | ControlPhase::ConfiguringQos { side },
+                | ControlPhase::ConfiguringQos { side }
+                | ControlPhase::Enabling { side },
                 HciReport::Gatt(report),
             ) => self.on_ase_operation_gatt_report(side, report),
 
@@ -1354,6 +1422,51 @@ impl ControlMachine {
         self.next_gatt_request_id = machine.next_request_id();
         self.ase_operation = Some(machine);
         self.phase = ControlPhase::ConfiguringQos { side };
+
+        let mut actions = vec![ControlAction::ArmTimer(
+            ControlTimer::AseOperation { side },
+        )];
+        actions.extend(
+            self.translate_ase_operation_action(side, None, action)?,
+        );
+        Ok(actions)
+    }
+
+    fn start_enable(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let prepared = self.prepared_ases[side_index(side)]
+            .as_ref()
+            .expect("Enable requires prepared ASE control")
+            .clone();
+        let planned = match side {
+            AudioSide::Left => &self
+                .enable_plan
+                .as_ref()
+                .expect("EnablePlanned requires Enable plan")
+                .left,
+            AudioSide::Right => &self
+                .enable_plan
+                .as_ref()
+                .expect("EnablePlanned requires Enable plan")
+                .right,
+        };
+        let operation = AseOperation::Enable(vec![
+            planned.parameters(),
+        ]);
+        let mut machine = AseOperationMachine::new(
+            prepared,
+            operation,
+            AseState::ENABLING,
+            self.next_gatt_request_id,
+        );
+        let action = machine.start().map_err(|failure| {
+            ControlFailure::AseOperation { side, failure }
+        })?;
+        self.next_gatt_request_id = machine.next_request_id();
+        self.ase_operation = Some(machine);
+        self.phase = ControlPhase::Enabling { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
             ControlTimer::AseOperation { side },
@@ -1617,6 +1730,36 @@ impl ControlMachine {
                             }
                         }
                     }
+                    ControlPhase::Enabling {
+                        side: active_side,
+                    } if active_side == side => {
+                        if let Err(detail) =
+                            self.verify_enable_readback(side, &status)
+                        {
+                            actions.extend(self.begin_rollback(
+                                ControlFailure::EnableReadbackMismatch {
+                                    side,
+                                    detail,
+                                },
+                            )?);
+                            return Ok(actions);
+                        }
+
+                        self.enable_statuses[side_index(side)] =
+                            Some(status);
+                        match side {
+                            AudioSide::Left => {
+                                actions.extend(
+                                    self.start_enable(
+                                        AudioSide::Right,
+                                    )?,
+                                );
+                            }
+                            AudioSide::Right => {
+                                self.phase = ControlPhase::Enabled;
+                            }
+                        }
+                    }
                     other => {
                         return Err(
                             ControlFailure::InvalidStartState(other),
@@ -1682,10 +1825,47 @@ impl ControlMachine {
         }
     }
 
+    fn verify_enable_readback(
+        &self,
+        side: AudioSide,
+        status: &AseStatus,
+    ) -> Result<(), String> {
+        use bumble_profiles::le_audio::MetadataTag;
+
+        let plan = self
+            .enable_plan
+            .as_ref()
+            .ok_or_else(|| "missing Enable plan".to_string())?;
+        let planned = match side {
+            AudioSide::Left => &plan.left,
+            AudioSide::Right => &plan.right,
+        };
+
+        match &status.details {
+            AseStatusDetails::Metadata {
+                cig_id,
+                cis_id,
+                metadata,
+            } if *cig_id == planned.cig_id
+                && *cis_id == planned.cis_id
+                && metadata.entries.iter().any(|entry| {
+                    entry.tag == MetadataTag::STREAMING_AUDIO_CONTEXTS
+                        && entry.data == plan.context.0.to_le_bytes()
+                }) =>
+            {
+                Ok(())
+            }
+            other => Err(format!(
+                "{side:?} Enable readback mismatch: {other:?}"
+            )),
+        }
+    }
+
     fn active_ase_operation_side(&self) -> Option<AudioSide> {
         match self.phase {
             ControlPhase::ConfiguringCodec { side }
-            | ControlPhase::ConfiguringQos { side } => Some(side),
+            | ControlPhase::ConfiguringQos { side }
+            | ControlPhase::Enabling { side } => Some(side),
             _ => None,
         }
     }
