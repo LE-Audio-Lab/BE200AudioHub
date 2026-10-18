@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 mod audio_flow;
+mod connection_flow;
 mod event_reducer;
 mod report_reducer;
 mod rollback_flow;
@@ -559,71 +560,6 @@ impl ControlMachine {
         }
         Ok(self.confirmed.active_stream_binding
             .expect("StreamBoundReady requires active binding"))
-    }
-
-    pub fn start(&mut self) -> Result<Vec<ControlAction>, ControlFailure> {
-        if self.phase != ControlPhase::Idle {
-            return Err(ControlFailure::InvalidStartState(self.phase));
-        }
-        self.plan.validate().map_err(ControlFailure::Plan)?;
-        self.phase = ControlPhase::Attaching;
-        Ok(vec![
-            ControlAction::BeginOperationalAttach,
-            ControlAction::ArmTimer(ControlTimer::Attach),
-        ])
-    }
-
-    fn begin_member_connection(
-        &mut self,
-        member_index: usize,
-    ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let request = self
-            .plan
-            .connect_request(member_index)
-            .map_err(ControlFailure::Plan)?;
-        self.phase = ControlPhase::ConnectingMember {
-            member_index,
-        };
-        Ok(vec![
-            ControlAction::BeginFalConnection {
-                member_index,
-                request,
-            },
-            ControlAction::ArmTimer(
-                ControlTimer::Connect { member_index },
-            ),
-        ])
-    }
-
-    fn remove_known_connection(
-        &mut self,
-        connection: ConnectionToken,
-    ) {
-        for slot in &mut self.confirmed.connections {
-            if *slot == Some(connection) {
-                *slot = None;
-            }
-        }
-    }
-
-
-    fn connection_set_matches(
-        &self,
-        snapshot: &LeConnectionSetSnapshot,
-    ) -> bool {
-        if snapshot.connections.len() != self.plan.members.len() {
-            return false;
-        }
-
-        self.confirmed.connections.iter().all(|expected| {
-            let Some(expected) = expected else {
-                return false;
-            };
-            snapshot.connections.iter().any(|actual| {
-                actual.token() == *expected
-                    && actual.encryption_enabled != 0
-            })
-        })
     }
 
     fn timer_matches_phase(&self, timer: ControlTimer) -> bool {
