@@ -134,9 +134,12 @@ Ported source semantics:
 - approximately 10 ms capture buffer;
 - no destination endpoint ownership.
 
-### M5 — live PCM → LC3 → bridge — NEXT
+### M5 — live PCM → LC3 → bridge — LANDED
 
-Add the 10 ms Media consumer that:
+Landed `l1_media/live.rs` with `LivePcmIsoRuntime`.
+
+The 10 ms Media consumer:
+
 
 1. consumes exactly 480 stereo Float32 frames from `PcmRelayBoundary`;
 2. converts to Media PCM representation;
@@ -144,7 +147,7 @@ Add the 10 ms Media consumer that:
 4. encodes left/right LC3;
 5. pushes encoded frame to IsoTxBridge.
 
-### M6 — current-path live HIL — PENDING
+### M6 — current-path live HIL — NEXT
 
 Use the existing Round8 current Control/HCI setup and teardown path, replacing
 only the synthetic source with live Process Loopback input.

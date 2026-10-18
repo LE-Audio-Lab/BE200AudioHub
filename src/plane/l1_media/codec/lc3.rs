@@ -21,6 +21,13 @@ use crate::plane::l1_media::source::synthetic::{
 
 pub type EncodedLc3StereoFrame = EncodedStereoFrame<Vec<u8>>;
 
+fn float_sample_to_i16(sample: f32) -> i16 {
+    if !sample.is_finite() {
+        return 0;
+    }
+    (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaLc3Error {
     UnsupportedTopology(StreamTopology),
@@ -75,6 +82,25 @@ impl Lc3StereoEncoder {
             left,
             right,
         })
+    }
+
+    pub fn encode_float32_stereo(
+        &self,
+        frame_id: crate::plane::l1_media::clock::frame::FrameId,
+        pcm: &[[f32; 2]; SAMPLES_PER_FRAME],
+    ) -> Result<EncodedLc3StereoFrame, MediaLc3Error> {
+        let mut converted = PcmStereoFrame {
+            frame_id,
+            left: [0; SAMPLES_PER_FRAME],
+            right: [0; SAMPLES_PER_FRAME],
+        };
+
+        for (index, frame) in pcm.iter().enumerate() {
+            converted.left[index] = float_sample_to_i16(frame[0]);
+            converted.right[index] = float_sample_to_i16(frame[1]);
+        }
+
+        self.encode(&converted)
     }
 
     pub fn encode(
@@ -235,6 +261,18 @@ mod tests {
             im += f64::from(sample) * phase.sin();
         }
         re * re + im * im
+    }
+
+
+    #[test]
+    fn float32_live_pcm_conversion_clamps_without_gain() {
+        assert_eq!(float_sample_to_i16(0.0), 0);
+        assert_eq!(float_sample_to_i16(1.0), 32_767);
+        assert_eq!(float_sample_to_i16(-1.0), -32_767);
+        assert_eq!(float_sample_to_i16(2.0), 32_767);
+        assert_eq!(float_sample_to_i16(-2.0), -32_767);
+        assert_eq!(float_sample_to_i16(f32::NAN), 0);
+        assert_eq!(float_sample_to_i16(0.5), 16_384);
     }
 
     #[test]
