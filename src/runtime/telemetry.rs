@@ -26,6 +26,20 @@ pub enum TelemetryRingError {
     ZeroCapacity,
 }
 
+/// Construct the default raw-diagnostic ring used by producer planes.
+///
+/// The default policy preserves the most recent bounded history. Overflow
+/// evicts exactly one oldest record and increments the loss counter; it never
+/// blocks the producer and never writes to persistent storage.
+pub fn telemetry_ring<T>(
+    capacity: usize,
+) -> Result<TelemetryRing<T>, TelemetryRingError> {
+    TelemetryRing::new(
+        capacity,
+        TelemetryOverflowPolicy::OverwriteOldest,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TelemetryRingStats {
     pub capacity: usize,
@@ -143,6 +157,19 @@ impl<T: Clone> TelemetryRing<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_telemetry_ring_keeps_latest_bounded_history() {
+        let mut ring = telemetry_ring(2).unwrap();
+        ring.push(1);
+        ring.push(2);
+        assert_eq!(
+            ring.push(3),
+            TelemetryPushOutcome::OverwroteOldest
+        );
+        assert_eq!(ring.snapshot(), vec![2, 3]);
+        assert_eq!(ring.stats().overwritten_oldest, 1);
+    }
 
     #[test]
     fn zero_capacity_is_rejected() {
