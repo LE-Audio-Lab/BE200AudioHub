@@ -252,7 +252,7 @@ mod tests {
         assert!(SyntheticToneSource::new(config).is_err());
 
         let mut config = SyntheticToneConfig::default();
-        config.fade_samples = 24_001;
+        config.fade_samples = 48_001;
         assert!(SyntheticToneSource::new(config).is_err());
     }
 }

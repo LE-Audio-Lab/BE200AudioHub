@@ -200,8 +200,11 @@ mod tests {
 
     use crate::{
         core::lifecycle::{SessionId, StreamId},
-        plane::l1_control::interface::stream::{
-            StreamBinding, StreamTopology,
+        plane::{
+            l1_control::interface::stream::{
+                StreamBinding, StreamTopology,
+            },
+            l1_media::source::synthetic::DEFAULT_FRAME_COUNT,
         },
     };
 
@@ -242,7 +245,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(frames.len(), 100);
+        assert_eq!(frames.len(), DEFAULT_FRAME_COUNT as usize);
         for (index, frame) in frames.iter().enumerate() {
             assert_eq!(frame.frame_id.0, index as u64);
             assert_eq!(frame.left.len(), 100);
