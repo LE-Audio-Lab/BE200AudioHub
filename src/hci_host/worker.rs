@@ -28,6 +28,10 @@ use super::{
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
     security::StoredEncryptionState,
+    stream_route::{
+        StreamRouteFailure, StreamRouteFailureKind,
+        StreamRouteState,
+    },
 };
 
 const CONTROL_BUDGET_PER_TURN: usize = 4;
@@ -127,18 +131,46 @@ fn run_loop(
                 Ok(command) => {
                     did_work = true;
                     let audit_command =
-                        matches!(command, HciCommand::ReadIsoTxAudit);
-                    if let Err(fault) = process_command(
-                        &mut engine,
-                        command,
-                        &mut blocked_iso_handles,
-                        &mut pending_iso_group,
-                        &mut iso_drain_state,
-                    ) {
-                        return HciWorkerExit::Faulted(
-                            HciWorkerFault::Engine(fault),
-                        );
+                        matches!(&command, HciCommand::ReadIsoTxAudit);
+
+                    let route_state =
+                        match process_stream_route_command(
+                            &mut engine,
+                            &command,
+                        ) {
+                            Ok(state) => state,
+                            Err(fault) => {
+                                return HciWorkerExit::Faulted(
+                                    HciWorkerFault::Engine(fault),
+                                )
+                            }
+                        };
+
+                    if route_state.is_none() {
+                        if let Err(fault) = process_command(
+                            &mut engine,
+                            command,
+                            &mut blocked_iso_handles,
+                            &mut pending_iso_group,
+                            &mut iso_drain_state,
+                        ) {
+                            return HciWorkerExit::Faulted(
+                                HciWorkerFault::Engine(fault),
+                            );
+                        }
                     }
+
+                    if let Some(state) = route_state {
+                        if let Err(fault) = report_tx
+                            .try_send(HciReport::StreamRouteState(
+                                state,
+                            ))
+                            .map_err(map_report_error)
+                        {
+                            return HciWorkerExit::Faulted(fault);
+                        }
+                    }
+
                     if audit_command {
                         if let Err(fault) = report_tx
                             .try_send(HciReport::IsoTxAudit(
@@ -429,6 +461,48 @@ fn maybe_publish_iso_audit(
     Ok(())
 }
 
+fn process_stream_route_command(
+    engine: &mut HciEngine,
+    command: &HciCommand,
+) -> Result<Option<StreamRouteState>, EngineFault> {
+    match command {
+        HciCommand::BindStreamRoute(binding) => {
+            let state = match engine.bind_stream_route(*binding) {
+                Ok(()) => StreamRouteState::Bound {
+                    session_id: binding.session_id,
+                    stream_id: binding.stream_id,
+                },
+                Err(EngineFault::StreamRouteConfig(error)) => {
+                    StreamRouteState::Failed(StreamRouteFailure {
+                        session_id: binding.session_id,
+                        stream_id: binding.stream_id,
+                        kind: StreamRouteFailureKind::Config(error),
+                    })
+                }
+                Err(EngineFault::StreamRouteCisNotReady(cis)) => {
+                    StreamRouteState::Failed(StreamRouteFailure {
+                        session_id: binding.session_id,
+                        stream_id: binding.stream_id,
+                        kind: StreamRouteFailureKind::CisNotReady(cis),
+                    })
+                }
+                Err(fault) => return Err(fault),
+            };
+            Ok(Some(state))
+        }
+        HciCommand::UnbindStreamRoute {
+            session_id,
+            stream_id,
+        } => Ok(Some(StreamRouteState::Unbound {
+            session_id: *session_id,
+            stream_id: *stream_id,
+            was_bound: engine
+                .unbind_stream_route(*session_id, *stream_id),
+        })),
+        _ => Ok(None),
+    }
+}
+
 fn process_command(
     engine: &mut HciEngine,
     command: HciCommand,
@@ -506,6 +580,12 @@ fn process_command(
             cis,
             directions,
         ),
+        HciCommand::BindStreamRoute(_)
+        | HciCommand::UnbindStreamRoute { .. } => {
+            unreachable!(
+                "stream route commands are handled before generic dispatch"
+            )
+        }
         HciCommand::BeginIsoDrain(request) => {
             begin_iso_drain(
                 engine,
