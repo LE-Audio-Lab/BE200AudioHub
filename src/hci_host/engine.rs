@@ -3460,6 +3460,29 @@ mod tests {
         engine.ingest(cis_established(0x0901, 0)).unwrap();
         engine.poll_until_quiescent().unwrap();
 
+        let route =
+            super::super::stream_route::StereoStreamRouteBinding {
+                session_id:
+                    crate::architecture::types::SessionId(7),
+                stream_id:
+                    crate::architecture::types::StreamId(11),
+                left: super::super::iso::CisRef {
+                    cig_id: 1,
+                    cis_id: 1,
+                },
+                right: super::super::iso::CisRef {
+                    cig_id: 1,
+                    cis_id: 2,
+                },
+            };
+        assert_eq!(
+            engine.bind_stream_route(route),
+            Err(EngineFault::StreamRouteCisNotReady(
+                route.left,
+            )),
+            "logical route must not bind before both Input Paths exist",
+        );
+
         for handle in [0x0900, 0x0901] {
             engine
                 .begin_iso_path_setup(
@@ -3481,6 +3504,32 @@ mod tests {
                 .unwrap();
             engine.poll_until_quiescent().unwrap();
         }
+
+        engine.bind_stream_route(route).unwrap();
+        assert_eq!(
+            engine.resolve_stream_cis(
+                route.session_id,
+                route.stream_id,
+                crate::architecture::types::AudioSide::Left,
+            ),
+            Some(route.left)
+        );
+        assert_eq!(
+            engine.resolve_stream_handle(
+                route.session_id,
+                route.stream_id,
+                crate::architecture::types::AudioSide::Left,
+            ),
+            Some(0x0900)
+        );
+        assert_eq!(
+            engine.resolve_stream_handle(
+                route.session_id,
+                route.stream_id,
+                crate::architecture::types::AudioSide::Right,
+            ),
+            Some(0x0901)
+        );
 
         let group = super::super::iso_tx::IsoSduGroupRequest {
             sdus: vec![
@@ -3533,6 +3582,54 @@ mod tests {
         );
         engine.poll_until_quiescent().unwrap();
         assert_eq!(engine.iso_credit_audit.in_flight(), 2);
+
+        for _ in 0..2 {
+            assert!(matches!(rx.try_recv().unwrap(), HostPacket::Iso(_)));
+        }
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x13, 0x09, 0x02,
+                0x00, 0x09, 0x01, 0x00,
+                0x01, 0x09, 0x01, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(engine.iso_credit_audit.in_flight(), 0);
+
+        engine
+            .begin_iso_path_remove_by_ref(route.right, 0x01)
+            .unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND
+        );
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x01, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.resolve_stream_handle(
+                route.session_id,
+                route.stream_id,
+                crate::architecture::types::AudioSide::Right,
+            ),
+            None,
+            "removing a live Input Path must invalidate its logical route",
+        );
+        assert_eq!(
+            engine.resolve_stream_handle(
+                route.session_id,
+                route.stream_id,
+                crate::architecture::types::AudioSide::Left,
+            ),
+            Some(0x0900),
+            "unrelated side remains independently resolvable",
+        );
     }
 
     #[test]
