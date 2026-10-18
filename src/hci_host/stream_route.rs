@@ -34,6 +34,33 @@ pub enum StreamRouteConfigError {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamRouteFailureKind {
+    Config(StreamRouteConfigError),
+    CisNotReady(CisRef),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamRouteFailure {
+    pub session_id: SessionId,
+    pub stream_id: StreamId,
+    pub kind: StreamRouteFailureKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamRouteState {
+    Bound {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
+    Unbound {
+        session_id: SessionId,
+        stream_id: StreamId,
+        was_bound: bool,
+    },
+    Failed(StreamRouteFailure),
+}
+
 #[derive(Default)]
 pub struct StreamRouteTable {
     routes: HashMap<StreamRouteKey, CisRef>,
