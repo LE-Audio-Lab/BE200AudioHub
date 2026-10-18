@@ -458,6 +458,126 @@ impl ControlMachine {
                 Ok(actions)
             }
             ControlEvent::TimerExpired(
+                ControlTimer::Gatt {
+                    member_index,
+                    request_id,
+                },
+            ) if matches!(
+                self.phase,
+                ControlPhase::PreparingCodecAse { side }
+                    if self.planned_sink(side)
+                        .map(|sink| sink.member_index)
+                        .ok() == Some(member_index)
+            )
+                && self
+                    .ase_prepare
+                    .as_ref()
+                    .and_then(|value| value.pending_request_id())
+                    == Some(request_id) =>
+            {
+                let side = match self.phase {
+                    ControlPhase::PreparingCodecAse { side } => side,
+                    _ => unreachable!(),
+                };
+                let connection = self.planned_sink(side)?.connection;
+                self.ase_prepare = None;
+                let mut actions = vec![
+                    ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    },
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ),
+                ];
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AsePrepareTimeout {
+                        side,
+                        request_id,
+                    },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::Gatt {
+                    member_index,
+                    request_id,
+                },
+            ) if matches!(
+                self.phase,
+                ControlPhase::ConfiguringCodec { side }
+                    if self.planned_sink(side)
+                        .map(|sink| sink.member_index)
+                        .ok() == Some(member_index)
+            )
+                && self
+                    .ase_operation
+                    .as_ref()
+                    .and_then(|value| value.pending_request_id())
+                    == Some(request_id) =>
+            {
+                let side = match self.phase {
+                    ControlPhase::ConfiguringCodec { side } => side,
+                    _ => unreachable!(),
+                };
+                let connection = self.planned_sink(side)?.connection;
+                self.ase_operation = None;
+                let mut actions = vec![
+                    ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    },
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ),
+                    ControlAction::DisarmTimer(
+                        ControlTimer::AseOperation { side },
+                    ),
+                ];
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AseOperationTimeout { side },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::AseOperation { side },
+            ) if self.phase == ControlPhase::ConfiguringCodec { side } =>
+            {
+                let connection = self.planned_sink(side)?.connection;
+                let member_index = self.planned_sink(side)?.member_index;
+                let pending = self
+                    .ase_operation
+                    .as_ref()
+                    .and_then(|value| value.pending_request_id());
+                self.ase_operation = None;
+
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::AseOperation { side },
+                )];
+                if let Some(request_id) = pending {
+                    actions.push(ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    });
+                    actions.push(ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ));
+                }
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AseOperationTimeout { side },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
                 ControlTimer::CleanupDisconnect(connection),
             ) if self.phase == ControlPhase::RollingBack
                 && self.rollback_current == Some(connection) =>
@@ -856,6 +976,14 @@ impl ControlMachine {
                 ControlPhase::DiscoveringAudioMember { member_index },
                 HciReport::Gatt(report),
             ) => self.on_audio_gatt_report(member_index, report),
+            (
+                ControlPhase::PreparingCodecAse { side },
+                HciReport::Gatt(report),
+            ) => self.on_ase_prepare_gatt_report(side, report),
+            (
+                ControlPhase::ConfiguringCodec { side },
+                HciReport::Gatt(report),
+            ) => self.on_ase_operation_gatt_report(side, report),
 
             _ => Ok(Vec::new()),
         }
@@ -910,6 +1038,267 @@ impl ControlMachine {
             self.translate_ase_operation_action(side, None, action)?,
         );
         Ok(actions)
+    }
+
+    fn on_ase_prepare_gatt_report(
+        &mut self,
+        side: AudioSide,
+        report: &GattReport,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut machine = self
+            .ase_prepare
+            .take()
+            .expect("prepare phase missing ASE preparation FSM");
+        let pending_before = machine.pending_request_id();
+        let outcome = machine.on_gatt_report(report);
+        let pending_after = machine.pending_request_id();
+        self.next_gatt_request_id = machine.next_request_id();
+        let completed_request = if pending_before.is_some()
+            && pending_before != pending_after
+        {
+            pending_before
+        } else {
+            None
+        };
+
+        match outcome {
+            Ok(AsePrepareAction::Ignored) => {
+                self.ase_prepare = Some(machine);
+                Ok(Vec::new())
+            }
+            Ok(action) => {
+                self.ase_prepare = if matches!(
+                    action,
+                    AsePrepareAction::Complete(_)
+                ) {
+                    None
+                } else {
+                    Some(machine)
+                };
+                self.translate_ase_prepare_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Err(failure) => {
+                self.ase_prepare = None;
+                let mut actions =
+                    self.disarm_gatt_request(side, completed_request)?;
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AsePrepare { side, failure },
+                )?);
+                Ok(actions)
+            }
+        }
+    }
+
+    fn translate_ase_prepare_action(
+        &mut self,
+        side: AudioSide,
+        completed_request: Option<GattRequestId>,
+        action: AsePrepareAction,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut actions =
+            self.disarm_gatt_request(side, completed_request)?;
+
+        match action {
+            AsePrepareAction::BeginGatt(request) => {
+                let member_index = self.planned_sink(side)?.member_index;
+                let request_id = request.request_id;
+                actions.push(ControlAction::BeginGatt(request));
+                actions.push(ControlAction::ArmTimer(
+                    ControlTimer::Gatt {
+                        member_index,
+                        request_id,
+                    },
+                ));
+                Ok(actions)
+            }
+            AsePrepareAction::Complete(prepared) => {
+                self.prepared_ases[side_index(side)] = Some(prepared);
+                actions.extend(self.start_config_codec(side)?);
+                Ok(actions)
+            }
+            AsePrepareAction::Ignored => Ok(actions),
+        }
+    }
+
+    fn on_ase_operation_gatt_report(
+        &mut self,
+        side: AudioSide,
+        report: &GattReport,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut machine = self
+            .ase_operation
+            .take()
+            .expect("ConfigCodec phase missing ASCS operation FSM");
+        let pending_before = machine.pending_request_id();
+        let outcome = machine.on_gatt_report(report);
+        let pending_after = machine.pending_request_id();
+        self.next_gatt_request_id = machine.next_request_id();
+        let completed_request = if pending_before.is_some()
+            && pending_before != pending_after
+        {
+            pending_before
+        } else {
+            None
+        };
+
+        match outcome {
+            Ok(AseOperationAction::Ignored) => {
+                self.ase_operation = Some(machine);
+                Ok(Vec::new())
+            }
+            Ok(AseOperationAction::Await) => {
+                self.ase_operation = Some(machine);
+                self.disarm_gatt_request(side, completed_request)
+            }
+            Ok(action @ AseOperationAction::BeginGatt(_)) => {
+                self.ase_operation = Some(machine);
+                self.translate_ase_operation_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Ok(action @ AseOperationAction::Complete(_)) => {
+                self.ase_operation = None;
+                self.translate_ase_operation_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Err(failure) => {
+                self.ase_operation = None;
+                let mut actions =
+                    self.disarm_gatt_request(side, completed_request)?;
+
+                // CP/ASE notification may fail the semantic operation while
+                // the ATT Write Request is still outstanding.
+                if let Some(request_id) = pending_after {
+                    actions.push(ControlAction::CancelGatt {
+                        connection: self.planned_sink(side)?.connection,
+                        request_id,
+                    });
+                    actions.extend(
+                        self.disarm_gatt_request(
+                            side,
+                            Some(request_id),
+                        )?,
+                    );
+                }
+
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::AseOperation { side },
+                ));
+                actions.extend(self.begin_rollback(
+                    ControlFailure::AseOperation { side, failure },
+                )?);
+                Ok(actions)
+            }
+        }
+    }
+
+    fn translate_ase_operation_action(
+        &mut self,
+        side: AudioSide,
+        completed_request: Option<GattRequestId>,
+        action: AseOperationAction,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut actions =
+            self.disarm_gatt_request(side, completed_request)?;
+
+        match action {
+            AseOperationAction::BeginGatt(request) => {
+                let member_index = self.planned_sink(side)?.member_index;
+                let request_id = request.request_id;
+                actions.push(ControlAction::BeginGatt(request));
+                actions.push(ControlAction::ArmTimer(
+                    ControlTimer::Gatt {
+                        member_index,
+                        request_id,
+                    },
+                ));
+                Ok(actions)
+            }
+            AseOperationAction::Await
+            | AseOperationAction::Ignored => Ok(actions),
+            AseOperationAction::Complete(status) => {
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::AseOperation { side },
+                ));
+
+                if let Err(detail) =
+                    self.verify_codec_readback(side, &status)
+                {
+                    actions.extend(self.begin_rollback(
+                        ControlFailure::CodecReadbackMismatch {
+                            side,
+                            detail,
+                        },
+                    )?);
+                    return Ok(actions);
+                }
+
+                self.codec_statuses[side_index(side)] = Some(status);
+                match side {
+                    AudioSide::Left => {
+                        actions.extend(
+                            self.start_ase_prepare(AudioSide::Right)?,
+                        );
+                    }
+                    AudioSide::Right => {
+                        self.phase = ControlPhase::CodecConfigured;
+                    }
+                }
+                Ok(actions)
+            }
+        }
+    }
+
+    fn verify_codec_readback(
+        &self,
+        side: AudioSide,
+        status: &AseStatus,
+    ) -> Result<(), String> {
+        let planned = self
+            .planned_sink(side)
+            .map_err(|failure| format!("{failure:?}"))?;
+        let expected =
+            planned.codec_specific_configuration.to_bytes();
+
+        match &status.details {
+            AseStatusDetails::CodecConfigured {
+                codec_id,
+                codec_specific_configuration,
+                ..
+            } if *codec_id == planned.codec_id
+                && codec_specific_configuration == &expected =>
+            {
+                Ok(())
+            }
+            other => Err(format!(
+                "{side:?} Codec Configured readback mismatch: {other:?}"
+            )),
+        }
+    }
+
+    fn disarm_gatt_request(
+        &self,
+        side: AudioSide,
+        request_id: Option<GattRequestId>,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let Some(request_id) = request_id else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![ControlAction::DisarmTimer(
+            ControlTimer::Gatt {
+                member_index: self.planned_sink(side)?.member_index,
+                request_id,
+            },
+        )])
     }
 
     fn planned_sink(
