@@ -116,9 +116,14 @@ a Windows Buds endpoint.
 lock-free ring plus atomic mode. Consumer-only drift state is never shared with
 the WASAPI producer.
 
-### M4 — Windows Process Loopback source — NEXT
+### M4 — Windows Process Loopback source — LANDED
 
-Port the source semantics only:
+Raw Win32/WASAPI details are isolated in
+`platform/windows/process_loopback.rs`; L1-Media sees only copied Float32
+stereo packets through `source/process_loopback.rs`.
+
+Ported source semantics:
+
 
 - Windows 10 build 20348+;
 - process loopback;
@@ -129,7 +134,7 @@ Port the source semantics only:
 - approximately 10 ms capture buffer;
 - no destination endpoint ownership.
 
-### M5 — live PCM → LC3 → bridge — PENDING
+### M5 — live PCM → LC3 → bridge — NEXT
 
 Add the 10 ms Media consumer that:
 
