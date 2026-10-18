@@ -135,6 +135,7 @@ pub enum ControlTimer {
     CigConfig,
     CisCreate,
     IsoPathSetup { cis: CisRef },
+    CleanupIsoPath { cis: CisRef },
     CleanupCis { cis: CisRef },
     CleanupAse { side: AudioSide },
     CleanupCig { cig_id: u8 },
@@ -166,6 +167,10 @@ pub enum ControlAction {
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     SetupIsoInputPathByRef { cis: CisRef },
+    RemoveIsoPathByRef {
+        cis: CisRef,
+        directions: u8,
+    },
     DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     BeginGatt(GattRequest),
@@ -179,6 +184,7 @@ pub enum ControlAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlCleanupFailure {
+    IsoPathRemove(SemanticIsoPathFailure),
     CisDisconnect {
         cis: CisRef,
         kind: CisDisconnectFailureKind,
@@ -337,6 +343,8 @@ pub struct ControlMachine {
     live_cis: BTreeSet<CisRef>,
     iso_paths_ready: BTreeSet<CisRef>,
     iso_paths_may_exist: BTreeSet<CisRef>,
+    rollback_iso_path_queue: Vec<CisRef>,
+    rollback_iso_path_current: Option<CisRef>,
     rollback_cis_queue: Vec<CisRef>,
     rollback_cis_current: Option<CisRef>,
     rollback_ase_queue: Vec<AudioSide>,
@@ -377,6 +385,8 @@ impl ControlMachine {
             live_cis: BTreeSet::new(),
             iso_paths_ready: BTreeSet::new(),
             iso_paths_may_exist: BTreeSet::new(),
+            rollback_iso_path_queue: Vec::new(),
+            rollback_iso_path_current: None,
             rollback_cis_queue: Vec::new(),
             rollback_cis_current: None,
             rollback_ase_queue: Vec::new(),
@@ -943,6 +953,19 @@ impl ControlMachine {
                 Ok(vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup { cis },
                 )])
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CleanupIsoPath { cis },
+            ) if self.phase == ControlPhase::RollingBack
+                && self.rollback_iso_path_current == Some(cis) =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupIsoPath { cis },
+                    ),
+                );
+                // Path state is uncertain; disconnecting the CIS is unsafe.
+                self.finish_rollback()
             }
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupCis { cis },
@@ -1585,17 +1608,51 @@ impl ControlMachine {
                 if failure.may_have_configured {
                     self.iso_paths_may_exist.insert(failure.cis);
                 }
-                let primary = ControlFailure::IsoPathSetup {
-                    cis: failure.cis,
-                    failure: failure.clone(),
-                };
-                self.phase = ControlPhase::Faulted;
-                self.failure = Some(primary);
-                Ok(vec![ControlAction::DisarmTimer(
+                let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup {
                         cis: failure.cis,
                     },
-                )])
+                )];
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::IsoPathSetup {
+                        cis: failure.cis,
+                        failure: failure.clone(),
+                    },
+                )?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::SemanticIsoPathState(
+                    SemanticIsoPathState::RemoveComplete {
+                        cis,
+                        directions: 0x01,
+                    },
+                ),
+            ) if self.rollback_iso_path_current == Some(*cis) => {
+                self.iso_paths_ready.remove(cis);
+                self.iso_paths_may_exist.remove(cis);
+                self.rollback_iso_path_current = None;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupIsoPath { cis: *cis },
+                )];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::SemanticIsoPathState(
+                    SemanticIsoPathState::Failed(failure),
+                ),
+            ) if self.rollback_iso_path_current == Some(failure.cis) =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::IsoPathRemove(
+                        failure.clone(),
+                    ),
+                );
+                // A possibly-live data path forbids safe CIS teardown.
+                self.finish_rollback()
             }
             (
                 ControlPhase::RollingBack,
@@ -2764,6 +2821,8 @@ impl ControlMachine {
             .copied()
             .collect();
         self.rollback_current = None;
+        self.rollback_iso_path_queue.clear();
+        self.rollback_iso_path_current = None;
         self.rollback_cis_queue.clear();
         self.rollback_cis_current = None;
         self.rollback_ase_queue.clear();
@@ -2787,6 +2846,10 @@ impl ControlMachine {
             .collect();
         self.rollback_current = None;
 
+        self.rollback_iso_path_queue =
+            self.iso_paths_may_exist.iter().copied().collect();
+        self.rollback_iso_path_current = None;
+
         self.rollback_cis_queue =
             self.live_cis.iter().copied().collect();
         self.rollback_cis_current = None;
@@ -2809,6 +2872,24 @@ impl ControlMachine {
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.phase = ControlPhase::RollingBack;
+
+        if self.rollback_iso_path_current.is_none() {
+            if let Some(cis) = self.rollback_iso_path_queue.pop() {
+                self.rollback_iso_path_current = Some(cis);
+                return Ok(vec![
+                    ControlAction::RemoveIsoPathByRef {
+                        cis,
+                        directions: 0x01,
+                    },
+                    ControlAction::ArmTimer(
+                        ControlTimer::CleanupIsoPath { cis },
+                    ),
+                ]);
+            }
+        }
+        if self.rollback_iso_path_current.is_some() {
+            return Ok(Vec::new());
+        }
 
         if self.rollback_cis_current.is_none() {
             if let Some(cis) = self.rollback_cis_queue.pop() {
