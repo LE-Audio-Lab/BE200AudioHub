@@ -3466,6 +3466,213 @@ mod tests {
         assert!(machine.qos_status(AudioSide::Right).is_some());
     }
 
+    fn drive_to_enable_planned() -> ControlMachine {
+        let mut machine = drive_to_qos_planned();
+
+        let actions = machine.begin_qos_configuration().unwrap();
+        let actions =
+            drive_config_qos(&mut machine, AudioSide::Left, actions);
+        let _actions =
+            drive_config_qos(&mut machine, AudioSide::Right, actions);
+        assert_eq!(machine.phase(), ControlPhase::QosConfigured);
+
+        machine.plan_enable().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::EnablePlanned);
+        machine
+    }
+
+    fn enable_status_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::{
+            ascs::{AseEndpoint, AudioRole},
+            le_audio::Metadata,
+        };
+
+        let planned = match side {
+            AudioSide::Left => &machine.enable_plan().unwrap().left,
+            AudioSide::Right => &machine.enable_plan().unwrap().right,
+        };
+        let qos = match side {
+            AudioSide::Left => {
+                &machine.qos_plan().unwrap().left
+            }
+            AudioSide::Right => {
+                &machine.qos_plan().unwrap().right
+            }
+        };
+
+        let mut endpoint =
+            AseEndpoint::new(planned.ase_id, AudioRole::Sink);
+        endpoint.state = AseState::ENABLING;
+        endpoint.qos = qos.expected_readback();
+        endpoint.metadata =
+            Metadata::from_bytes(&planned.metadata).unwrap();
+        endpoint.value().unwrap()
+    }
+
+    fn enable_cp_success_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+
+        let ase_id = match side {
+            AudioSide::Left => {
+                machine.enable_plan().unwrap().left.ase_id
+            }
+            AudioSide::Right => {
+                machine.enable_plan().unwrap().right.ase_id
+            }
+        };
+
+        AseControlResponse {
+            opcode: AseOpcode::Enable,
+            responses: vec![AseResponse {
+                ase_id,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    fn drive_enable(
+        machine: &mut ControlMachine,
+        side: AudioSide,
+        actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::hci_host::gatt::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        let actions = complete_gatt(
+            machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(ControlTimer::Gatt { .. })
+        )));
+
+        assert!(machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0043,
+                        value: enable_cp_success_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let actions = machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0046,
+                        value: enable_status_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap();
+
+        let readback = only_begin_gatt(&actions);
+        assert_eq!(
+            readback.operation,
+            GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        );
+
+        complete_gatt(
+            machine,
+            &readback,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: enable_status_bytes(machine, side),
+            },
+        )
+    }
+
+    #[test]
+    fn enable_runs_left_then_right_to_enabled() {
+        use bumble_profiles::{
+            bap::ContextType,
+            le_audio::MetadataTag,
+        };
+
+        let mut machine = drive_to_enable_planned();
+
+        let actions = machine.begin_enable().unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::Enabling {
+                side: AudioSide::Left,
+            }
+        );
+
+        let actions =
+            drive_enable(&mut machine, AudioSide::Left, actions);
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::Enabling {
+                side: AudioSide::Right,
+            }
+        );
+        assert!(machine.enable_status(AudioSide::Left).is_some());
+
+        let actions =
+            drive_enable(&mut machine, AudioSide::Right, actions);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(
+                ControlTimer::AseOperation {
+                    side: AudioSide::Right,
+                }
+            )
+        )));
+        assert_eq!(machine.phase(), ControlPhase::Enabled);
+        assert!(machine.enable_status(AudioSide::Left).is_some());
+        assert!(machine.enable_status(AudioSide::Right).is_some());
+
+        for side in [AudioSide::Left, AudioSide::Right] {
+            let status = machine.enable_status(side).unwrap();
+            let AseStatusDetails::Metadata {
+                metadata, ..
+            } = &status.details
+            else {
+                panic!("expected Enable metadata readback");
+            };
+            assert!(metadata.entries.iter().any(|entry| {
+                entry.tag == MetadataTag::STREAMING_AUDIO_CONTEXTS
+                    && entry.data
+                        == ContextType::MEDIA.0.to_le_bytes()
+            }));
+        }
+    }
+
     #[test]
     fn set_cig_success_reaches_cig_configured_without_retaining_raw_handles() {
         let mut machine = machine_at_codec_configured();
