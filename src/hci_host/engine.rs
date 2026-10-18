@@ -3529,6 +3529,115 @@ mod tests {
         );
         assert!(engine.device().iso_data_path(0x0900, 0).is_none());
 
+        let cis = super::super::iso::CisRef {
+            cig_id: 1,
+            cis_id: 1,
+        };
+        engine
+            .begin_iso_input_path_setup_by_ref(cis)
+            .unwrap();
+        let HostPacket::Command(setup_command) =
+            rx.try_recv().unwrap()
+        else {
+            panic!("expected semantic ISO path setup command");
+        };
+        assert_eq!(
+            u16::from_le_bytes([
+                setup_command[0],
+                setup_command[1],
+            ]),
+            bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND
+        );
+        assert_eq!(
+            &setup_command[3..5],
+            &[0x00, 0x09],
+            "semantic CisRef must resolve to raw CIS handle only inside HCI Host",
+        );
+        assert_eq!(
+            engine.semantic_iso_path_state(),
+            Some(
+                super::super::iso_path::SemanticIsoPathState::
+                    SettingUp {
+                        cis,
+                        direction:
+                            super::super::iso_path::
+                                IsoDataPathDirection::Input,
+                    },
+            )
+        );
+
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_SETUP_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.semantic_iso_path_state(),
+            Some(
+                super::super::iso_path::SemanticIsoPathState::
+                    SetupComplete {
+                        cis,
+                        direction:
+                            super::super::iso_path::
+                                IsoDataPathDirection::Input,
+                    },
+            )
+        );
+
+        engine
+            .begin_iso_path_remove_by_ref(cis, 0x01)
+            .unwrap();
+        let HostPacket::Command(remove_command) =
+            rx.try_recv().unwrap()
+        else {
+            panic!("expected semantic ISO path remove command");
+        };
+        assert_eq!(
+            u16::from_le_bytes([
+                remove_command[0],
+                remove_command[1],
+            ]),
+            bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND
+        );
+        assert_eq!(
+            &remove_command[3..5],
+            &[0x00, 0x09],
+            "semantic remove must resolve the same raw CIS handle",
+        );
+        assert_eq!(
+            engine.semantic_iso_path_state(),
+            Some(
+                super::super::iso_path::SemanticIsoPathState::
+                    Removing {
+                        cis,
+                        directions: 0x01,
+                    },
+            )
+        );
+
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_REMOVE_ISO_DATA_PATH_COMMAND,
+                0,
+                &[0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        assert_eq!(
+            engine.semantic_iso_path_state(),
+            Some(
+                super::super::iso_path::SemanticIsoPathState::
+                    RemoveComplete {
+                        cis,
+                        directions: 0x01,
+                    },
+            )
+        );
+        assert!(engine.device().iso_data_path(0x0900, 0).is_none());
+
         engine.begin_cis_disconnect(0x0900).unwrap();
         let HostPacket::Command(disconnect) = rx.try_recv().unwrap() else {
             panic!("expected CIS Disconnect command");
