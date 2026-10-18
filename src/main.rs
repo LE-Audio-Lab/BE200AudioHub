@@ -2,7 +2,6 @@ mod architecture;
 mod runtime;
 mod platform;
 mod plane;
-mod control;
 
 mod review;
 
