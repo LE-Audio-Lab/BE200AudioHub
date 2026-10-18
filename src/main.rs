@@ -3,6 +3,7 @@ mod runtime;
 mod platform;
 mod transport;
 mod media;
+mod stream_clock;
 mod control;
 
 mod hci_host;
