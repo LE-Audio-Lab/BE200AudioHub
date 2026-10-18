@@ -498,7 +498,7 @@ fn process_stream_route_command(
                 *binding,
                 engine.bind_stream_route(*binding),
             )?,
-        ))
+        )),
         HciCommand::UnbindStreamRoute {
             session_id,
             stream_id,
