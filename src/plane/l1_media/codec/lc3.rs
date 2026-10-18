@@ -198,9 +198,11 @@ fn stream_config(
 mod tests {
     use bumble_codecs::lc3::Lc3Decoder;
 
-    use crate::architecture::{
-        control::{StreamBinding, StreamTopology},
-        types::{SessionId, StreamId},
+    use crate::{
+        architecture::types::{SessionId, StreamId},
+        plane::l1_control::interface::stream::{
+            StreamBinding, StreamTopology,
+        },
     };
 
     use super::*;

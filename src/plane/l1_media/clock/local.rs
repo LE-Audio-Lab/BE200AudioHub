@@ -174,11 +174,11 @@ impl LocalStreamClock {
 
 #[cfg(test)]
 mod tests {
-    use crate::architecture::{
-        control::{
+    use crate::{
+        architecture::types::{SessionId, StreamId},
+        plane::l1_control::interface::stream::{
             LeAudioFormat, StreamBinding, StreamTopology,
         },
-        types::{SessionId, StreamId},
     };
 
     use super::*;
