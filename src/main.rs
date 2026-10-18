@@ -44,6 +44,14 @@ fn main() {
             );
             println!("Target set: {}", config.target_name);
             println!(
+                "Test mode: {}",
+                if config.longevity_test {
+                    "LONGEVITY"
+                } else {
+                    "normal"
+                }
+            );
+            println!(
                 "Live duration: {:.1} s; PCM=48 kHz Float32 stereo; LC3=100 B/ear/10 ms",
                 config.live_duration.as_secs_f64()
             );

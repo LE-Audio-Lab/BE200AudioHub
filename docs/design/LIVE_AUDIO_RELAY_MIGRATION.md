@@ -154,7 +154,7 @@ thread. It starts before Process Loopback activation and emits encoded zero PCM
 while capture is not ready, so COM/WASAPI startup cannot starve an already-live
 CIS.
 
-### M6 — current-path live HIL — SOFTWARE PASS / HIL READY
+### M6 — current-path live HIL — HIL PASS ×2
 
 Use the existing Round8 current Control/HCI setup and teardown path, replacing
 only the synthetic source with live Process Loopback input.
@@ -181,7 +181,7 @@ cargo check --workspace --locked  PASS
 cargo build --workspace --locked  PASS
 ```
 
-The remaining acceptance step is real-hardware `round8 live-relay` HIL.
+Real-hardware `round8 live-relay` has passed twice consecutively with identical clean 10-second results.
 
 
 ## HIL findings
@@ -217,3 +217,74 @@ Software regression after the fix:
 cargo test --workspace --locked   PASS — 400 passed / 0 failed
 cargo build --workspace --locked  PASS
 ```
+
+
+### HIL-2 — live Windows audio end-to-end — PASS ×2
+
+Two consecutive 10-second runs on real BE200 + Galaxy Buds3 Pro reproduced the
+same clean result while music was audibly reproduced through the earbuds:
+
+```text
+Process Loopback:
+  packets=1000
+  frames=480000
+  silent_frames=0
+  discontinuities=0
+
+PCM boundary:
+  captured=480000
+  written=480000
+  dropped=0
+  silent_trim=0
+
+Media clock:
+  intervals=1000
+  keepalive=2
+  source_skipped=0
+  underflow_frames=960
+  startup_trim=0
+  gradual_trim=0
+  emergency_trim=0
+
+Bridge:
+  submitted=1000
+  backpressure_drop=0
+  fallback=0
+  grid_skipped=0
+  stale=0
+
+ISO Host:
+  submitted=2000
+  completed=2000
+  in_flight_after=0
+
+StopControl reverse teardown -> Control Idle: PASS
+Bond store unchanged: true
+```
+
+The two keepalive intervals and 960 underflow PCM frames correspond exactly to
+the 20 ms source-startup window before Process Loopback supplied live PCM.
+
+## Longevity mode
+
+Long-term clock/drift acceptance uses:
+
+```text
+round8 live-relay --longevity-test
+```
+
+Policy:
+
+```text
+normal mode:
+  default 10 s
+  maximum 120 s
+
+longevity mode:
+  default 300 s
+  maximum 86400 s / 24 h
+  heartbeat every 30 s
+```
+
+`--seconds` remains available in longevity mode. The parser validates the
+duration only after all flags are read, so flag order is irrelevant.

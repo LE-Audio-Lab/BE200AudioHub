@@ -7,7 +7,7 @@
 use std::{
     path::PathBuf,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -48,6 +48,9 @@ use crate::{
 const DEFAULT_CONNECT_SECONDS: u64 = 12;
 const DEFAULT_LIVE_SECONDS: u64 = 10;
 const MAX_LIVE_SECONDS: u64 = 120;
+const DEFAULT_LONGEVITY_SECONDS: u64 = 300;
+const MAX_LONGEVITY_SECONDS: u64 = 86_400;
+const LONGEVITY_HEARTBEAT_SECONDS: u64 = 30;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +61,7 @@ pub struct LiveRelayConfig {
     pub target_name: String,
     pub connect_timeout: Duration,
     pub live_duration: Duration,
+    pub longevity_test: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,8 +92,8 @@ pub fn parse_live_relay_args(
     let mut target_name = None;
     let mut connect_timeout =
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
-    let mut live_duration =
-        Duration::from_secs(DEFAULT_LIVE_SECONDS);
+    let mut requested_live_seconds = None;
+    let mut longevity_test = false;
     let mut confirmed = false;
     let mut index = 0usize;
 
@@ -128,16 +132,25 @@ pub fn parse_live_relay_args(
                         let seconds: u64 = value.parse().map_err(|_| {
                             "--seconds must be an integer".to_string()
                         })?;
-                        if !(1..=MAX_LIVE_SECONDS).contains(&seconds) {
-                            return Err(format!(
-                                "--seconds must be in 1..={MAX_LIVE_SECONDS}"
-                            ));
+                        if seconds == 0 {
+                            return Err(
+                                "--seconds must be at least 1".into(),
+                            );
                         }
-                        live_duration = Duration::from_secs(seconds);
+                        requested_live_seconds = Some(seconds);
                     }
                     _ => unreachable!(),
                 }
                 index += 2;
+            }
+            "--longevity-test" => {
+                if longevity_test {
+                    return Err(
+                        "--longevity-test specified more than once".into(),
+                    );
+                }
+                longevity_test = true;
+                index += 1;
             }
             "--confirm-live-relay-hil" => {
                 if confirmed {
@@ -164,6 +177,24 @@ pub fn parse_live_relay_args(
         );
     }
 
+    let (default_seconds, max_seconds, mode_name) = if longevity_test {
+        (
+            DEFAULT_LONGEVITY_SECONDS,
+            MAX_LONGEVITY_SECONDS,
+            "longevity",
+        )
+    } else {
+        (DEFAULT_LIVE_SECONDS, MAX_LIVE_SECONDS, "normal")
+    };
+    let live_seconds =
+        requested_live_seconds.unwrap_or(default_seconds);
+    if live_seconds > max_seconds {
+        return Err(format!(
+            "--seconds must be in 1..={max_seconds} for {mode_name} mode"
+        ));
+    }
+    let live_duration = Duration::from_secs(live_seconds);
+
     Ok(LiveRelayConfig {
         sfi: sfi.ok_or_else(|| "--sfi is required".to_string())?,
         ddc: ddc.ok_or_else(|| "--ddc is required".to_string())?,
@@ -173,7 +204,49 @@ pub fn parse_live_relay_args(
             .ok_or_else(|| "--name is required".to_string())?,
         connect_timeout,
         live_duration,
+        longevity_test,
     })
+}
+
+fn wait_live_duration(
+    duration: Duration,
+    longevity_test: bool,
+) {
+    if !longevity_test {
+        thread::sleep(duration);
+        return;
+    }
+
+    let started = Instant::now();
+    let heartbeat = Duration::from_secs(
+        LONGEVITY_HEARTBEAT_SECONDS,
+    );
+
+    loop {
+        let elapsed = started.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+
+        let remaining = duration.saturating_sub(elapsed);
+        thread::sleep(remaining.min(heartbeat));
+
+        let elapsed = started.elapsed().min(duration);
+        let elapsed_seconds = elapsed.as_secs_f64();
+        let total_seconds = duration.as_secs_f64();
+        let percent = if total_seconds > 0.0 {
+            elapsed_seconds / total_seconds * 100.0
+        } else {
+            100.0
+        };
+
+        println!(
+            "[longevity] elapsed {:.0}/{:.0} s ({:.1}%)",
+            elapsed_seconds,
+            total_seconds,
+            percent,
+        );
+    }
 }
 
 fn run_live_media(
@@ -181,6 +254,7 @@ fn run_live_media(
     plan: ControlSetPlan,
     connect_timeout: Duration,
     duration: Duration,
+    longevity_test: bool,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
@@ -215,7 +289,7 @@ fn run_live_media(
             }
         };
 
-    thread::sleep(duration);
+    wait_live_duration(duration, longevity_test);
 
     let source_result = source.shutdown();
     let media_result = media.shutdown();
@@ -279,6 +353,7 @@ pub fn execute_live_relay(
         plan,
         config.connect_timeout,
         config.live_duration,
+        config.longevity_test,
     );
     let exit = stack.shutdown();
 
@@ -332,6 +407,50 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
+    }
+
+    #[test]
+    fn normal_mode_still_rejects_five_minute_duration() {
+        let mut value = args();
+        let seconds = value
+            .iter()
+            .position(|arg| arg == "--seconds")
+            .unwrap();
+        value[seconds + 1] = "300".into();
+
+        let error = parse_live_relay_args(&value).unwrap_err();
+        assert!(error.contains("1..=120"));
+        assert!(error.contains("normal mode"));
+    }
+
+    #[test]
+    fn longevity_mode_accepts_five_minutes_regardless_of_flag_order() {
+        let mut value = args();
+        let seconds = value
+            .iter()
+            .position(|arg| arg == "--seconds")
+            .unwrap();
+        value[seconds + 1] = "300".into();
+        value.push("--longevity-test".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.longevity_test);
+        assert_eq!(config.live_duration, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn longevity_mode_defaults_to_five_minutes() {
+        let mut value = args();
+        let seconds = value
+            .iter()
+            .position(|arg| arg == "--seconds")
+            .unwrap();
+        value.drain(seconds..=seconds + 1);
+        value.push("--longevity-test".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.longevity_test);
+        assert_eq!(config.live_duration, Duration::from_secs(300));
     }
 
     #[test]
