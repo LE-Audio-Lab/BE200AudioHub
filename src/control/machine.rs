@@ -60,6 +60,9 @@ use super::{
         plan_first_iso, IsoPlanError, StereoIsoPlan,
     },
     plan::{ControlPlanError, ControlSetPlan},
+    qos_plan::{
+        plan_first_qos, QosPlanError, StereoQosPlan,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +88,9 @@ pub enum ControlPhase {
     IsoPlanned,
     ConfiguringCig,
     CigConfigured,
+    QosPlanned,
+    ConfiguringQos { side: AudioSide },
+    QosConfigured,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -225,6 +231,11 @@ pub enum ControlFailure {
     CigConfigureTimeout {
         cig_id: u8,
     },
+    QosPlan(QosPlanError),
+    QosReadbackMismatch {
+        side: AudioSide,
+        detail: String,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -258,6 +269,8 @@ pub struct ControlMachine {
     prepared_ases: [Option<PreparedAseControl>; 2],
     codec_statuses: [Option<AseStatus>; 2],
     iso_plan: Option<StereoIsoPlan>,
+    qos_plan: Option<StereoQosPlan>,
+    qos_statuses: [Option<AseStatus>; 2],
     cig_may_exist: bool,
     rollback_cig_pending: bool,
     failure: Option<ControlFailure>,
@@ -286,6 +299,8 @@ impl ControlMachine {
             prepared_ases: [None, None],
             codec_statuses: [None, None],
             iso_plan: None,
+            qos_plan: None,
+            qos_statuses: [None, None],
             cig_may_exist: false,
             rollback_cig_pending: false,
             failure: None,
@@ -334,6 +349,48 @@ impl ControlMachine {
         self.iso_plan.as_ref()
     }
 
+    pub fn qos_plan(&self) -> Option<&StereoQosPlan> {
+        self.qos_plan.as_ref()
+    }
+
+    pub fn qos_status(
+        &self,
+        side: AudioSide,
+    ) -> Option<&AseStatus> {
+        self.qos_statuses[side_index(side)].as_ref()
+    }
+
+    pub fn plan_qos(
+        &mut self,
+    ) -> Result<(), ControlFailure> {
+        if self.phase != ControlPhase::CigConfigured {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let codec = self
+            .codec_plan
+            .as_ref()
+            .expect("CigConfigured requires codec plan");
+        let iso = self
+            .iso_plan
+            .as_ref()
+            .expect("CigConfigured requires ISO plan");
+        let plan = plan_first_qos(codec, iso)
+            .map_err(ControlFailure::QosPlan)?;
+        self.qos_plan = Some(plan);
+        self.qos_statuses = [None, None];
+        self.phase = ControlPhase::QosPlanned;
+        Ok(())
+    }
+
+    pub fn begin_qos_configuration(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::QosPlanned {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.start_config_qos(AudioSide::Left)
+    }
+
     pub fn plan_iso(
         &mut self,
     ) -> Result<(), ControlFailure> {
@@ -347,6 +404,8 @@ impl ControlMachine {
         let plan = plan_first_iso(codec)
             .map_err(ControlFailure::IsoPlan)?;
         self.iso_plan = Some(plan);
+        self.qos_plan = None;
+        self.qos_statuses = [None, None];
         self.phase = ControlPhase::IsoPlanned;
         Ok(())
     }
@@ -395,6 +454,8 @@ impl ControlMachine {
             .map_err(ControlFailure::CodecPlan)?;
         self.codec_plan = Some(plan);
         self.iso_plan = None;
+        self.qos_plan = None;
+        self.qos_statuses = [None, None];
         self.cig_may_exist = false;
         self.rollback_cig_pending = false;
         self.ase_prepare = None;
@@ -585,23 +646,24 @@ impl ControlMachine {
                     member_index,
                     request_id,
                 },
-            ) if matches!(
-                self.phase,
-                ControlPhase::ConfiguringCodec { side }
-                    if self.planned_sink(side)
-                        .map(|sink| sink.member_index)
-                        .ok() == Some(member_index)
-            )
+            ) if self
+                .active_ase_operation_side()
+                .and_then(|side| {
+                    self.planned_sink(side)
+                        .map(|sink| (side, sink.member_index))
+                        .ok()
+                })
+                .map(|(_, active_member)| active_member)
+                == Some(member_index)
                 && self
                     .ase_operation
                     .as_ref()
                     .and_then(|value| value.pending_request_id())
                     == Some(request_id) =>
             {
-                let side = match self.phase {
-                    ControlPhase::ConfiguringCodec { side } => side,
-                    _ => unreachable!(),
-                };
+                let side = self
+                    .active_ase_operation_side()
+                    .expect("GATT timer requires active ASE operation");
                 let connection = self.planned_sink(side)?.connection;
                 self.ase_operation = None;
                 let mut actions = vec![
@@ -626,7 +688,7 @@ impl ControlMachine {
             }
             ControlEvent::TimerExpired(
                 ControlTimer::AseOperation { side },
-            ) if self.phase == ControlPhase::ConfiguringCodec { side } =>
+            ) if self.active_ase_operation_side() == Some(side) =>
             {
                 let connection = self.planned_sink(side)?.connection;
                 let member_index = self.planned_sink(side)?.member_index;
@@ -1197,7 +1259,8 @@ impl ControlMachine {
                 HciReport::Gatt(report),
             ) => self.on_ase_prepare_gatt_report(side, report),
             (
-                ControlPhase::ConfiguringCodec { side },
+                ControlPhase::ConfiguringCodec { side }
+                | ControlPhase::ConfiguringQos { side },
                 HciReport::Gatt(report),
             ) => self.on_ase_operation_gatt_report(side, report),
 
@@ -1246,6 +1309,51 @@ impl ControlMachine {
         self.next_gatt_request_id = machine.next_request_id();
         self.ase_operation = Some(machine);
         self.phase = ControlPhase::ConfiguringCodec { side };
+
+        let mut actions = vec![ControlAction::ArmTimer(
+            ControlTimer::AseOperation { side },
+        )];
+        actions.extend(
+            self.translate_ase_operation_action(side, None, action)?,
+        );
+        Ok(actions)
+    }
+
+    fn start_config_qos(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let prepared = self.prepared_ases[side_index(side)]
+            .as_ref()
+            .expect("QoS requires prepared ASE control")
+            .clone();
+        let planned = match side {
+            AudioSide::Left => &self
+                .qos_plan
+                .as_ref()
+                .expect("QosPlanned requires QoS plan")
+                .left,
+            AudioSide::Right => &self
+                .qos_plan
+                .as_ref()
+                .expect("QosPlanned requires QoS plan")
+                .right,
+        };
+        let operation = AseOperation::ConfigQos(vec![
+            planned.parameters.clone(),
+        ]);
+        let mut machine = AseOperationMachine::new(
+            prepared,
+            operation,
+            AseState::QOS_CONFIGURED,
+            self.next_gatt_request_id,
+        );
+        let action = machine.start().map_err(|failure| {
+            ControlFailure::AseOperation { side, failure }
+        })?;
+        self.next_gatt_request_id = machine.next_request_id();
+        self.ase_operation = Some(machine);
+        self.phase = ControlPhase::ConfiguringQos { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
             ControlTimer::AseOperation { side },
@@ -1446,27 +1554,73 @@ impl ControlMachine {
                     ControlTimer::AseOperation { side },
                 ));
 
-                if let Err(detail) =
-                    self.verify_codec_readback(side, &status)
-                {
-                    actions.extend(self.begin_rollback(
-                        ControlFailure::CodecReadbackMismatch {
-                            side,
-                            detail,
-                        },
-                    )?);
-                    return Ok(actions);
-                }
+                match self.phase {
+                    ControlPhase::ConfiguringCodec {
+                        side: active_side,
+                    } if active_side == side => {
+                        if let Err(detail) =
+                            self.verify_codec_readback(side, &status)
+                        {
+                            actions.extend(self.begin_rollback(
+                                ControlFailure::CodecReadbackMismatch {
+                                    side,
+                                    detail,
+                                },
+                            )?);
+                            return Ok(actions);
+                        }
 
-                self.codec_statuses[side_index(side)] = Some(status);
-                match side {
-                    AudioSide::Left => {
-                        actions.extend(
-                            self.start_ase_prepare(AudioSide::Right)?,
-                        );
+                        self.codec_statuses[side_index(side)] =
+                            Some(status);
+                        match side {
+                            AudioSide::Left => {
+                                actions.extend(
+                                    self.start_ase_prepare(
+                                        AudioSide::Right,
+                                    )?,
+                                );
+                            }
+                            AudioSide::Right => {
+                                self.phase =
+                                    ControlPhase::CodecConfigured;
+                            }
+                        }
                     }
-                    AudioSide::Right => {
-                        self.phase = ControlPhase::CodecConfigured;
+                    ControlPhase::ConfiguringQos {
+                        side: active_side,
+                    } if active_side == side => {
+                        if let Err(detail) =
+                            self.verify_qos_readback(side, &status)
+                        {
+                            actions.extend(self.begin_rollback(
+                                ControlFailure::QosReadbackMismatch {
+                                    side,
+                                    detail,
+                                },
+                            )?);
+                            return Ok(actions);
+                        }
+
+                        self.qos_statuses[side_index(side)] =
+                            Some(status);
+                        match side {
+                            AudioSide::Left => {
+                                actions.extend(
+                                    self.start_config_qos(
+                                        AudioSide::Right,
+                                    )?,
+                                );
+                            }
+                            AudioSide::Right => {
+                                self.phase =
+                                    ControlPhase::QosConfigured;
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(
+                            ControlFailure::InvalidStartState(other),
+                        )
                     }
                 }
                 Ok(actions)
@@ -1498,6 +1652,41 @@ impl ControlMachine {
             other => Err(format!(
                 "{side:?} Codec Configured readback mismatch: {other:?}"
             )),
+        }
+    }
+
+    fn verify_qos_readback(
+        &self,
+        side: AudioSide,
+        status: &AseStatus,
+    ) -> Result<(), String> {
+        let plan = self
+            .qos_plan
+            .as_ref()
+            .ok_or_else(|| "missing QoS plan".to_string())?;
+        let planned = match side {
+            AudioSide::Left => &plan.left,
+            AudioSide::Right => &plan.right,
+        };
+        let expected = planned.expected_readback();
+
+        match &status.details {
+            AseStatusDetails::QosConfigured(actual)
+                if actual == &expected =>
+            {
+                Ok(())
+            }
+            other => Err(format!(
+                "{side:?} QoS Configured readback mismatch: {other:?}"
+            )),
+        }
+    }
+
+    fn active_ase_operation_side(&self) -> Option<AudioSide> {
+        match self.phase {
+            ControlPhase::ConfiguringCodec { side }
+            | ControlPhase::ConfiguringQos { side } => Some(side),
+            _ => None,
         }
     }
 
