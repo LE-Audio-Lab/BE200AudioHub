@@ -25,10 +25,10 @@ impl ControlPlane {
         })
     }
 
-    pub fn snapshot(
+    pub fn condition_update(
         &self,
-    ) -> crate::architecture::control::ControlSnapshot {
-        self.machine.snapshot()
+    ) -> crate::plane::l1_control::interface::condition::ControlConditionUpdate {
+        self.machine.condition_update()
     }
 
     pub fn handle_intent(
@@ -69,11 +69,11 @@ impl ControlPlane {
         &self,
         actions: Vec<crate::plane::l1_control::engine::machine::ControlAction>,
     ) -> ControlStep {
-        let snapshot = self.machine.snapshot();
+        let condition = self.machine.condition_update();
         let stream_binding = self.machine.stream_binding().ok();
         ControlStep {
             actions,
-            snapshot,
+            condition,
             stream_binding,
         }
     }
@@ -81,7 +81,7 @@ impl ControlPlane {
 
 #[cfg(test)]
 mod tests {
-    use crate::architecture::control::ControlState;
+    use crate::plane::l1_control::interface::condition::ControlState;
 
     use crate::plane::l1_control::engine::machine::ControlPhase;
 

@@ -6,12 +6,14 @@
 //! epoch or period.
 
 use crate::{
-    architecture::{
-        stream_clock::{ClockLock, StreamClockSnapshot},
-        types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
+    plane::{
+        l1_control::interface::stream::StreamBinding,
+        l1_media::{
+            clock::frame::FrameId,
+            interface::condition::{ClockLock, StreamClockSnapshot},
+        },
     },
-    plane::l1_control::interface::stream::StreamBinding,
-    plane::l1_media::clock::frame::FrameId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -5,12 +5,10 @@ use bumble_profiles::ascs::{
 };
 
 use crate::{
-    architecture::{
-        control::{ControlSnapshot, ControlState},
-        types::{SessionId, StreamId},
-    },
-    plane::l1_control::interface::stream::{
-        AudioSide, StreamBinding, StreamTopology,
+    core::lifecycle::{SessionId, StreamId},
+    plane::l1_control::interface::{
+        condition::{ControlConditionUpdate, ControlState},
+        stream::{AudioSide, StreamBinding, StreamTopology},
     },
     plane::l1_hci::interface::report::HciReport,
     plane::l1_hci::{
@@ -470,7 +468,7 @@ impl ControlMachine {
     ///
     /// Fine-grained ControlPhase remains private implementation detail. The
     /// exported ControlState intentionally changes much less often.
-    pub fn snapshot(&self) -> ControlSnapshot {
+    pub fn condition_update(&self) -> ControlConditionUpdate {
         let state = match self.phase {
             ControlPhase::Idle => ControlState::Idle,
             ControlPhase::Attaching
@@ -513,7 +511,7 @@ impl ControlMachine {
         };
 
         let binding = self.active_stream_binding.or(self.pending_stream_binding);
-        ControlSnapshot {
+        ControlConditionUpdate {
             state,
             stream_id: binding.map(|binding| binding.stream_id),
             format: binding.map(|binding| binding.format),
