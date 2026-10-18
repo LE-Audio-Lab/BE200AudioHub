@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod cancellation;
 pub mod context;
 pub mod generation;
