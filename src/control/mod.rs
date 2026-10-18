@@ -4,6 +4,8 @@
 //! reports into a logical stream world. It never owns raw USB transport, HCI
 //! packet framing, controller ISO sequence numbers, or media timing.
 
+pub(crate) mod audio_discovery;
+pub(crate) mod audio_snapshot;
 pub(crate) mod discovery;
 pub(crate) mod machine;
 pub(crate) mod plan;
