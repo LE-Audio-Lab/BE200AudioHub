@@ -2,7 +2,7 @@ use bumble_profiles::ascs::{
     AseQosConfiguration, ConfigQosParameters,
 };
 
-use crate::architecture::types::AudioSide;
+use crate::plane::l1_control::interface::stream::AudioSide;
 
 use super::{
     codec::StereoCodecPlan,
@@ -116,10 +116,7 @@ mod tests {
     };
 
     use crate::{
-        architecture::{
-            control::LeAudioFormat,
-            types::AudioSide,
-        },
+        plane::l1_control::interface::stream::{AudioSide, LeAudioFormat},
         plane::{
             l1_control::{
                 discovery::snapshot::GattCharacteristicRange,
