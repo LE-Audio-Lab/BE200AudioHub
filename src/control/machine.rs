@@ -1742,7 +1742,13 @@ mod tests {
                             details: AseStatusDetails::None,
                         },
                     }],
-                    control_point_handle: 9,
+                    control_point:
+                        crate::control::audio_snapshot::GattCharacteristicRange {
+                            declaration_handle: 8,
+                            value_handle: 9,
+                            end_group_handle: 10,
+                            properties: 0x12,
+                        },
                 },
                 cas: CasSnapshot {
                     service,
