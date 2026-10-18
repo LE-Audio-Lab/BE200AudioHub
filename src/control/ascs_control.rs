@@ -337,7 +337,7 @@ impl AsePrepareMachine {
 }
 
 fn exactly_one_cccd(
-    descriptors: &[crate::hci_host::gatt::GattDescriptor],
+    descriptors: &[crate::plane::l1_hci::gatt::transaction::GattDescriptor],
     label: &'static str,
 ) -> Result<u16, AsePrepareFailure> {
     let wanted = Uuid::from_16_bits(CCCD_UUID);
@@ -775,7 +775,7 @@ impl AseOperationMachine {
 
 fn value_event_parts(
     event: &GattValueEvent,
-) -> (crate::hci_host::connection::ConnectionToken, u16, &[u8]) {
+) -> (crate::plane::l1_hci::acl::connection::ConnectionToken, u16, &[u8]) {
     match event {
         GattValueEvent::Notification {
             connection,
@@ -808,9 +808,9 @@ mod tests {
     use crate::{
         architecture::types::AudioSide,
         control::audio_snapshot::GattCharacteristicRange,
-        hci_host::{
-            connection::ConnectionToken,
-            gatt::{
+        plane::l1_hci::{
+            acl::connection::ConnectionToken,
+            gatt::transaction::{
                 GattDescriptor, GattResult, GattValueEvent,
             },
         },

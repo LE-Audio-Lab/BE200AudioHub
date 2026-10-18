@@ -154,7 +154,7 @@ mod tests {
         control::plan::{
             ControlMemberPlan, ControlSetPlan,
         },
-        hci_host::{
+        plane::l1_hci::acl::{
             scan::ScanObservation,
             security::StoredLeKeyMaterial,
         },

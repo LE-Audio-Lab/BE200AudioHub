@@ -155,7 +155,7 @@ mod tests {
             audio_snapshot::GattCharacteristicRange,
             codec_plan::{PlannedSink, StereoCodecPlan},
         },
-        hci_host::connection::ConnectionToken,
+        plane::l1_hci::acl::connection::ConnectionToken,
     };
 
     use super::*;

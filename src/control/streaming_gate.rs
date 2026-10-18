@@ -361,9 +361,9 @@ mod tests {
             audio_snapshot::GattCharacteristicRange,
             codec_plan::PlannedSink,
         },
-        hci_host::{
-            connection::ConnectionToken,
-            gatt::{GattResult, GattValueEvent},
+        plane::l1_hci::{
+            acl::connection::ConnectionToken,
+            gatt::transaction::{GattResult, GattValueEvent},
         },
     };
 

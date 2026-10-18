@@ -141,7 +141,7 @@ mod tests {
             iso_plan::plan_first_iso,
             qos_plan::plan_first_qos,
         },
-        hci_host::connection::ConnectionToken,
+        plane::l1_hci::acl::connection::ConnectionToken,
     };
 
     use super::*;

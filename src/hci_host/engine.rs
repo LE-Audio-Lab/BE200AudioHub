@@ -79,7 +79,7 @@ use crate::{
                 GattRequest, GattRequestId, GattResult, GattTransaction,
                 GattValueEvent, ATT_DEFAULT_MTU,
             },
-            host::link::{HciObservation, LinkFault, QueueHostTransport},
+            
         },
         l2_transport::{
             packet::ControllerPacket,
@@ -87,6 +87,8 @@ use crate::{
         },
     },
 };
+
+use super::link::{HciObservation, LinkFault, QueueHostTransport};
 
 const DEFAULT_POLL_BUDGET: usize = 64;
 const MAX_DEFERRED_DEVICE_EVENTS: usize = 64;
