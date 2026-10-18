@@ -287,12 +287,21 @@ impl<P: Clone> IntervalGroupScheduler<P> {
 
 #[cfg(test)]
 mod tests {
-    use crate::architecture::{
-        control::{
-            LeAudioFormat, StreamBinding, StreamTopology,
+    use crate::{
+        architecture::{
+            control::{
+                LeAudioFormat, StreamBinding, StreamTopology,
+            },
+            media::EncodedStereoFrame,
+            types::{FrameId, SessionId, StreamId},
         },
-        media::EncodedStereoFrame,
-        types::{FrameId, SessionId, StreamId},
+        media::{
+            lc3::{
+                encode_lc3_silence,
+                prepare_synthetic_lc3,
+            },
+            synthetic::SyntheticToneConfig,
+        },
     };
 
     use super::*;
@@ -332,6 +341,87 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn synthetic_lc3_to_bridge_to_logical_iso_request_is_end_to_end() {
+        let binding = binding();
+        let config = SyntheticToneConfig {
+            frame_count: 3,
+            fade_samples: 0,
+            ..SyntheticToneConfig::default()
+        };
+        let mut frames =
+            prepare_synthetic_lc3(binding, config).unwrap();
+        assert_eq!(frames.len(), 3);
+
+        let (silence_left, silence_right) =
+            encode_lc3_silence(binding.format).unwrap();
+        let fallback = StereoFallback {
+            left: silence_left.clone(),
+            right: silence_right.clone(),
+        };
+        let mut scheduler = IntervalGroupScheduler::new(
+            binding,
+            EPOCH_US,
+            3,
+            fallback,
+        )
+        .unwrap();
+
+        // Feed frame 0 and frame 2; frame 1 is intentionally absent.
+        assert_eq!(
+            scheduler.push_encoded(frames.remove(0)),
+            FrameInsertOutcome::Accepted
+        );
+        let frame_two = frames.remove(1);
+        assert_eq!(frame_two.frame_id, FrameId(2));
+        assert_eq!(
+            scheduler.push_encoded(frame_two),
+            FrameInsertOutcome::Accepted
+        );
+
+        let SchedulerStep::Submit(first) =
+            scheduler.on_wake(EPOCH_US).unwrap()
+        else {
+            panic!("frame 0 must submit");
+        };
+        assert_eq!(first.frame_id, FrameId(0));
+        assert_eq!(first.source, IntervalGroupSource::Encoded);
+        let first_request = scheduler
+            .into_logical_iso_request(first)
+            .unwrap();
+        assert_eq!(first_request.session_id, SessionId(7));
+        assert_eq!(first_request.stream_id, StreamId(11));
+        assert_eq!(first_request.left.len(), 100);
+        assert_eq!(first_request.right.len(), 100);
+        assert_ne!(first_request.left, first_request.right);
+
+        let SchedulerStep::Submit(second) =
+            scheduler.on_wake(EPOCH_US + 10_000).unwrap()
+        else {
+            panic!("missing frame 1 must use fallback");
+        };
+        assert_eq!(second.frame_id, FrameId(1));
+        assert_eq!(second.source, IntervalGroupSource::Fallback);
+        let second_request = scheduler
+            .into_logical_iso_request(second)
+            .unwrap();
+        assert_eq!(second_request.left, silence_left);
+        assert_eq!(second_request.right, silence_right);
+
+        let SchedulerStep::Submit(third) =
+            scheduler.on_wake(EPOCH_US + 20_000).unwrap()
+        else {
+            panic!("frame 2 must remain scheduled on absolute grid");
+        };
+        assert_eq!(third.frame_id, FrameId(2));
+        assert_eq!(third.source, IntervalGroupSource::Encoded);
+        let third_request = scheduler
+            .into_logical_iso_request(third)
+            .unwrap();
+        assert_eq!(third_request.left.len(), 100);
+        assert_eq!(third_request.right.len(), 100);
     }
 
     #[test]
