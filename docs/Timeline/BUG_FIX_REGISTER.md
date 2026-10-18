@@ -259,3 +259,49 @@ Round6 engineering boundary            Review-2D real HIL closure
 Round6 internally crossed a chat-migration boundary after Review-2D design/oracle audit, but the successor-chat implementation and HIL are now formally counted as the same Engineering Round. Round7 begins at Control semantic migration.
 
 See [Round6.md](./Round6.md) §22–§24 for the chat boundary, Review-2D continuation, final HIL and Round7 handoff.
+
+
+---
+
+## 11. Round 7 / Control semantic path + product data-plane corrections
+
+| ID | Symptom / wrong assumption | Root cause / final correction | Verification |
+|---|---|---|---|
+| **R7R-01** | It was tempting to let Media/Control carry raw CIS handles because Review-2D APIs already used them | This violates the frozen ownership boundary. Introduce `CisRef { cig_id, cis_id }`, sanitized CIS/ISO-path reports, and keep raw controller handles inside HCI Host only | semantic CIS/path tests + Control regression |
+| **R7R-02** | ASCS Config Codec/QoS/Enable could appear complete after ATT Write Response | ATT success is only transport success. Product ASCS op now requires ATT Write Response + CP SUCCESS + expected ASE notification + independent ReadValue readback | out-of-order three-gate tests + rejection tests |
+| **R7R-03** | Control snapshot initially kept only ASCS Control Point value handle | CCCD discovery needs declaration/end-group range. Preserve semantic `GattCharacteristicRange` for CP and selected ASE descriptor range | compile + deterministic descriptor/subscription tests |
+| **R7R-04** | A semantic ASCS operation timer tied only to the active GATT request left a timeout gap after Write Response while waiting for CP/ASE notifications | Separate GATT-request timer from whole-operation `AseOperation { side }` semantic timer | ConfigCodec/QoS/Enable timeout regressions |
+| **R7R-05** | Generic failure cleanup could jump directly to CIG/ACL while ISO Path, CIS, or remote ASE state remained live | Formalize reverse stream cleanup: route unbind → ISO Path R/L → CIS R/L → ASE Release R/L → Remove CIG → ACL R/L → privacy | stream rollback ordering tests |
+| **R7R-06** | Create CIS timeout tempted speculative cleanup | Timeout does not prove whether controller created a CIS. Fail closed instead of guessing RemoveCig; only explicit partial-failure evidence is rolled back via known live `CisRef` | Create-CIS timeout + partial failure tests |
+| **R7R-07** | ISO Path setup/remove failure can be ambiguous even when command result is malformed | Preserve `may_have_configured`; uncertain setup enters path-first rollback, and remove failure/timeout prevents unsafe CIS teardown | path uncertainty + rollback tests |
+| **R7R-08** | Exposing `StreamBinding` immediately after ASE STREAMING would allow Media to run before HCI logical route admission is proven | Add reliable `BindStreamRoute` request/ACK. Control exposes binding only in `StreamBoundReady` after `StreamRouteState::Bound` | route-ack gating tests |
+| **R7R-09** | Session/stream route could become stale after Input Path removal or CIS teardown | HCI route table is session-fenced and invalidated by path/CIS retirement; exact replay is idempotent, conflicting rebind rejected | route readiness/invalidation tests |
+| **R7R-10** | Adding a separate “logical” ISO queue would bypass Review-2D bounded-lane/fairness/admission guarantees | Raw and logical ISO requests share one bounded data-lane envelope and the same worker/admission path; logical groups resolve to raw handles inside HCI Host | shared-lane tests + logical/raw envelope tests |
+| **R7R-11** | Stale logical ISO payload could fault worker during teardown after route/path invalidation | Classify stale logical data as superseded payload and keep teardown/control independent from payload validation; do not resurrect stale data | stale/drain classification regressions |
+| **R7R-12** | Realtime HCI lane backpressure could tempt retry/wait and therefore move media time | Product bridge drops the complete stereo interval on `Full`, never retries it, and continues the next absolute FrameId/deadline | bridge runtime backpressure test |
+| **R7R-13** | Relative sleep scheduling would reintroduce R5 drift | Implement `LocalStreamClock` as an absolute 10 ms grid. Callback jitter/late wake skips expired intervals rather than stretching time | StreamClock absolute-grid tests |
+| **R7R-14** | Missing Media frame fallback must still be valid codec data | Generate real LC3 silence fallback with the same 48k/10ms/100B format and verify decoder output near zero | LC3 silence decode regression |
+| **R7R-15** | A new `stream_route.rs` file existed but was not actually exported from `hci_host::mod`; test count stayed unchanged and created a false-green risk | Explicitly export module and require expected test-count delta; after fix route tests entered normal suite | gate moved 306 → 310 with four route tests |
+| **R7R-16** | Stream route commands/ACK types were exposed in mailbox before worker command/report wiring was complete, temporarily breaking `main` exhaustive matches | Close worker routing and explicit `StreamRouteState::{Bound,Unbound,Failed}` ACK mapping; legacy Review-2 tracker explicitly ignores product route reports | compile recovery + worker/mailbox route tests |
+| **R7R-17** | Adding pinned LC3 dependency left recurring dirty `Cargo.lock` despite no version change | Root dependency order was not Cargo-canonical. Canonicalize remote lock then use fail-closed `git-sync-generated`; keep normal gates `--locked` | final 350/350 locked tests + clean tree |
+| **R7R-18** | A valid-LC3 HIL could be overclaimed as full product runtime acceptance | Dedicated `round7 first-sound` explicitly reuses sealed Review-2D setup/teardown and replaces only data plane. Claim is HIL READY until real run; full Core/Lifecycle remains future integration | parser scope + CLI text + code audit |
+
+### Round7 current gate / open hardware gate
+
+```text
+Control semantic path                        SOFTWARE COMPLETE
+HCI logical route / logical ISO lane         SOFTWARE COMPLETE
+Synthetic PCM + valid LC3                    SOFTWARE COMPLETE
+LocalStreamClock + IsoTxBridge               SOFTWARE COMPLETE
+ControlAction -> HciControl dispatcher       SOFTWARE COMPLETE
+
+cargo test --workspace --locked              350/350 PASS
+cargo check                                  PASS
+cargo build                                  PASS
+git status                                   clean/synced
+
+Round7 valid-LC3 First Sound HIL             READY / NOT YET RUN
+full Core/Lifecycle runtime                  NOT YET INTEGRATED
+```
+
+See [Round7.md](./Round7.md) for the full chronology, claim boundary, HIL command and next-chat handoff point.
