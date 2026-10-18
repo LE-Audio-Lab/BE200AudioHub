@@ -461,35 +461,44 @@ fn maybe_publish_iso_audit(
     Ok(())
 }
 
+fn stream_route_bind_ack(
+    binding: super::stream_route::StereoStreamRouteBinding,
+    result: Result<(), EngineFault>,
+) -> Result<StreamRouteState, EngineFault> {
+    match result {
+        Ok(()) => Ok(StreamRouteState::Bound {
+            session_id: binding.session_id,
+            stream_id: binding.stream_id,
+        }),
+        Err(EngineFault::StreamRouteConfig(error)) => {
+            Ok(StreamRouteState::Failed(StreamRouteFailure {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                kind: StreamRouteFailureKind::Config(error),
+            }))
+        }
+        Err(EngineFault::StreamRouteCisNotReady(cis)) => {
+            Ok(StreamRouteState::Failed(StreamRouteFailure {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                kind: StreamRouteFailureKind::CisNotReady(cis),
+            }))
+        }
+        Err(fault) => Err(fault),
+    }
+}
+
 fn process_stream_route_command(
     engine: &mut HciEngine,
     command: &HciCommand,
 ) -> Result<Option<StreamRouteState>, EngineFault> {
     match command {
-        HciCommand::BindStreamRoute(binding) => {
-            let state = match engine.bind_stream_route(*binding) {
-                Ok(()) => StreamRouteState::Bound {
-                    session_id: binding.session_id,
-                    stream_id: binding.stream_id,
-                },
-                Err(EngineFault::StreamRouteConfig(error)) => {
-                    StreamRouteState::Failed(StreamRouteFailure {
-                        session_id: binding.session_id,
-                        stream_id: binding.stream_id,
-                        kind: StreamRouteFailureKind::Config(error),
-                    })
-                }
-                Err(EngineFault::StreamRouteCisNotReady(cis)) => {
-                    StreamRouteState::Failed(StreamRouteFailure {
-                        session_id: binding.session_id,
-                        stream_id: binding.stream_id,
-                        kind: StreamRouteFailureKind::CisNotReady(cis),
-                    })
-                }
-                Err(fault) => return Err(fault),
-            };
-            Ok(Some(state))
-        }
+        HciCommand::BindStreamRoute(binding) => Ok(Some(
+            stream_route_bind_ack(
+                *binding,
+                engine.bind_stream_route(*binding),
+            )?,
+        ))
         HciCommand::UnbindStreamRoute {
             session_id,
             stream_id,
