@@ -480,6 +480,9 @@ fn process_command(
         HciCommand::DisconnectCis { connection_handle } => {
             engine.begin_cis_disconnect(connection_handle)
         }
+        HciCommand::DisconnectCisByRef { cis } => {
+            engine.begin_cis_disconnect_by_ref(cis)
+        }
         HciCommand::RemoveCig { cig_id } => {
             engine.begin_cig_removal(cig_id)
         }
@@ -718,6 +721,15 @@ fn publish_state_transitions(
                 cis_disconnect_state.clone(),
             ))
             .map_err(map_report_error)?;
+        if let Some(semantic_state) =
+            engine.semantic_cis_disconnect_state()
+        {
+            report_tx
+                .try_send(HciReport::SemanticCisDisconnectState(
+                    semantic_state,
+                ))
+                .map_err(map_report_error)?;
+        }
         *last_cis_disconnect_state = cis_disconnect_state;
     }
 
