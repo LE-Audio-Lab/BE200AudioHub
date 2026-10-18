@@ -509,21 +509,6 @@ fn submit_iso_data_group(
     }
 }
 
-fn maybe_publish_iso_audit(
-    engine: &HciEngine,
-    command: &HciCommand,
-    report_tx: &crossbeam_channel::Sender<HciReport>,
-) -> Result<(), HciWorkerFault> {
-    if matches!(command, HciCommand::ReadIsoTxAudit) {
-        report_tx
-            .try_send(HciReport::IsoTxAudit(
-                engine.iso_credit_snapshot(),
-            ))
-            .map_err(map_report_error)?;
-    }
-    Ok(())
-}
-
 fn stream_route_bind_ack(
     binding: crate::plane::l1_hci::iso::route::StereoStreamRouteBinding,
     result: Result<(), EngineFault>,
