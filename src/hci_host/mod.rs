@@ -13,6 +13,7 @@ pub mod mailbox;
 pub mod privacy;
 pub mod scan;
 pub mod security;
+pub mod stream_route;
 pub mod smoke;
 pub mod stack;
 pub mod worker;
