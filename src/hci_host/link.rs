@@ -12,7 +12,7 @@ use bumble_host::HostTransport;
 
 use crate::{
     runtime::mailbox::SendError,
-    transport::{
+    plane::l2_transport::{
         packet::{ControllerPacket, HostPacket},
         worker::TransportTx,
     },
@@ -281,7 +281,7 @@ impl HostTransport for QueueHostTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::worker::TransportTx;
+    use crate::plane::l2_transport::worker::TransportTx;
 
     fn tx(capacity: usize) -> (
         TransportTx,

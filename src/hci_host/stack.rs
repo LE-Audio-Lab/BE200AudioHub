@@ -1,6 +1,6 @@
 use crate::{
     platform::backend::{BackendError, DeviceBackend},
-    transport::worker::{
+    plane::l2_transport::worker::{
         spawn_transport_worker_with_sink, TransportTx,
         TransportWorkerExit, TransportWorkerJoin,
     },

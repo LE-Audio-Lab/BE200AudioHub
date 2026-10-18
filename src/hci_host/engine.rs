@@ -18,7 +18,7 @@ use bumble_host::{
 
 use crate::{
     architecture::types::{AudioSide, SessionId, StreamId},
-    transport::{
+    plane::l2_transport::{
         packet::ControllerPacket,
         worker::TransportTx,
     },
@@ -3013,7 +3013,7 @@ mod tests {
     use super::*;
     use crate::{
         runtime::mailbox::RecvError,
-        transport::packet::HostPacket,
+        plane::l2_transport::packet::HostPacket,
     };
 
     fn engine(

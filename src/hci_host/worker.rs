@@ -5,10 +5,10 @@ use std::{
 
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
-use crate::transport::worker::TransportTx;
+use crate::plane::l2_transport::worker::TransportTx;
 
 #[cfg(test)]
-use crate::transport::packet::ControllerPacket;
+use crate::plane::l2_transport::packet::ControllerPacket;
 
 use super::{
     engine::{
@@ -1018,7 +1018,7 @@ mod tests {
             },
         },
         runtime::mailbox::RecvError,
-        transport::{
+        plane::l2_transport::{
             packet::HostPacket,
             sink::ControllerPacketSink,
         },
