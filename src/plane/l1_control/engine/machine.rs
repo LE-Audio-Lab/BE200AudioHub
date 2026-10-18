@@ -77,6 +77,7 @@ use crate::plane::l1_control::{
         snapshot::{AudioMemberSnapshot, AudioSetSnapshot},
     },
     model::{
+        cleanup_knowledge::CleanupKnowledge,
         confirmed_status::ConfirmedStatus,
         planned_configuration::PlannedConfiguration,
         set_plan::{ControlPlanError, ControlSetPlan},
@@ -375,6 +376,7 @@ pub struct ControlMachine {
     plan: ControlSetPlan,
     confirmed: ConfirmedStatus,
     planned: PlannedConfiguration,
+    cleanup_knowledge: CleanupKnowledge,
     rollback: RollbackOperation,
     phase: ControlPhase,
     next_gatt_request_id: GattRequestId,
@@ -382,8 +384,6 @@ pub struct ControlMachine {
     audio_members: Vec<AudioMemberSnapshot>,
     ase_prepare: Option<AsePrepareMachine>,
     ase_operation: Option<AseOperationMachine>,
-    cig_may_exist: bool,
-    iso_paths_may_exist: BTreeSet<CisRef>,
     streaming_gate: Option<StreamingGateMachine>,
     pending_stream_binding: Option<StreamBinding>,
     failure: Option<ControlFailure>,
@@ -396,6 +396,7 @@ impl ControlMachine {
             plan,
             confirmed: ConfirmedStatus::new(),
             planned: PlannedConfiguration::new(),
+            cleanup_knowledge: CleanupKnowledge::new(),
             rollback: RollbackOperation::new(),
             phase: ControlPhase::Idle,
             next_gatt_request_id: 1,
@@ -403,8 +404,6 @@ impl ControlMachine {
             audio_members: Vec::new(),
             ase_prepare: None,
             ase_operation: None,
-            cig_may_exist: false,
-            iso_paths_may_exist: BTreeSet::new(),
             streaming_gate: None,
             pending_stream_binding: None,
             failure: None,
@@ -631,7 +630,7 @@ impl ControlMachine {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
         self.confirmed.iso_paths_ready.clear();
-        self.iso_paths_may_exist.clear();
+        self.cleanup_knowledge.iso_paths_may_exist.clear();
         self.streaming_gate = None;
         self.confirmed.streaming_statuses = [None, None];
         self.start_iso_path_setup(AudioSide::Left)
@@ -649,7 +648,7 @@ impl ControlMachine {
             .cis_create_request();
         self.confirmed.live_cis.clear();
         self.confirmed.iso_paths_ready.clear();
-        self.iso_paths_may_exist.clear();
+        self.cleanup_knowledge.iso_paths_may_exist.clear();
         self.streaming_gate = None;
         self.confirmed.streaming_statuses = [None, None];
         self.phase = ControlPhase::CreatingCis;
@@ -790,7 +789,7 @@ impl ControlMachine {
         self.confirmed.qos_statuses = [None, None];
         self.planned.enable_plan = None;
         self.confirmed.enable_statuses = [None, None];
-        self.cig_may_exist = false;
+        self.cleanup_knowledge.cig_may_exist = false;
         self.rollback.cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
@@ -810,7 +809,7 @@ impl ControlMachine {
         self.confirmed.audio_set = None;
         self.planned.codec_plan = None;
         self.planned.iso_plan = None;
-        self.cig_may_exist = false;
+        self.cleanup_knowledge.cig_may_exist = false;
         self.rollback.cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
@@ -1220,7 +1219,7 @@ impl ControlMachine {
                     .cig_id;
                 // The command may have reached the controller even if the
                 // completion is lost. Treat allocation as possible.
-                self.cig_may_exist = true;
+                self.cleanup_knowledge.cig_may_exist = true;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CigConfig,
                 )];
@@ -1363,7 +1362,7 @@ impl ControlMachine {
                     ),
                 );
                 self.rollback.cig_pending = false;
-                self.cig_may_exist = false;
+                self.cleanup_knowledge.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig { cig_id },
                 )];
@@ -1754,7 +1753,7 @@ impl ControlMachine {
                         .iter()
                         .map(|cis| cis.cis_id)
                         .collect::<Vec<_>>();
-                    self.cig_may_exist = true;
+                    self.cleanup_knowledge.cig_may_exist = true;
                     let mut actions = vec![
                         ControlAction::DisarmTimer(
                             ControlTimer::CigConfig,
@@ -1771,7 +1770,7 @@ impl ControlMachine {
                     return Ok(actions);
                 }
 
-                self.cig_may_exist = true;
+                self.cleanup_knowledge.cig_may_exist = true;
                 self.phase = ControlPhase::CigConfigured;
                 Ok(vec![ControlAction::DisarmTimer(
                     ControlTimer::CigConfig,
@@ -1783,7 +1782,7 @@ impl ControlMachine {
                     CigConfigureState::Failed(failure),
                 ),
             ) => {
-                self.cig_may_exist = failure.may_have_allocated;
+                self.cleanup_knowledge.cig_may_exist = failure.may_have_allocated;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CigConfig,
                 )];
@@ -1894,7 +1893,7 @@ impl ControlMachine {
                 }
 
                 self.confirmed.iso_paths_ready.insert(*cis);
-                self.iso_paths_may_exist.insert(*cis);
+                self.cleanup_knowledge.iso_paths_may_exist.insert(*cis);
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup { cis: *cis },
                 )];
@@ -1936,7 +1935,7 @@ impl ControlMachine {
                     )]);
                 }
                 if failure.may_have_configured {
-                    self.iso_paths_may_exist.insert(failure.cis);
+                    self.cleanup_knowledge.iso_paths_may_exist.insert(failure.cis);
                 }
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup {
@@ -2064,7 +2063,7 @@ impl ControlMachine {
                 ),
             ) if self.rollback.iso_path_current == Some(*cis) => {
                 self.confirmed.iso_paths_ready.remove(cis);
-                self.iso_paths_may_exist.remove(cis);
+                self.cleanup_knowledge.iso_paths_may_exist.remove(cis);
                 self.rollback.iso_path_current = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupIsoPath { cis: *cis },
@@ -2134,7 +2133,7 @@ impl ControlMachine {
                     == Some(*cig_id) =>
             {
                 self.rollback.cig_pending = false;
-                self.cig_may_exist = false;
+                self.cleanup_knowledge.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig { cig_id: *cig_id },
                 )];
@@ -2154,7 +2153,7 @@ impl ControlMachine {
                     ),
                 );
                 self.rollback.cig_pending = false;
-                self.cig_may_exist = false;
+                self.cleanup_knowledge.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig {
                         cig_id: failure.cig_id,
@@ -3486,7 +3485,7 @@ impl ControlMachine {
         self.rollback.acl_current = None;
 
         self.rollback.iso_path_queue =
-            self.iso_paths_may_exist.iter().copied().collect();
+            self.cleanup_knowledge.iso_paths_may_exist.iter().copied().collect();
         self.rollback.iso_path_current = None;
 
         self.rollback.cis_queue =
@@ -3575,7 +3574,7 @@ impl ControlMachine {
             return Ok(Vec::new());
         }
 
-        if self.cig_may_exist {
+        if self.cleanup_knowledge.cig_may_exist {
             if self.rollback.cig_pending {
                 return Ok(Vec::new());
             }
@@ -6310,7 +6309,7 @@ mod tests {
             )]
         );
         assert_eq!(machine.phase(), ControlPhase::CigConfigured);
-        assert!(machine.cig_may_exist);
+        assert!(machine.cleanup_knowledge.cig_may_exist);
         // Control retains only the semantic plan. The controller-assigned
         // 0x0900/0x0901 handles from CigAllocation are intentionally not
         // represented in ControlMachine state.
@@ -6382,7 +6381,7 @@ mod tests {
                 }),
             )
         );
-        assert!(!machine.cig_may_exist);
+        assert!(!machine.cleanup_knowledge.cig_may_exist);
     }
 
     #[test]
@@ -6408,7 +6407,7 @@ mod tests {
             ]
         );
         assert_eq!(machine.phase(), ControlPhase::RollingBack);
-        assert!(machine.cig_may_exist);
+        assert!(machine.cleanup_knowledge.cig_may_exist);
         assert!(matches!(
             machine.failure(),
             Some(ControlFailure::CigConfigureTimeout {
