@@ -28,6 +28,10 @@ use crate::{
         CigRemoveFailure, CigRemoveState,
         CisDisconnectFailureKind, SemanticCisDisconnectState,
     },
+    iso_path::{
+        IsoDataPathDirection, SemanticIsoPathFailure,
+        SemanticIsoPathState,
+    },
     gatt::{GattReport, GattRequest, GattRequestId},
     mailbox::HciReport,
     privacy::{
@@ -103,6 +107,8 @@ pub enum ControlPhase {
     Enabled,
     CreatingCis,
     CisEstablished,
+    SettingUpIsoPath { side: AudioSide },
+    IsoPathsReady,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -128,6 +134,7 @@ pub enum ControlTimer {
     AseOperation { side: AudioSide },
     CigConfig,
     CisCreate,
+    IsoPathSetup { cis: CisRef },
     CleanupCis { cis: CisRef },
     CleanupAse { side: AudioSide },
     CleanupCig { cig_id: u8 },
@@ -158,6 +165,7 @@ pub enum ControlAction {
     ClearControllerPrivacy,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
+    SetupIsoInputPathByRef { cis: CisRef },
     DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     BeginGatt(GattRequest),
@@ -276,6 +284,17 @@ pub enum ControlFailure {
     CisCreateTimeout {
         cig_id: u8,
     },
+    IsoPathSetup {
+        cis: CisRef,
+        failure: SemanticIsoPathFailure,
+    },
+    IsoPathSetupMismatch {
+        expected: CisRef,
+        actual: CisRef,
+    },
+    IsoPathSetupTimeout {
+        cis: CisRef,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -316,6 +335,8 @@ pub struct ControlMachine {
     cig_may_exist: bool,
     rollback_cig_pending: bool,
     live_cis: BTreeSet<CisRef>,
+    iso_paths_ready: BTreeSet<CisRef>,
+    iso_paths_may_exist: BTreeSet<CisRef>,
     rollback_cis_queue: Vec<CisRef>,
     rollback_cis_current: Option<CisRef>,
     rollback_ase_queue: Vec<AudioSide>,
@@ -354,6 +375,8 @@ impl ControlMachine {
             cig_may_exist: false,
             rollback_cig_pending: false,
             live_cis: BTreeSet::new(),
+            iso_paths_ready: BTreeSet::new(),
+            iso_paths_may_exist: BTreeSet::new(),
             rollback_cis_queue: Vec::new(),
             rollback_cis_current: None,
             rollback_ase_queue: Vec::new(),
@@ -431,6 +454,21 @@ impl ControlMachine {
         &self.live_cis
     }
 
+    pub fn iso_paths_ready(&self) -> &BTreeSet<CisRef> {
+        &self.iso_paths_ready
+    }
+
+    pub fn begin_iso_path_setup(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::CisEstablished {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.iso_paths_ready.clear();
+        self.iso_paths_may_exist.clear();
+        self.start_iso_path_setup(AudioSide::Left)
+    }
+
     pub fn begin_cis_creation(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -443,6 +481,8 @@ impl ControlMachine {
             .expect("Enabled requires ISO plan")
             .cis_create_request();
         self.live_cis.clear();
+        self.iso_paths_ready.clear();
+        self.iso_paths_may_exist.clear();
         self.phase = ControlPhase::CreatingCis;
         Ok(vec![
             ControlAction::CreateCis(request),
@@ -886,6 +926,22 @@ impl ControlMachine {
                 self.failure = Some(failure);
                 Ok(vec![ControlAction::DisarmTimer(
                     ControlTimer::CisCreate,
+                )])
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::IsoPathSetup { cis },
+            ) if matches!(
+                self.phase,
+                ControlPhase::SettingUpIsoPath { side }
+                    if self.cis_for_side(side) == Some(cis)
+            ) =>
+            {
+                let failure =
+                    ControlFailure::IsoPathSetupTimeout { cis };
+                self.phase = ControlPhase::Faulted;
+                self.failure = Some(failure);
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::IsoPathSetup { cis },
                 )])
             }
             ControlEvent::TimerExpired(
@@ -1455,6 +1511,91 @@ impl ControlMachine {
                     ControlFailure::CisCreate(failure.clone()),
                 )?);
                 Ok(actions)
+            }
+            (
+                ControlPhase::SettingUpIsoPath { side },
+                HciReport::SemanticIsoPathState(
+                    SemanticIsoPathState::SetupComplete {
+                        cis,
+                        direction:
+                            IsoDataPathDirection::Input,
+                    },
+                ),
+            ) => {
+                let expected = self
+                    .cis_for_side(side)
+                    .expect("ISO path setup requires ISO plan");
+                if *cis != expected {
+                    let failure =
+                        ControlFailure::IsoPathSetupMismatch {
+                            expected,
+                            actual: *cis,
+                        };
+                    self.phase = ControlPhase::Faulted;
+                    self.failure = Some(failure);
+                    return Ok(vec![ControlAction::DisarmTimer(
+                        ControlTimer::IsoPathSetup {
+                            cis: expected,
+                        },
+                    )]);
+                }
+
+                self.iso_paths_ready.insert(*cis);
+                self.iso_paths_may_exist.insert(*cis);
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::IsoPathSetup { cis: *cis },
+                )];
+                match side {
+                    AudioSide::Left => {
+                        actions.extend(
+                            self.start_iso_path_setup(
+                                AudioSide::Right,
+                            )?,
+                        );
+                    }
+                    AudioSide::Right => {
+                        self.phase = ControlPhase::IsoPathsReady;
+                    }
+                }
+                Ok(actions)
+            }
+            (
+                ControlPhase::SettingUpIsoPath { side },
+                HciReport::SemanticIsoPathState(
+                    SemanticIsoPathState::Failed(failure),
+                ),
+            ) => {
+                let expected = self
+                    .cis_for_side(side)
+                    .expect("ISO path setup requires ISO plan");
+                if failure.cis != expected {
+                    let mismatch =
+                        ControlFailure::IsoPathSetupMismatch {
+                            expected,
+                            actual: failure.cis,
+                        };
+                    self.phase = ControlPhase::Faulted;
+                    self.failure = Some(mismatch);
+                    return Ok(vec![ControlAction::DisarmTimer(
+                        ControlTimer::IsoPathSetup {
+                            cis: expected,
+                        },
+                    )]);
+                }
+                if failure.may_have_configured {
+                    self.iso_paths_may_exist.insert(failure.cis);
+                }
+                let primary = ControlFailure::IsoPathSetup {
+                    cis: failure.cis,
+                    failure: failure.clone(),
+                };
+                self.phase = ControlPhase::Faulted;
+                self.failure = Some(primary);
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::IsoPathSetup {
+                        cis: failure.cis,
+                    },
+                )])
             }
             (
                 ControlPhase::RollingBack,
@@ -2332,6 +2473,36 @@ impl ControlMachine {
             }
             AudioDiscoveryAction::Ignored => Ok(actions),
         }
+    }
+
+    fn cis_for_side(
+        &self,
+        side: AudioSide,
+    ) -> Option<CisRef> {
+        let plan = self.iso_plan.as_ref()?;
+        Some(CisRef {
+            cig_id: plan.cig_id,
+            cis_id: plan.cis_id(side),
+        })
+    }
+
+    fn start_iso_path_setup(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let cis = self
+            .cis_for_side(side)
+            .ok_or(ControlFailure::InvalidStartState(self.phase))?;
+        if !self.live_cis.contains(&cis) {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.phase = ControlPhase::SettingUpIsoPath { side };
+        Ok(vec![
+            ControlAction::SetupIsoInputPathByRef { cis },
+            ControlAction::ArmTimer(
+                ControlTimer::IsoPathSetup { cis },
+            ),
+        ])
     }
 
     fn semantic_cis_ref(
