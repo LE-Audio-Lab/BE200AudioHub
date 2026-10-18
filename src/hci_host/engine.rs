@@ -65,7 +65,7 @@ use super::{
         IsoPathSetupTransaction, SemanticIsoPathState,
     },
     iso_tx::{
-        iso_group_fits, iso_group_packet_count, IsoDrainConfigError,
+        iso_group_fits, iso_packet_count, IsoDrainConfigError,
         IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
         IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
         LogicalIsoSduGroupRequest,
@@ -935,6 +935,41 @@ impl HciEngine {
             .validate()
             .map_err(EngineFault::IsoSduGroupConfig)?;
 
+        self.submit_iso_members(request.sdus.len(), |index| {
+            let sdu = &request.sdus[index];
+            (sdu.connection_handle, sdu.payload.as_slice())
+        })
+    }
+
+    pub fn submit_logical_iso_group(
+        &mut self,
+        request: &LogicalIsoSduGroupRequest,
+    ) -> Result<Option<IsoSubmitOutcome>, EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready {
+            return Err(EngineFault::InvalidState);
+        }
+        let Some([left, right]) =
+            self.resolve_logical_iso_handles(request)?
+        else {
+            return Ok(None);
+        };
+
+        self.submit_iso_members(2, |index| match index {
+            0 => (left, request.left.as_slice()),
+            1 => (right, request.right.as_slice()),
+            _ => unreachable!("logical stereo group has exactly two members"),
+        })
+        .map(Some)
+    }
+
+    fn submit_iso_members<'a, F>(
+        &mut self,
+        member_count: usize,
+        member: F,
+    ) -> Result<IsoSubmitOutcome, EngineFault>
+    where
+        F: Fn(usize) -> (u16, &'a [u8]),
+    {
         let packet_length = self
             .device
             .iso_data_packet_length()
@@ -950,8 +985,19 @@ impl HciEngine {
             .device
             .iso_packets_pending()
             .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
-        let required_packets = iso_group_packet_count(&request, packet_length)
+
+        let mut required_packets = 0usize;
+        for index in 0..member_count {
+            let (_, payload) = member(index);
+            let count = iso_packet_count(
+                payload.len(),
+                packet_length,
+            )
             .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+            required_packets = required_packets
+                .checked_add(count)
+                .ok_or(EngineFault::IsoControllerPoolUnavailable)?;
+        }
 
         // Admission is checked before any member is submitted. This prevents a
         // fast HCI worker from moving an unbounded realtime backlog into
@@ -967,8 +1013,8 @@ impl HciEngine {
 
         // Validate the complete group against live HCI state before mutating
         // either member's Host queue.
-        for sdu in &request.sdus {
-            let handle = sdu.connection_handle;
+        for index in 0..member_count {
+            let (handle, _) = member(index);
             if !self.cis_state_contains_established_handle(handle)
                 || self.device.cis_link(handle).is_none()
             {
@@ -988,11 +1034,11 @@ impl HciEngine {
             }
         }
 
-        for sdu in &request.sdus {
-            let handle = sdu.connection_handle;
+        for index in 0..member_count {
+            let (handle, payload) = member(index);
             if !self
                 .device
-                .send_iso_sdu(&mut self.link, handle, &sdu.payload)
+                .send_iso_sdu(&mut self.link, handle, payload)
             {
                 self.check_link_fault()?;
                 return Err(EngineFault::IsoSduSendRejected {
@@ -3622,8 +3668,10 @@ mod tests {
         assert_eq!(engine.device().iso_packets_pending(), Some(0));
 
         assert_eq!(
-            engine.submit_iso_group(&group).unwrap(),
-            super::super::iso_tx::IsoSubmitOutcome::Accepted
+            engine
+                .submit_logical_iso_group(&logical_group)
+                .unwrap(),
+            Some(super::super::iso_tx::IsoSubmitOutcome::Accepted)
         );
         engine.poll_until_quiescent().unwrap();
         assert_eq!(engine.iso_credit_audit.in_flight(), 2);
@@ -3673,6 +3721,14 @@ mod tests {
             None,
             "a stereo realtime group becomes stale atomically when either route disappears",
         );
+        assert_eq!(
+            engine
+                .submit_logical_iso_group(&logical_group)
+                .unwrap(),
+            None,
+            "stale logical realtime data is dropped as a whole rather than faulting teardown",
+        );
+        assert_eq!(rx.try_recv(), Err(RecvError::Empty));
         assert_eq!(
             engine.resolve_stream_handle(
                 route.session_id,
