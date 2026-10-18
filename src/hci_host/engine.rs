@@ -39,6 +39,7 @@ use super::{
         CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
         CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
         CisCreateRequest, CisCreateState, CisCreateTransaction,
+        CisRef,
     },
     iso_credit::{
         IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot,
@@ -49,8 +50,9 @@ use super::{
     },
     iso_lifecycle::{
         CigRemoveAction, CigRemoveState, CigRemoveTransaction,
-        CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
-        CisDisconnectTransaction,
+        CisDisconnectAction, CisDisconnectEvent,
+        CisDisconnectState, CisDisconnectTransaction,
+        SemanticCisDisconnectState,
     },
     iso_path::{
         IsoDataPathConfig, IsoDataPathDirection, IsoPathConfigError,
@@ -213,6 +215,7 @@ pub struct HciEngine {
     cis_create_transaction: Option<CisCreateTransaction>,
     cis_disconnect_state: CisDisconnectState,
     cis_disconnect_transaction: Option<CisDisconnectTransaction>,
+    semantic_cis_disconnect_target: Option<CisRef>,
     iso_path_state: IsoPathOperationState,
     iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
     iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
@@ -258,6 +261,7 @@ impl HciEngine {
             cis_create_transaction: None,
             cis_disconnect_state: CisDisconnectState::Idle,
             cis_disconnect_transaction: None,
+            semantic_cis_disconnect_target: None,
             iso_path_state: IsoPathOperationState::Idle,
             iso_path_setup_transaction: None,
             iso_path_remove_transaction: None,
@@ -621,6 +625,57 @@ impl HciEngine {
         &mut self,
         connection_handle: u16,
     ) -> Result<(), EngineFault> {
+        self.begin_cis_disconnect_handle(connection_handle)?;
+        self.semantic_cis_disconnect_target = None;
+        Ok(())
+    }
+
+    pub fn begin_cis_disconnect_by_ref(
+        &mut self,
+        cis: CisRef,
+    ) -> Result<(), EngineFault> {
+        let connection_handle = self
+            .resolve_established_cis_handle(cis)
+            .ok_or(EngineFault::InvalidState)?;
+        self.begin_cis_disconnect_handle(connection_handle)?;
+        self.semantic_cis_disconnect_target = Some(cis);
+        Ok(())
+    }
+
+    pub fn semantic_cis_disconnect_state(
+        &self,
+    ) -> Option<SemanticCisDisconnectState> {
+        let cis = self.semantic_cis_disconnect_target?;
+        match &self.cis_disconnect_state {
+            CisDisconnectState::Idle => None,
+            CisDisconnectState::Submitting { .. } => {
+                Some(SemanticCisDisconnectState::Submitting { cis })
+            }
+            CisDisconnectState::AwaitingEvent { .. } => {
+                Some(SemanticCisDisconnectState::AwaitingEvent { cis })
+            }
+            CisDisconnectState::Disconnected {
+                event_reason,
+                ..
+            } => Some(
+                SemanticCisDisconnectState::Disconnected {
+                    cis,
+                    event_reason: *event_reason,
+                },
+            ),
+            CisDisconnectState::Failed(failure) => {
+                Some(SemanticCisDisconnectState::Failed {
+                    cis,
+                    kind: failure.kind.clone(),
+                })
+            }
+        }
+    }
+
+    fn begin_cis_disconnect_handle(
+        &mut self,
+        connection_handle: u16,
+    ) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
             || self.disconnect_transaction.is_some()
             || self.cis_create_transaction.is_some()
@@ -645,6 +700,31 @@ impl HciEngine {
         self.cis_disconnect_state =
             CisDisconnectState::Submitting { connection_handle };
         Ok(())
+    }
+
+    fn resolve_established_cis_handle(
+        &self,
+        cis: CisRef,
+    ) -> Option<u16> {
+        let established = match &self.cis_create_state {
+            CisCreateState::Ready {
+                cig_id,
+                established,
+            } if *cig_id == cis.cig_id => established.as_slice(),
+            CisCreateState::Failed(failure)
+                if failure.cig_id == cis.cig_id =>
+            {
+                failure.established.as_slice()
+            }
+            _ => return None,
+        };
+
+        let entry = established
+            .iter()
+            .find(|entry| entry.cis_id == cis.cis_id)?;
+        self.device
+            .cis_link(entry.link.connection_handle)
+            .map(|_| entry.link.connection_handle)
     }
 
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
