@@ -1668,6 +1668,53 @@ mod tests {
     }
 
     #[test]
+    fn audio_discovery_timeout_cancels_gatt_before_acl_rollback() {
+        let mut machine = machine_at_set_connected();
+        let actions = machine.begin_audio_discovery().unwrap();
+        let request = match &actions[0] {
+            ControlAction::BeginGatt(request) => request.clone(),
+            other => panic!("unexpected action {other:?}"),
+        };
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::Gatt {
+                    member_index: 0,
+                    request_id: request.request_id,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions[0],
+            ControlAction::CancelGatt {
+                connection: request.connection,
+                request_id: request.request_id,
+            }
+        );
+        assert_eq!(
+            actions[1],
+            ControlAction::DisarmTimer(ControlTimer::Gatt {
+                member_index: 0,
+                request_id: request.request_id,
+            })
+        );
+        assert!(matches!(
+            actions[2],
+            ControlAction::DisconnectAcl { connection }
+                if connection.connection_handle == 0x0801
+        ));
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::AudioDiscoveryTimeout {
+                member_index: 0,
+                request_id,
+            }) if *request_id == request.request_id
+        ));
+    }
+
+    #[test]
     fn audio_discovery_gatt_failure_rolls_back_connected_set() {
         let mut machine = machine_at_set_connected();
         let actions = machine.begin_audio_discovery().unwrap();
