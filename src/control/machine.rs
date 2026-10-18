@@ -74,6 +74,10 @@ use super::{
     qos_plan::{
         plan_first_qos, QosPlanError, StereoQosPlan,
     },
+    streaming_gate::{
+        StreamingGateAction, StreamingGateFailure,
+        StreamingGateMachine, StreamingGatePhase,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +113,8 @@ pub enum ControlPhase {
     CisEstablished,
     SettingUpIsoPath { side: AudioSide },
     IsoPathsReady,
+    AwaitingStreaming { side: AudioSide },
+    StreamingReady,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -135,6 +141,8 @@ pub enum ControlTimer {
     CigConfig,
     CisCreate,
     IsoPathSetup { cis: CisRef },
+    StreamingProbe { side: AudioSide },
+    StreamingDeadline { side: AudioSide },
     CleanupIsoPath { cis: CisRef },
     CleanupCis { cis: CisRef },
     CleanupAse { side: AudioSide },
@@ -301,6 +309,17 @@ pub enum ControlFailure {
     IsoPathSetupTimeout {
         cis: CisRef,
     },
+    StreamingGate {
+        side: AudioSide,
+        failure: StreamingGateFailure,
+    },
+    StreamingGattTimeout {
+        side: AudioSide,
+        request_id: GattRequestId,
+    },
+    StreamingDeadline {
+        side: AudioSide,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -343,6 +362,8 @@ pub struct ControlMachine {
     live_cis: BTreeSet<CisRef>,
     iso_paths_ready: BTreeSet<CisRef>,
     iso_paths_may_exist: BTreeSet<CisRef>,
+    streaming_gate: Option<StreamingGateMachine>,
+    streaming_statuses: [Option<AseStatus>; 2],
     rollback_iso_path_queue: Vec<CisRef>,
     rollback_iso_path_current: Option<CisRef>,
     rollback_cis_queue: Vec<CisRef>,
@@ -385,6 +406,8 @@ impl ControlMachine {
             live_cis: BTreeSet::new(),
             iso_paths_ready: BTreeSet::new(),
             iso_paths_may_exist: BTreeSet::new(),
+            streaming_gate: None,
+            streaming_statuses: [None, None],
             rollback_iso_path_queue: Vec::new(),
             rollback_iso_path_current: None,
             rollback_cis_queue: Vec::new(),
@@ -468,6 +491,24 @@ impl ControlMachine {
         &self.iso_paths_ready
     }
 
+    pub fn streaming_status(
+        &self,
+        side: AudioSide,
+    ) -> Option<&AseStatus> {
+        self.streaming_statuses[side_index(side)].as_ref()
+    }
+
+    pub fn begin_streaming_gate(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::IsoPathsReady {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.streaming_gate = None;
+        self.streaming_statuses = [None, None];
+        self.start_streaming_gate(AudioSide::Left)
+    }
+
     pub fn begin_iso_path_setup(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -476,6 +517,8 @@ impl ControlMachine {
         }
         self.iso_paths_ready.clear();
         self.iso_paths_may_exist.clear();
+        self.streaming_gate = None;
+        self.streaming_statuses = [None, None];
         self.start_iso_path_setup(AudioSide::Left)
     }
 
@@ -493,6 +536,8 @@ impl ControlMachine {
         self.live_cis.clear();
         self.iso_paths_ready.clear();
         self.iso_paths_may_exist.clear();
+        self.streaming_gate = None;
+        self.streaming_statuses = [None, None];
         self.phase = ControlPhase::CreatingCis;
         Ok(vec![
             ControlAction::CreateCis(request),
@@ -829,6 +874,56 @@ impl ControlMachine {
                     member_index,
                     request_id,
                 },
+            ) if matches!(
+                self.phase,
+                ControlPhase::AwaitingStreaming { side }
+                    if self.planned_sink(side)
+                        .map(|sink| sink.member_index)
+                        .ok() == Some(member_index)
+            )
+                && self
+                    .streaming_gate
+                    .as_ref()
+                    .and_then(|gate| gate.pending_request_id())
+                    == Some(request_id) =>
+            {
+                let side = match self.phase {
+                    ControlPhase::AwaitingStreaming { side } => side,
+                    _ => unreachable!(),
+                };
+                let connection = self.planned_sink(side)?.connection;
+                self.streaming_gate = None;
+                let mut actions = vec![
+                    ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    },
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ),
+                    ControlAction::DisarmTimer(
+                        ControlTimer::StreamingProbe { side },
+                    ),
+                    ControlAction::DisarmTimer(
+                        ControlTimer::StreamingDeadline { side },
+                    ),
+                ];
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamingGattTimeout {
+                        side,
+                        request_id,
+                    },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::Gatt {
+                    member_index,
+                    request_id,
+                },
             ) if self
                 .active_ase_operation_side()
                 .and_then(|side| {
@@ -898,6 +993,89 @@ impl ControlMachine {
                 }
                 actions.extend(self.begin_rollback(
                     ControlFailure::AseOperationTimeout { side },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::StreamingProbe { side },
+            ) if self.phase == ControlPhase::AwaitingStreaming { side }
+                && self
+                    .streaming_gate
+                    .as_ref()
+                    .map(|gate| gate.phase())
+                    == Some(StreamingGatePhase::WaitingRetry) =>
+            {
+                let mut gate = self
+                    .streaming_gate
+                    .take()
+                    .expect("streaming retry requires gate");
+                let action = match gate.retry() {
+                    Ok(action) => action,
+                    Err(failure) => {
+                        let mut actions = vec![
+                            ControlAction::DisarmTimer(
+                                ControlTimer::StreamingProbe { side },
+                            ),
+                            ControlAction::DisarmTimer(
+                                ControlTimer::StreamingDeadline { side },
+                            ),
+                        ];
+                        actions.extend(self.begin_stream_rollback(
+                            ControlFailure::StreamingGate {
+                                side,
+                                failure,
+                            },
+                        )?);
+                        return Ok(actions);
+                    }
+                };
+                self.next_gatt_request_id = gate.next_request_id();
+                self.streaming_gate = Some(gate);
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::StreamingProbe { side },
+                )];
+                actions.extend(
+                    self.translate_streaming_action(
+                        side,
+                        None,
+                        action,
+                    )?,
+                );
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::StreamingDeadline { side },
+            ) if self.phase == ControlPhase::AwaitingStreaming { side } =>
+            {
+                let pending = self
+                    .streaming_gate
+                    .as_ref()
+                    .and_then(|gate| gate.pending_request_id());
+                self.streaming_gate = None;
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::StreamingProbe { side },
+                    ),
+                    ControlAction::DisarmTimer(
+                        ControlTimer::StreamingDeadline { side },
+                    ),
+                ];
+                if let Some(request_id) = pending {
+                    let member_index =
+                        self.planned_sink(side)?.member_index;
+                    actions.push(ControlAction::CancelGatt {
+                        connection: self.planned_sink(side)?.connection,
+                        request_id,
+                    });
+                    actions.push(ControlAction::DisarmTimer(
+                        ControlTimer::Gatt {
+                            member_index,
+                            request_id,
+                        },
+                    ));
+                }
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamingDeadline { side },
                 )?);
                 Ok(actions)
             }
@@ -1809,6 +1987,10 @@ impl ControlMachine {
             }
 
             (
+                ControlPhase::AwaitingStreaming { side },
+                HciReport::Gatt(report),
+            ) => self.on_streaming_gatt_report(side, report),
+            (
                 ControlPhase::RollingBack,
                 HciReport::Gatt(report),
             ) if self.rollback_ase_operation.is_some() => {
@@ -1830,6 +2012,209 @@ impl ControlMachine {
             ) => self.on_ase_operation_gatt_report(side, report),
 
             _ => Ok(Vec::new()),
+        }
+    }
+
+    fn start_streaming_gate(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let cis = self
+            .cis_for_side(side)
+            .ok_or(ControlFailure::InvalidStartState(self.phase))?;
+        if !self.iso_paths_ready.contains(&cis) {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let prepared = self.prepared_ases[side_index(side)]
+            .as_ref()
+            .expect("streaming gate requires prepared ASE")
+            .clone();
+        let context = self
+            .enable_plan
+            .as_ref()
+            .expect("streaming gate requires Enable plan")
+            .context;
+        let mut gate = StreamingGateMachine::new(
+            prepared,
+            cis,
+            context,
+            self.next_gatt_request_id,
+        );
+        let action = gate.start().map_err(|failure| {
+            ControlFailure::StreamingGate { side, failure }
+        })?;
+        self.next_gatt_request_id = gate.next_request_id();
+        self.streaming_gate = Some(gate);
+        self.phase = ControlPhase::AwaitingStreaming { side };
+
+        let mut actions = vec![ControlAction::ArmTimer(
+            ControlTimer::StreamingDeadline { side },
+        )];
+        actions.extend(
+            self.translate_streaming_action(side, None, action)?,
+        );
+        Ok(actions)
+    }
+
+    fn on_streaming_gatt_report(
+        &mut self,
+        side: AudioSide,
+        report: &GattReport,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut gate = self
+            .streaming_gate
+            .take()
+            .expect("streaming phase missing gate");
+        let pending_before = gate.pending_request_id();
+        let connection = self.planned_sink(side)?.connection;
+        let completed_request = match report {
+            GattReport::Complete {
+                request_id,
+                connection: actual,
+                ..
+            }
+            | GattReport::BearerPoisoned {
+                connection: actual,
+                request_id,
+            } if Some(*request_id) == pending_before
+                && *actual == connection =>
+            {
+                Some(*request_id)
+            }
+            GattReport::Failed(failure)
+                if Some(failure.request_id) == pending_before
+                    && failure.connection == connection =>
+            {
+                Some(failure.request_id)
+            }
+            _ => None,
+        };
+
+        let outcome = gate.on_gatt_report(report);
+        let pending_after = gate.pending_request_id();
+        self.next_gatt_request_id = gate.next_request_id();
+
+        match outcome {
+            Ok(StreamingGateAction::Ignored) => {
+                self.streaming_gate = Some(gate);
+                Ok(Vec::new())
+            }
+            Ok(action @ StreamingGateAction::BeginGatt(_))
+            | Ok(action @ StreamingGateAction::RetryLater) => {
+                self.streaming_gate = Some(gate);
+                self.translate_streaming_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Ok(action @ StreamingGateAction::Complete(_)) => {
+                self.streaming_gate = None;
+                self.translate_streaming_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Err(failure) => {
+                self.streaming_gate = None;
+                let mut actions =
+                    self.disarm_gatt_request(side, completed_request)?;
+                if let Some(request_id) = pending_before
+                    .filter(|_| completed_request.is_none())
+                {
+                    actions.push(ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    });
+                    actions.extend(self.disarm_gatt_request(
+                        side,
+                        Some(request_id),
+                    )?);
+                } else if let Some(request_id) = pending_after {
+                    actions.push(ControlAction::CancelGatt {
+                        connection,
+                        request_id,
+                    });
+                    actions.extend(self.disarm_gatt_request(
+                        side,
+                        Some(request_id),
+                    )?);
+                }
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::StreamingProbe { side },
+                ));
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::StreamingDeadline { side },
+                ));
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamingGate {
+                        side,
+                        failure,
+                    },
+                )?);
+                Ok(actions)
+            }
+        }
+    }
+
+    fn translate_streaming_action(
+        &mut self,
+        side: AudioSide,
+        completed_request: Option<GattRequestId>,
+        action: StreamingGateAction,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let mut actions =
+            self.disarm_gatt_request(side, completed_request)?;
+
+        match action {
+            StreamingGateAction::BeginGatt(request) => {
+                let request_id = request.request_id;
+                let member_index = self.planned_sink(side)?.member_index;
+                // A STREAMING notification may shortcut a previously armed
+                // retry probe. Disarming a stale probe is intentional.
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::StreamingProbe { side },
+                ));
+                actions.push(ControlAction::BeginGatt(request));
+                actions.push(ControlAction::ArmTimer(
+                    ControlTimer::Gatt {
+                        member_index,
+                        request_id,
+                    },
+                ));
+                Ok(actions)
+            }
+            StreamingGateAction::RetryLater => {
+                actions.push(ControlAction::ArmTimer(
+                    ControlTimer::StreamingProbe { side },
+                ));
+                Ok(actions)
+            }
+            StreamingGateAction::Complete(status) => {
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::StreamingProbe { side },
+                ));
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::StreamingDeadline { side },
+                ));
+                self.streaming_statuses[side_index(side)] =
+                    Some(status);
+                match side {
+                    AudioSide::Left => {
+                        actions.extend(
+                            self.start_streaming_gate(
+                                AudioSide::Right,
+                            )?,
+                        );
+                    }
+                    AudioSide::Right => {
+                        self.phase = ControlPhase::StreamingReady;
+                    }
+                }
+                Ok(actions)
+            }
+            StreamingGateAction::Ignored => Ok(actions),
         }
     }
 
