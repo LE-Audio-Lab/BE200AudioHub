@@ -893,7 +893,8 @@ mod tests {
             &mut machine,
             request.clone(),
             GattResult::Value {
-                attribute_handle: request.operation_handle().unwrap_or(0),
+                attribute_handle:
+                    request.operation.operation_handle().unwrap_or(0),
                 value: pac_bytes(),
             },
         ));
