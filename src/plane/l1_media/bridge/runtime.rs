@@ -5,9 +5,7 @@
 //! that interval atomically; it is never retried on a later media interval.
 
 use crate::{
-    architecture::{
-        control::StreamBinding,
-    },
+    plane::l1_control::interface::stream::StreamBinding,
     plane::{
         l1_hci::interface::iso_tx::HciLogicalIsoTx,
         l1_media::{

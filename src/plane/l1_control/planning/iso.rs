@@ -1,5 +1,5 @@
 use crate::{
-    architecture::types::AudioSide,
+    plane::l1_control::interface::stream::AudioSide,
     plane::l1_hci::{
         acl::connection::ConnectionToken,
         iso::cig_cis::{CigConfig, CisAclBinding, CisConfig, CisCreateRequest},

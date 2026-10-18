@@ -358,7 +358,7 @@ mod tests {
     };
 
     use crate::{
-        architecture::types::AudioSide,
+        plane::l1_control::interface::stream::AudioSide,
         plane::{
             l1_control::{
                 discovery::snapshot::GattCharacteristicRange,
