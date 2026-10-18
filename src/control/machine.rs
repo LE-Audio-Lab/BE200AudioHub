@@ -1,7 +1,8 @@
 use crate::hci_host::{
     connection::{
-        ConnectionToken, FalConnectFailure, FalConnectRequest,
-        FalConnectionState, LeConnectionSetSnapshot,
+        ConnectionToken, DisconnectFailure, DisconnectState,
+        FalConnectFailure, FalConnectRequest, FalConnectionState,
+        LeConnectionSetSnapshot,
     },
     engine::{
         ControllerIdentityFailure, OperationalAttachFailure,
@@ -42,6 +43,8 @@ pub enum ControlPhase {
     SecuringMember { member_index: usize },
     AwaitingSetConnected,
     SetConnected,
+    CancellingConnection { member_index: usize },
+    RollingBack,
     Faulted,
 }
 
@@ -54,6 +57,12 @@ pub enum ControlTimer {
     DiscoveryWindow,
     ScanStop,
     Privacy,
+    Connect { member_index: usize },
+    CancelConnect { member_index: usize },
+    Encryption { member_index: usize },
+    SetProjection,
+    CleanupDisconnect(ConnectionToken),
+    CleanupPrivacy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,8 +81,20 @@ pub enum ControlAction {
         member_index: usize,
         request: StoredEncryptionRequest,
     },
+    CancelFalConnection,
+    DisconnectAcl {
+        connection: ConnectionToken,
+    },
+    ClearControllerPrivacy,
     ArmTimer(ControlTimer),
     DisarmTimer(ControlTimer),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControlCleanupFailure {
+    Disconnect(DisconnectFailure),
+    Privacy(PrivacyFailure),
+    Timeout(ControlTimer),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +129,10 @@ pub enum ControlFailure {
     },
     ConnectionSetMismatch,
     Timeout(ControlTimer),
+    RollbackFailed {
+        primary: Box<ControlFailure>,
+        cleanup: Vec<ControlCleanupFailure>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +147,10 @@ pub struct ControlMachine {
     resolved_members: Vec<ResolvedMemberPresence>,
     connections: [Option<ConnectionToken>; 2],
     encryption_key_sizes: [Option<u8>; 2],
+    privacy_active: bool,
+    rollback_queue: Vec<ConnectionToken>,
+    rollback_current: Option<ConnectionToken>,
+    cleanup_failures: Vec<ControlCleanupFailure>,
     failure: Option<ControlFailure>,
 }
 
@@ -134,6 +163,10 @@ impl ControlMachine {
             resolved_members: Vec::new(),
             connections: [None, None],
             encryption_key_sizes: [None, None],
+            privacy_active: false,
+            rollback_queue: Vec::new(),
+            rollback_current: None,
+            cleanup_failures: Vec::new(),
             failure: None,
         })
     }
@@ -182,6 +215,73 @@ impl ControlMachine {
                     ControlAction::StopPassiveExtendedScan,
                     ControlAction::ArmTimer(ControlTimer::ScanStop),
                 ])
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::Connect { member_index },
+            ) if self.phase
+                == ControlPhase::ConnectingMember { member_index } =>
+            {
+                self.failure = Some(ControlFailure::Timeout(
+                    ControlTimer::Connect { member_index },
+                ));
+                self.phase =
+                    ControlPhase::CancellingConnection { member_index };
+                Ok(vec![
+                    ControlAction::CancelFalConnection,
+                    ControlAction::ArmTimer(
+                        ControlTimer::CancelConnect { member_index },
+                    ),
+                ])
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::Encryption { member_index },
+            ) if self.phase
+                == ControlPhase::SecuringMember { member_index } =>
+            {
+                self.begin_rollback(ControlFailure::Timeout(
+                    ControlTimer::Encryption { member_index },
+                ))
+            }
+            ControlEvent::TimerExpired(ControlTimer::SetProjection)
+                if self.phase == ControlPhase::AwaitingSetConnected =>
+            {
+                self.begin_rollback(
+                    ControlFailure::ConnectionSetMismatch,
+                )
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CancelConnect { member_index },
+            ) if self.phase
+                == ControlPhase::CancellingConnection { member_index } =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CancelConnect { member_index },
+                    ),
+                );
+                self.finish_rollback()
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CleanupDisconnect(connection),
+            ) if self.phase == ControlPhase::RollingBack
+                && self.rollback_current == Some(connection) =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupDisconnect(connection),
+                    ),
+                );
+                self.finish_rollback()
+            }
+            ControlEvent::TimerExpired(ControlTimer::CleanupPrivacy)
+                if self.phase == ControlPhase::RollingBack =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupPrivacy,
+                    ),
+                );
+                self.finish_rollback()
             }
             ControlEvent::TimerExpired(timer)
                 if self.timer_matches_phase(timer) =>
@@ -328,7 +428,14 @@ impl ControlMachine {
                 HciReport::ControllerPrivacyState(
                     ControllerPrivacyState::Ready,
                 ),
-            ) => self.begin_member_connection(0),
+            ) => {
+                self.privacy_active = true;
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(ControlTimer::Privacy),
+                ];
+                actions.extend(self.begin_member_connection(0)?);
+                Ok(actions)
+            },
             (
                 ControlPhase::ConfiguringPrivacy,
                 HciReport::ControllerPrivacyState(
@@ -351,20 +458,30 @@ impl ControlMachine {
                     .plan
                     .encryption_request(member_index, token)
                     .map_err(ControlFailure::Plan)?;
-                Ok(vec![ControlAction::BeginStoredEncryption {
-                    member_index,
-                    request,
-                }])
+                Ok(vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Connect { member_index },
+                    ),
+                    ControlAction::BeginStoredEncryption {
+                        member_index,
+                        request,
+                    },
+                    ControlAction::ArmTimer(
+                        ControlTimer::Encryption { member_index },
+                    ),
+                ])
             }
             (
                 ControlPhase::ConnectingMember { member_index },
                 HciReport::FalConnectionState(
                     FalConnectionState::Failed(failure),
                 ),
-            ) => self.fail(ControlFailure::Connection {
-                member_index,
-                failure: failure.clone(),
-            }),
+            ) => self.begin_rollback(
+                ControlFailure::Connection {
+                    member_index,
+                    failure: failure.clone(),
+                },
+            ),
 
             (
                 ControlPhase::SecuringMember { member_index },
@@ -389,34 +506,154 @@ impl ControlMachine {
                 self.encryption_key_sizes[member_index] =
                     Some(*encryption_key_size);
 
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::Encryption { member_index },
+                    ),
+                ];
                 if member_index + 1 < self.plan.members.len() {
-                    self.begin_member_connection(member_index + 1)
+                    actions.extend(
+                        self.begin_member_connection(member_index + 1)?,
+                    );
                 } else {
                     self.phase = ControlPhase::AwaitingSetConnected;
-                    Ok(Vec::new())
+                    actions.push(ControlAction::ArmTimer(
+                        ControlTimer::SetProjection,
+                    ));
                 }
+                Ok(actions)
             }
             (
                 ControlPhase::SecuringMember { member_index },
                 HciReport::StoredEncryptionState(
                     StoredEncryptionState::Failed(failure),
                 ),
-            ) => self.fail(ControlFailure::Encryption {
-                member_index,
-                failure: *failure,
-            }),
+            ) => self.begin_rollback(
+                ControlFailure::Encryption {
+                    member_index,
+                    failure: *failure,
+                },
+            ),
 
             (
                 ControlPhase::AwaitingSetConnected,
                 HciReport::ConnectionSet(snapshot),
             ) => {
                 if !self.connection_set_matches(snapshot) {
-                    return self.fail(
-                        ControlFailure::ConnectionSetMismatch,
-                    );
+                    return Ok(Vec::new());
                 }
                 self.phase = ControlPhase::SetConnected;
-                Ok(Vec::new())
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::SetProjection,
+                )])
+            }
+
+            (
+                ControlPhase::CancellingConnection { member_index },
+                HciReport::FalConnectionState(
+                    FalConnectionState::Failed(_),
+                ),
+            ) => {
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::CancelConnect { member_index },
+                    ),
+                ];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::CancellingConnection { member_index },
+                HciReport::FalConnectionState(
+                    FalConnectionState::ConnectedAfterCancel(connection)
+                    | FalConnectionState::Connected(connection),
+                ),
+            ) => {
+                self.connections[member_index] =
+                    Some(connection.token());
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::CancelConnect { member_index },
+                    ),
+                ];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+
+            (
+                ControlPhase::RollingBack,
+                HciReport::DisconnectState(
+                    DisconnectState::Disconnected {
+                        connection,
+                        ..
+                    },
+                ),
+            ) if self.rollback_current == Some(*connection) => {
+                self.remove_known_connection(*connection);
+                self.rollback_current = None;
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::CleanupDisconnect(*connection),
+                    ),
+                ];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::DisconnectState(
+                    DisconnectState::Failed(failure),
+                ),
+            ) if self.rollback_current == Some(failure.connection) => {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Disconnect(
+                        failure.clone(),
+                    ),
+                );
+                self.rollback_current = None;
+                self.rollback_queue.clear();
+                let mut actions = vec![
+                    ControlAction::DisarmTimer(
+                        ControlTimer::CleanupDisconnect(
+                            failure.connection,
+                        ),
+                    ),
+                ];
+                if self.privacy_active {
+                    actions.push(ControlAction::ClearControllerPrivacy);
+                    actions.push(ControlAction::ArmTimer(
+                        ControlTimer::CleanupPrivacy,
+                    ));
+                } else {
+                    return self.finish_rollback();
+                }
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::ControllerPrivacyState(
+                    ControllerPrivacyState::Idle,
+                ),
+            ) if self.rollback_current.is_none()
+                && self.rollback_queue.is_empty()
+                && self.privacy_active =>
+            {
+                self.privacy_active = false;
+                self.finish_rollback()
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::ControllerPrivacyState(
+                    ControllerPrivacyState::Failed(failure),
+                ),
+            ) if self.rollback_current.is_none()
+                && self.rollback_queue.is_empty() =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Privacy(failure.clone()),
+                );
+                self.privacy_active = false;
+                self.finish_rollback()
             }
 
             _ => Ok(Vec::new()),
@@ -434,11 +671,99 @@ impl ControlMachine {
         self.phase = ControlPhase::ConnectingMember {
             member_index,
         };
-        Ok(vec![ControlAction::BeginFalConnection {
-            member_index,
-            request,
-        }])
+        Ok(vec![
+            ControlAction::BeginFalConnection {
+                member_index,
+                request,
+            },
+            ControlAction::ArmTimer(
+                ControlTimer::Connect { member_index },
+            ),
+        ])
     }
+
+    fn begin_rollback(
+        &mut self,
+        failure: ControlFailure,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        self.failure = Some(failure);
+        self.rollback_queue = self
+            .connections
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        self.rollback_current = None;
+        self.cleanup_failures.clear();
+        self.phase = ControlPhase::RollingBack;
+        self.continue_rollback()
+    }
+
+    fn continue_rollback(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        self.phase = ControlPhase::RollingBack;
+
+        if self.rollback_current.is_none() {
+            if let Some(connection) = self.rollback_queue.pop() {
+                self.rollback_current = Some(connection);
+                return Ok(vec![
+                    ControlAction::DisconnectAcl { connection },
+                    ControlAction::ArmTimer(
+                        ControlTimer::CleanupDisconnect(connection),
+                    ),
+                ]);
+            }
+        }
+
+        if self.rollback_current.is_some() {
+            return Ok(Vec::new());
+        }
+
+        if self.privacy_active {
+            return Ok(vec![
+                ControlAction::ClearControllerPrivacy,
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupPrivacy,
+                ),
+            ]);
+        }
+
+        self.finish_rollback()
+    }
+
+    fn finish_rollback(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        self.phase = ControlPhase::Faulted;
+        let primary = self.failure.take().unwrap_or(
+            ControlFailure::ConnectionSetMismatch,
+        );
+        let final_failure = if self.cleanup_failures.is_empty() {
+            primary
+        } else {
+            ControlFailure::RollbackFailed {
+                primary: Box::new(primary),
+                cleanup: std::mem::take(
+                    &mut self.cleanup_failures,
+                ),
+            }
+        };
+        self.failure = Some(final_failure.clone());
+        Err(final_failure)
+    }
+
+    fn remove_known_connection(
+        &mut self,
+        connection: ConnectionToken,
+    ) {
+        for slot in &mut self.connections {
+            if *slot == Some(connection) {
+                *slot = None;
+            }
+        }
+    }
+
 
     fn connection_set_matches(
         &self,
@@ -800,10 +1125,16 @@ mod tests {
             .unwrap();
         assert!(matches!(
             actions.as_slice(),
-            [ControlAction::BeginFalConnection {
-                member_index: 0,
-                ..
-            }]
+            [
+                ControlAction::DisarmTimer(ControlTimer::Privacy),
+                ControlAction::BeginFalConnection {
+                    member_index: 0,
+                    ..
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::Connect { member_index: 0 }
+                )
+            ]
         ));
 
         let first = connection(0x0800, 1, 0);
@@ -815,10 +1146,18 @@ mod tests {
             .unwrap();
         assert!(matches!(
             actions.as_slice(),
-            [ControlAction::BeginStoredEncryption {
-                member_index: 0,
-                request,
-            }] if request.connection == first_token
+            [
+                ControlAction::DisarmTimer(
+                    ControlTimer::Connect { member_index: 0 }
+                ),
+                ControlAction::BeginStoredEncryption {
+                    member_index: 0,
+                    request,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::Encryption { member_index: 0 }
+                )
+            ] if request.connection == first_token
         ));
 
         let actions = machine
@@ -831,10 +1170,18 @@ mod tests {
             .unwrap();
         assert!(matches!(
             actions.as_slice(),
-            [ControlAction::BeginFalConnection {
-                member_index: 1,
-                ..
-            }]
+            [
+                ControlAction::DisarmTimer(
+                    ControlTimer::Encryption { member_index: 0 }
+                ),
+                ControlAction::BeginFalConnection {
+                    member_index: 1,
+                    ..
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::Connect { member_index: 1 }
+                )
+            ]
         ));
 
         let second = connection(0x0801, 2, 0);
@@ -846,21 +1193,38 @@ mod tests {
             .unwrap();
         assert!(matches!(
             actions.as_slice(),
-            [ControlAction::BeginStoredEncryption {
-                member_index: 1,
-                request,
-            }] if request.connection == second_token
+            [
+                ControlAction::DisarmTimer(
+                    ControlTimer::Connect { member_index: 1 }
+                ),
+                ControlAction::BeginStoredEncryption {
+                    member_index: 1,
+                    request,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::Encryption { member_index: 1 }
+                )
+            ] if request.connection == second_token
         ));
 
-        assert!(machine
-            .on_hci_report(&HciReport::StoredEncryptionState(
-                StoredEncryptionState::Encrypted {
-                    connection: second_token,
-                    encryption_key_size: 0,
-                },
-            ))
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            machine
+                .on_hci_report(&HciReport::StoredEncryptionState(
+                    StoredEncryptionState::Encrypted {
+                        connection: second_token,
+                        encryption_key_size: 0,
+                    },
+                ))
+                .unwrap(),
+            vec![
+                ControlAction::DisarmTimer(
+                    ControlTimer::Encryption { member_index: 1 },
+                ),
+                ControlAction::ArmTimer(
+                    ControlTimer::SetProjection,
+                ),
+            ]
+        );
         assert_eq!(
             machine.phase(),
             ControlPhase::AwaitingSetConnected
@@ -872,14 +1236,159 @@ mod tests {
                 connection(0x0801, 2, 1),
             ],
         };
-        assert!(machine
-            .on_hci_report(&HciReport::ConnectionSet(snapshot))
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            machine
+                .on_hci_report(&HciReport::ConnectionSet(snapshot))
+                .unwrap(),
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::SetProjection,
+            )]
+        );
         assert_eq!(machine.phase(), ControlPhase::SetConnected);
         assert_eq!(
             machine.connections(),
             [Some(first_token), Some(second_token)]
+        );
+    }
+
+    #[test]
+    fn second_member_encryption_failure_disconnects_known_acls_reverse_then_clears_privacy() {
+        let value = plan();
+        let mut machine = ControlMachine::new(value.clone()).unwrap();
+        drive_to_configuring_privacy(&mut machine, &value);
+        machine
+            .on_hci_report(&HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            ))
+            .unwrap();
+
+        let first = connection(0x0800, 1, 0);
+        let first_token = first.token();
+        machine
+            .on_hci_report(&HciReport::FalConnectionState(
+                FalConnectionState::Connected(first),
+            ))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::StoredEncryptionState(
+                StoredEncryptionState::Encrypted {
+                    connection: first_token,
+                    encryption_key_size: 0,
+                },
+            ))
+            .unwrap();
+
+        let second = connection(0x0801, 2, 0);
+        let second_token = second.token();
+        machine
+            .on_hci_report(&HciReport::FalConnectionState(
+                FalConnectionState::Connected(second),
+            ))
+            .unwrap();
+
+        let failure = StoredEncryptionFailure {
+            connection: second_token,
+            kind: crate::hci_host::security::
+                StoredEncryptionFailureKind::EncryptionNotEnabled,
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::StoredEncryptionState(
+                StoredEncryptionState::Failed(failure),
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisconnectAcl {
+                    connection: second_token,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupDisconnect(second_token),
+                ),
+            ]
+        );
+
+        let actions = machine
+            .on_hci_report(&HciReport::DisconnectState(
+                DisconnectState::Disconnected {
+                    connection: second_token,
+                    event_reason: 0x16,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(
+                ControlTimer::CleanupDisconnect(second_token),
+            )
+        );
+        assert!(matches!(
+            actions[1],
+            ControlAction::DisconnectAcl {
+                connection
+            } if connection == first_token
+        ));
+
+        let actions = machine
+            .on_hci_report(&HciReport::DisconnectState(
+                DisconnectState::Disconnected {
+                    connection: first_token,
+                    event_reason: 0x16,
+                },
+            ))
+            .unwrap();
+        assert!(actions.contains(
+            &ControlAction::ClearControllerPrivacy
+        ));
+
+        let final_error = machine
+            .on_hci_report(&HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Idle,
+            ))
+            .unwrap_err();
+        assert_eq!(
+            final_error,
+            ControlFailure::Encryption {
+                member_index: 1,
+                failure,
+            }
+        );
+        assert_eq!(machine.phase(), ControlPhase::Faulted);
+        assert_eq!(machine.connections(), [None, None]);
+    }
+
+    #[test]
+    fn connect_timeout_cancels_before_acl_cleanup() {
+        let value = plan();
+        let mut machine = ControlMachine::new(value.clone()).unwrap();
+        drive_to_configuring_privacy(&mut machine, &value);
+        machine
+            .on_hci_report(&HciReport::ControllerPrivacyState(
+                ControllerPrivacyState::Ready,
+            ))
+            .unwrap();
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::Connect { member_index: 0 },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::CancelFalConnection,
+                ControlAction::ArmTimer(
+                    ControlTimer::CancelConnect {
+                        member_index: 0,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::CancellingConnection {
+                member_index: 0,
+            }
         );
     }
 
