@@ -1412,6 +1412,12 @@ pub enum IsoSmokeExecuteError {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsoProbeDataPlane {
+    OpaqueReview2,
+    ProductLc3,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IsoProbeResult {
     frames: usize,
@@ -1865,7 +1871,30 @@ fn run_iso_probe(
     session: &mut crate::review2_bond_smoke::DualEncryptedBondSession,
     frame_count: usize,
 ) -> Result<IsoProbeResult, String> {
-    let frames = prepare_transport_frames(frame_count)?;
+    run_iso_probe_with_data_plane(
+        session,
+        frame_count,
+        IsoProbeDataPlane::OpaqueReview2,
+    )
+}
+
+#[cfg(windows)]
+fn run_iso_probe_with_data_plane(
+    session: &mut crate::review2_bond_smoke::DualEncryptedBondSession,
+    frame_count: usize,
+    data_plane: IsoProbeDataPlane,
+) -> Result<IsoProbeResult, String> {
+    if !(1..=MAX_FRAMES).contains(&frame_count) {
+        return Err(format!(
+            "frame count must be between 1 and {MAX_FRAMES}"
+        ));
+    }
+    let opaque_frames = match data_plane {
+        IsoProbeDataPlane::OpaqueReview2 => {
+            Some(prepare_transport_frames(frame_count)?)
+        }
+        IsoProbeDataPlane::ProductLc3 => None,
+    };
     let stack = &session.stack;
     let tracker = &mut session.tracker;
     let mut next = 1u64;
@@ -1876,6 +1905,7 @@ fn run_iso_probe(
     let mut established_handles = Vec::<u16>::new();
     let mut paths_may_exist = Vec::<u16>::new();
     let mut drained = false;
+    let mut route_bound = false;
 
     let stage = (|| -> Result<IsoProbeResult, String> {
         for member in session.members.clone() {
@@ -1949,6 +1979,11 @@ fn run_iso_probe(
         wait_streaming(stack, tracker, &left, &mut next)?;
         wait_streaming(stack, tracker, &right, &mut next)?;
 
+        if data_plane == IsoProbeDataPlane::ProductLc3 {
+            bind_product_stream_route(stack, tracker)?;
+            route_bound = true;
+        }
+
         let audit_before = read_iso_audit(stack, tracker)?;
         let limit = audit_before
             .limit
@@ -1957,7 +1992,20 @@ fn run_iso_probe(
             return Err("controller ISO packet pool has zero capacity".into());
         }
 
-        submit_transport_frames(stack, &frames, handles)?;
+        match data_plane {
+            IsoProbeDataPlane::OpaqueReview2 => {
+                submit_transport_frames(
+                    stack,
+                    opaque_frames
+                        .as_ref()
+                        .expect("opaque mode must prepare frames"),
+                    handles,
+                )?;
+            }
+            IsoProbeDataPlane::ProductLc3 => {
+                submit_product_lc3_frames(stack, frame_count)?;
+            }
+        }
         let expected_packets = (frame_count as u64) * 2;
         let _submitted = wait_submitted_packets(
             stack,
@@ -1965,6 +2013,11 @@ fn run_iso_probe(
             &audit_before,
             expected_packets,
         )?;
+
+        if route_bound {
+            unbind_product_stream_route(stack, tracker)?;
+            route_bound = false;
+        }
 
         begin_and_wait_iso_drain(stack, tracker, handles)?;
         drained = true;
@@ -2004,6 +2057,18 @@ fn run_iso_probe(
 
     if stage.is_err() {
         let mut cleanup_errors = Vec::new();
+
+        if route_bound {
+            if let Err(error) =
+                unbind_product_stream_route(stack, tracker)
+            {
+                cleanup_errors.push(format!(
+                    "logical stream route unbind UNCONFIRMED: {error}"
+                ));
+            } else {
+                route_bound = false;
+            }
+        }
 
         if established_handles.len() == 2
             && !paths_may_exist.is_empty()
@@ -2077,12 +2142,37 @@ fn run_iso_probe(
 pub fn execute_iso_smoke(
     config: IsoSmokeConfig,
 ) -> Result<IsoSmokeResult, IsoSmokeExecuteError> {
+    execute_iso_smoke_with_data_plane(
+        config,
+        IsoProbeDataPlane::OpaqueReview2,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn execute_lc3_first_sound(
+    config: IsoSmokeConfig,
+) -> Result<IsoSmokeResult, IsoSmokeExecuteError> {
+    execute_iso_smoke_with_data_plane(
+        config,
+        IsoProbeDataPlane::ProductLc3,
+    )
+}
+
+#[cfg(windows)]
+fn execute_iso_smoke_with_data_plane(
+    config: IsoSmokeConfig,
+    data_plane: IsoProbeDataPlane,
+) -> Result<IsoSmokeResult, IsoSmokeExecuteError> {
     let frame_count = config.frames;
     let mut session =
         open_dual_encrypted_bond_session_for_iso(config.bond)
             .map_err(IsoSmokeExecuteError::Bond)?;
 
-    let probe = run_iso_probe(&mut session, frame_count);
+    let probe = run_iso_probe_with_data_plane(
+        &mut session,
+        frame_count,
+        data_plane,
+    );
     let finish = session.finish();
 
     match (probe, finish) {
