@@ -342,6 +342,11 @@ pub enum ControlFailure {
         session_id: SessionId,
         stream_id: StreamId,
     },
+    StreamRouteUnexpectedUnbound {
+        session_id: SessionId,
+        stream_id: StreamId,
+        was_bound: bool,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -1176,6 +1181,32 @@ impl ControlMachine {
                 Ok(actions)
             }
             ControlEvent::TimerExpired(
+                ControlTimer::StreamRouteBind {
+                    session_id,
+                    stream_id,
+                },
+            ) if self.phase
+                == ControlPhase::BindingStreamRoute {
+                    session_id,
+                    stream_id,
+                } =>
+            {
+                self.pending_stream_binding = None;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id,
+                        stream_id,
+                    },
+                )];
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamRouteTimeout {
+                        session_id,
+                        stream_id,
+                    },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
                 ControlTimer::CigConfig,
             ) if self.phase == ControlPhase::ConfiguringCig =>
             {
@@ -1891,6 +1922,87 @@ impl ControlMachine {
                     ControlFailure::IsoPathSetup {
                         cis: failure.cis,
                         failure: failure.clone(),
+                    },
+                )?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::BindingStreamRoute {
+                    session_id,
+                    stream_id,
+                },
+                HciReport::StreamRouteState(
+                    StreamRouteState::Bound {
+                        session_id: actual_session,
+                        stream_id: actual_stream,
+                    },
+                ),
+            ) if session_id == *actual_session
+                && stream_id == *actual_stream =>
+            {
+                let binding = self
+                    .pending_stream_binding
+                    .take()
+                    .expect("binding phase requires pending StreamBinding");
+                self.active_stream_binding = Some(binding);
+                self.phase = ControlPhase::StreamBoundReady;
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id,
+                        stream_id,
+                    },
+                )])
+            }
+            (
+                ControlPhase::BindingStreamRoute {
+                    session_id,
+                    stream_id,
+                },
+                HciReport::StreamRouteState(
+                    StreamRouteState::Failed(failure),
+                ),
+            ) if session_id == failure.session_id
+                && stream_id == failure.stream_id =>
+            {
+                self.pending_stream_binding = None;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id,
+                        stream_id,
+                    },
+                )];
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamRoute(failure.clone()),
+                )?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::BindingStreamRoute {
+                    session_id,
+                    stream_id,
+                },
+                HciReport::StreamRouteState(
+                    StreamRouteState::Unbound {
+                        session_id: actual_session,
+                        stream_id: actual_stream,
+                        was_bound,
+                    },
+                ),
+            ) if session_id == *actual_session
+                && stream_id == *actual_stream =>
+            {
+                self.pending_stream_binding = None;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id,
+                        stream_id,
+                    },
+                )];
+                actions.extend(self.begin_stream_rollback(
+                    ControlFailure::StreamRouteUnexpectedUnbound {
+                        session_id,
+                        stream_id,
+                        was_bound: *was_bound,
                     },
                 )?);
                 Ok(actions)
@@ -3319,6 +3431,8 @@ impl ControlMachine {
         failure: ControlFailure,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
+        self.pending_stream_binding = None;
+        self.active_stream_binding = None;
         self.rollback_queue = self
             .connections
             .iter()
@@ -5513,23 +5627,93 @@ mod tests {
     }
 
     #[test]
-    fn stream_binding_is_available_only_after_confirmed_streaming() {
+    fn stream_binding_requires_successful_hci_route_ack() {
         let machine = drive_to_iso_paths_ready();
         assert_eq!(
-            machine.stream_binding(SessionId(7), StreamId(11)),
+            machine.stream_binding(),
             Err(ControlFailure::InvalidStartState(
                 ControlPhase::IsoPathsReady,
+            ))
+        );
+
+        let machine = drive_to_streaming_ready();
+        assert_eq!(
+            machine.stream_binding(),
+            Err(ControlFailure::InvalidStartState(
+                ControlPhase::StreamingReady,
             ))
         );
     }
 
     #[test]
-    fn stream_binding_contains_only_logical_stream_contract() {
-        let machine = drive_to_streaming_ready();
-        let binding = machine
-            .stream_binding(SessionId(7), StreamId(11))
-            .unwrap();
+    fn route_ack_unlocks_transport_neutral_stream_binding() {
+        let mut machine = drive_to_streaming_ready();
 
+        let actions = machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::BindingStreamRoute {
+                session_id: SessionId(7),
+                stream_id: StreamId(11),
+            }
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                ControlAction::BindStreamRoute(
+                    StereoStreamRouteBinding {
+                        session_id: SessionId(7),
+                        stream_id: StreamId(11),
+                        left: CisRef {
+                            cig_id: 1,
+                            cis_id: 1,
+                        },
+                        right: CisRef {
+                            cig_id: 1,
+                            cis_id: 2,
+                        },
+                    }
+                ),
+                ControlAction::ArmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id: SessionId(7),
+                        stream_id: StreamId(11),
+                    }
+                )
+            ]
+        ));
+        assert!(matches!(
+            machine.stream_binding(),
+            Err(ControlFailure::InvalidStartState(
+                ControlPhase::BindingStreamRoute {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                }
+            ))
+        ));
+
+        let actions = machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Bound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::StreamRouteBind {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            )]
+        );
+        assert_eq!(machine.phase(), ControlPhase::StreamBoundReady);
+
+        let binding = machine.stream_binding().unwrap();
         assert_eq!(binding.session_id, SessionId(7));
         assert_eq!(binding.stream_id, StreamId(11));
         assert_eq!(
@@ -5545,6 +5729,43 @@ mod tests {
             binding.topology,
             StreamTopology::StereoSplit
         );
+    }
+
+    #[test]
+    fn route_bind_timeout_rolls_back_before_media_handoff() {
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::StreamRouteBind {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::StreamRouteTimeout {
+                session_id: SessionId(7),
+                stream_id: StreamId(11),
+            })
+        ));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveIsoPathByRef {
+                cis: CisRef {
+                    cig_id: 1,
+                    cis_id: 2,
+                },
+                directions: 0x01,
+            }
+        )));
+        assert!(machine.stream_binding().is_err());
     }
 
     #[test]
