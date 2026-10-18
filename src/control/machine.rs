@@ -1205,7 +1205,6 @@ impl ControlMachine {
                     stream_id,
                 } =>
             {
-                self.pending_stream_binding = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::StreamRouteBind {
                         session_id,
@@ -1272,6 +1271,35 @@ impl ControlMachine {
                 Ok(vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup { cis },
                 )])
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CleanupStreamRoute {
+                    session_id,
+                    stream_id,
+                },
+            ) if self.phase == ControlPhase::RollingBack
+                && self.rollback_stream_route
+                    == Some((session_id, stream_id))
+                && self.rollback_stream_route_unbind_pending =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupStreamRoute {
+                            session_id,
+                            stream_id,
+                        },
+                    ),
+                );
+                self.rollback_stream_route = None;
+                self.rollback_stream_route_unbind_pending = false;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupStreamRoute {
+                        session_id,
+                        stream_id,
+                    },
+                )];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
             }
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupIsoPath { cis },
@@ -1978,7 +2006,6 @@ impl ControlMachine {
             ) if session_id == failure.session_id
                 && stream_id == failure.stream_id =>
             {
-                self.pending_stream_binding = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::StreamRouteBind {
                         session_id,
@@ -2005,7 +2032,6 @@ impl ControlMachine {
             ) if session_id == *actual_session
                 && stream_id == *actual_stream =>
             {
-                self.pending_stream_binding = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::StreamRouteBind {
                         session_id,
@@ -2019,6 +2045,30 @@ impl ControlMachine {
                         was_bound: *was_bound,
                     },
                 )?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::StreamRouteState(
+                    StreamRouteState::Unbound {
+                        session_id,
+                        stream_id,
+                        ..
+                    },
+                ),
+            ) if self.rollback_stream_route
+                == Some((*session_id, *stream_id))
+                && self.rollback_stream_route_unbind_pending =>
+            {
+                self.rollback_stream_route = None;
+                self.rollback_stream_route_unbind_pending = false;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupStreamRoute {
+                        session_id: *session_id,
+                        stream_id: *stream_id,
+                    },
+                )];
+                actions.extend(self.continue_rollback()?);
                 Ok(actions)
             }
             (
