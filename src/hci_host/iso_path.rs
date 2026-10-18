@@ -1,3 +1,5 @@
+use super::iso::CisRef;
+
 use bumble_host::IsoDataPathParameters;
 use bumble_hci::{
     codes::{
@@ -92,6 +94,64 @@ pub enum IsoPathOperationState {
         directions: u8,
     },
     Failed(IsoPathFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticIsoPathFailureKind {
+    CommandCompleteStatus { status: u8 },
+    MalformedResponse,
+    ConnectionHandleMismatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticIsoPathFailure {
+    pub cis: CisRef,
+    pub may_have_configured: bool,
+    pub kind: SemanticIsoPathFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticIsoPathState {
+    SettingUp {
+        cis: CisRef,
+        direction: IsoDataPathDirection,
+    },
+    SetupComplete {
+        cis: CisRef,
+        direction: IsoDataPathDirection,
+    },
+    Removing {
+        cis: CisRef,
+        directions: u8,
+    },
+    RemoveComplete {
+        cis: CisRef,
+        directions: u8,
+    },
+    Failed(SemanticIsoPathFailure),
+}
+
+pub fn semantic_iso_path_failure(
+    cis: CisRef,
+    failure: &IsoPathFailure,
+) -> SemanticIsoPathFailure {
+    SemanticIsoPathFailure {
+        cis,
+        may_have_configured: failure.may_have_configured,
+        kind: match failure.kind {
+            IsoPathFailureKind::CommandCompleteStatus { status } => {
+                SemanticIsoPathFailureKind::CommandCompleteStatus {
+                    status,
+                }
+            }
+            IsoPathFailureKind::MalformedResponse => {
+                SemanticIsoPathFailureKind::MalformedResponse
+            }
+            IsoPathFailureKind::ConnectionHandleMismatch { .. } => {
+                SemanticIsoPathFailureKind::ConnectionHandleMismatch
+            }
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
