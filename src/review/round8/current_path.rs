@@ -67,7 +67,7 @@ use crate::{
 };
 
 const DEFAULT_CONNECT_SECONDS: u64 = 12;
-const DEFAULT_FRAMES: usize = 100;
+const DEFAULT_FRAMES: usize = 200;
 const MAX_FRAMES: usize = 500;
 const PRODUCT_GENERATION: Generation = Generation(7);
 const PRODUCT_SESSION_ID: SessionId = SessionId(7);

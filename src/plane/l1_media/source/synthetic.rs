@@ -10,18 +10,19 @@ pub const SAMPLE_RATE_HZ: u32 = 48_000;
 pub const FRAME_DURATION_US: u32 = 10_000;
 pub const SAMPLES_PER_FRAME: usize = 480;
 pub const FRAMES_PER_SECOND: u64 = 100;
+pub const DEFAULT_FRAME_COUNT: u64 = 200;
 
 pub const DEFAULT_LEFT_TONE_HZ: u32 = 400;
 pub const DEFAULT_RIGHT_TONE_HZ: u32 = 600;
 
-/// Approximately -50 dBFS peak for signed 16-bit PCM.
+/// Approximately -40 dBFS peak for signed 16-bit PCM.
 ///
 /// This is deliberately far below the sealed R5 First Sound fixture
 /// (peak=2048, about -24 dBFS). dBFS is not a calibrated acoustic SPL; real HIL
 /// should still begin with the earbuds out of the ears.
-pub const DEFAULT_PEAK_I16: i16 = 104;
+pub const DEFAULT_PEAK_I16: i16 = 328;
 
-/// 100 ms cosine fade at both ends of the one-second default fixture.
+/// 100 ms cosine fade at both ends of the two-second default fixture.
 pub const DEFAULT_FADE_SAMPLES: u64 = 4_800;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +37,7 @@ pub struct SyntheticToneConfig {
 impl Default for SyntheticToneConfig {
     fn default() -> Self {
         Self {
-            frame_count: FRAMES_PER_SECOND,
+            frame_count: DEFAULT_FRAME_COUNT,
             left_hz: DEFAULT_LEFT_TONE_HZ,
             right_hz: DEFAULT_RIGHT_TONE_HZ,
             peak_i16: DEFAULT_PEAK_I16,
@@ -167,10 +168,10 @@ mod tests {
     #[test]
     fn default_fixture_matches_review_first_sound_source_contract() {
         let config = SyntheticToneConfig::default();
-        assert_eq!(config.frame_count, 100);
+        assert_eq!(config.frame_count, 200);
         assert_eq!(config.left_hz, 400);
         assert_eq!(config.right_hz, 600);
-        assert_eq!(config.peak_i16, 104);
+        assert_eq!(config.peak_i16, 328);
         assert_eq!(config.fade_samples, 4_800);
         assert_eq!(SAMPLE_RATE_HZ, 48_000);
         assert_eq!(FRAME_DURATION_US, 10_000);
@@ -183,12 +184,12 @@ mod tests {
             SyntheticToneSource::new(SyntheticToneConfig::default())
                 .unwrap();
 
-        for expected in 0..FRAMES_PER_SECOND {
+        for expected in 0..DEFAULT_FRAME_COUNT {
             let frame = source.next_frame().unwrap();
             assert_eq!(frame.frame_id, FrameId(expected));
             assert_eq!(
                 source.remaining_frames(),
-                FRAMES_PER_SECOND - expected - 1
+                DEFAULT_FRAME_COUNT - expected - 1
             );
         }
 
