@@ -8,8 +8,9 @@ use crate::{
     architecture::{
         control::StreamBinding,
         media::EncodedStereoFrame,
-        types::FrameId,
+        types::{AudioSide, FrameId},
     },
+    hci_host::iso_tx::LogicalIsoSduGroupRequest,
     stream_clock::{LocalStreamClock, StreamClockError},
 };
 
@@ -61,6 +62,15 @@ pub enum SchedulerError {
     ZeroCapacity,
     FrameIdOverflow,
     Clock(StreamClockError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalGroupError {
+    PayloadLength {
+        side: AudioSide,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 pub struct IntervalGroupScheduler<P> {
@@ -176,6 +186,42 @@ impl<P> IntervalGroupScheduler<P> {
     }
 }
 
+impl IntervalGroupScheduler<Vec<u8>> {
+    /// Convert one scheduled logical interval into the product HCI data-plane
+    /// request. FrameId and target_time_us remain Bridge/clock-domain metadata;
+    /// HCI Host owns the independent HCI ISO sequence space.
+    pub fn into_logical_iso_request(
+        &self,
+        group: ScheduledIntervalGroup<Vec<u8>>,
+    ) -> Result<LogicalIsoSduGroupRequest, LogicalGroupError> {
+        let expected = usize::from(
+            self.binding.format.octets_per_sdu,
+        );
+
+        if group.left.len() != expected {
+            return Err(LogicalGroupError::PayloadLength {
+                side: AudioSide::Left,
+                expected,
+                actual: group.left.len(),
+            });
+        }
+        if group.right.len() != expected {
+            return Err(LogicalGroupError::PayloadLength {
+                side: AudioSide::Right,
+                expected,
+                actual: group.right.len(),
+            });
+        }
+
+        Ok(LogicalIsoSduGroupRequest {
+            session_id: self.binding.session_id,
+            stream_id: self.binding.stream_id,
+            left: group.left,
+            right: group.right,
+        })
+    }
+}
+
 impl<P: Clone> IntervalGroupScheduler<P> {
     pub fn on_wake(
         &mut self,
@@ -286,6 +332,51 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn scheduled_group_maps_to_handle_free_logical_hci_request() {
+        let scheduler = scheduler(2);
+        let group = ScheduledIntervalGroup {
+            frame_id: FrameId(42),
+            target_time_us: EPOCH_US + 420_000,
+            left: vec![0x11; 100],
+            right: vec![0x22; 100],
+            source: IntervalGroupSource::Encoded,
+            skipped_intervals: 0,
+            stale_frames_dropped: 0,
+        };
+
+        let request =
+            scheduler.into_logical_iso_request(group).unwrap();
+
+        assert_eq!(request.session_id, SessionId(7));
+        assert_eq!(request.stream_id, StreamId(11));
+        assert_eq!(request.left, vec![0x11; 100]);
+        assert_eq!(request.right, vec![0x22; 100]);
+    }
+
+    #[test]
+    fn logical_request_rejects_payload_outside_binding_format() {
+        let scheduler = scheduler(2);
+        let group = ScheduledIntervalGroup {
+            frame_id: FrameId(0),
+            target_time_us: EPOCH_US,
+            left: vec![0; 99],
+            right: vec![0; 100],
+            source: IntervalGroupSource::Encoded,
+            skipped_intervals: 0,
+            stale_frames_dropped: 0,
+        };
+
+        assert_eq!(
+            scheduler.into_logical_iso_request(group),
+            Err(LogicalGroupError::PayloadLength {
+                side: AudioSide::Left,
+                expected: 100,
+                actual: 99,
+            })
+        );
     }
 
     #[test]
