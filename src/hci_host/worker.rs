@@ -1099,13 +1099,12 @@ mod tests {
             },
         );
 
-        assert_eq!(
+        assert!(
             iso_data_group_should_drop(
                 &engine,
                 &request,
                 &BTreeSet::new(),
-            ),
-            Ok(true),
+            )
         );
     }
 
@@ -1129,21 +1128,19 @@ mod tests {
             },
         );
 
-        assert_eq!(
+        assert!(
             iso_data_group_should_drop(
                 &engine,
                 &request,
                 &BTreeSet::from([0x0901]),
-            ),
-            Ok(true),
+            )
         );
-        assert_eq!(
-            iso_data_group_should_drop(
+        assert!(
+            !iso_data_group_should_drop(
                 &engine,
                 &request,
                 &BTreeSet::from([0x0902]),
-            ),
-            Ok(false),
+            )
         );
     }
 
