@@ -333,3 +333,176 @@ The codec-opaque 100-byte transport pattern caused audible digital output from t
 
 Round7 begins at **Control semantic migration**. HCI Host below that boundary is treated as sealed substrate: raw CIS handles, HCI ISO sequence/PB/fragmentation, controller credits and USB endpoint ownership remain below Control/Media. Number Of Completed Packets continues to release transport capacity only and must never define media time.
 
+
+
+---
+
+## 9. Round 7 / Control semantic migration + product data plane — 2026-10-18 (ACTIVE)
+
+Round7 从 Round6 已通过真机验证的 HCI substrate 向上生长。当前 chat 已完成产品 Control semantic path、transport-neutral StreamBinding、LocalStreamClock、valid LC3 producer、IsoTxBridge、logical HCI ISO route/lane，并准备好独立 `round7 first-sound` 真机入口；**valid-LC3 First Sound HIL 尚未执行**。
+
+### Round7 current engineering sequence
+
+```text
+Round6 Review-2D substrate                  ✅ COMPLETE + REAL HIL
+        ↓
+Control semantic connection/security        ✅ SOFTWARE COMPLETE
+        ↓
+PACS/ASCS/CAS/CSIS discovery               ✅ SOFTWARE COMPLETE
+        ↓
+Codec / CIG / QoS / Enable                  ✅ SOFTWARE COMPLETE
+        ↓
+Create CIS / ISO Path / STREAMING gate      ✅ SOFTWARE COMPLETE
+        ↓
+HCI logical route ACK                       ✅ SOFTWARE COMPLETE
+        ↓
+transport-neutral StreamBinding             ✅ SOFTWARE COMPLETE
+        ↓
+Synthetic PCM 400/600 Hz                    ✅ SOFTWARE COMPLETE
+        ↓
+valid LC3 48k / 10ms / 100B                 ✅ SOFTWARE COMPLETE
+        ↓
+LocalStreamClock absolute grid              ✅ SOFTWARE COMPLETE
+        ↓
+IntervalGroupScheduler / IsoTxBridge        ✅ SOFTWARE COMPLETE
+        ↓
+logical HCI ISO bounded lane                ✅ SOFTWARE COMPLETE
+        ↓
+Round7 valid-LC3 First Sound HIL            🟡 READY / NOT YET RUN
+        ↓
+full Core/Lifecycle runtime                 ⏳ NEXT AFTER HIL
+        ↓
+egui / WASAPI / ASRC                        ⏳ FUTURE
+```
+
+### Round7 semantic-Control boundary
+
+| Area | Current status | Key rule |
+|---|---|---|
+| dual stored-bond connection path | **Software complete** | bit32 → scan/RPA → privacy → dual ACL → stored LTK |
+| audio-service discovery | **Software complete** | PACS/ASCS/CAS/CSIS; multi-Sink-ASE aware |
+| ASCS operation FSM | **Software complete** | Write Response + CP success + ASE notification + independent readback |
+| Codec/QoS/Enable planners | **Software complete** | fixed first product policy derived from discovered capabilities |
+| CIS / ISO Path | **Software complete** | Control uses `CisRef`; raw controller handles remain in HCI Host |
+| Streaming gate | **Software complete** | nonblocking ENABLING→STREAMING readback gate with semantic deadline |
+| reverse teardown | **Software complete** | route → path → CIS → ASE Release → CIG → ACL → privacy |
+| StreamBinding | **Software complete** | route ACK required before Control exposes Media-facing binding |
+
+### Round7 logical-route / data-plane boundary
+
+```text
+StreamBinding
+(SessionId, StreamId, format, delay, topology)
+        │
+        ▼
+LogicalIsoTxBridge
+        │
+        ▼
+LogicalIsoSduGroupRequest
+(session_id, stream_id, left, right)
+        │
+        ▼
+HCI Host logical route
+(SessionId, StreamId, AudioSide)
+        │
+        ▼
+CisRef
+        │
+        ▼
+raw CIS handle
+(HCI Host internal only)
+```
+
+Logical route admission requires both CIS links live and both HCI Input Data Paths ready. Route is session-fenced, exact replay is idempotent, conflicting rebind is rejected, and route entries are invalidated by path/CIS teardown.
+
+### Round7 media-time rule
+
+Initial `LocalStreamClock` uses one authoritative absolute 10 ms grid:
+
+```text
+target(FrameId N) = epoch + N × 10,000 us
+```
+
+Controller completions never advance `FrameId`. Callback jitter does not move the grid. A late callback skips expired logical intervals rather than stretching the period.
+
+`LogicalIsoTxBridge` backpressure contract:
+
+```text
+logical HCI lane Full
+→ drop current complete stereo interval
+→ no wait
+→ no retry
+→ no media-clock change
+→ continue at next FrameId/deadline
+```
+
+For the dedicated First Sound HIL, any such drop is an acceptance failure.
+
+### Round7 First Sound HIL entry
+
+```powershell
+$fw = 'C:\STanJK\Development\LEAudioLab\BE200\firmware'
+$bond = Join-Path $env:LOCALAPPDATA 'BE200AudioHub\bonding'
+
+.\target\debug\be200hub.exe `
+    round7 first-sound `
+    --sfi (Join-Path $fw 'be200_intel_windows_24.60.0.4_usb_verified.sfi') `
+    --ddc (Join-Path $fw 'ibt-0291-0291.ddc') `
+    --bond-root $bond `
+    --name "Galaxy Buds3 Pro (2F23)" `
+    --connect-seconds 12 `
+    --frames 100 `
+    --confirm-first-sound-hil
+```
+
+Fixture:
+
+```text
+Left  400 Hz
+Right 600 Hz
+48 kHz
+10 ms
+100 B LC3 / ear
+~ -50 dBFS digital peak
+100 ms fade-in/out
+~1 s default duration
+```
+
+Safety: first run with earbuds out of ears; dBFS is not calibrated acoustic SPL.
+
+### Round7 current deterministic gate
+
+```text
+cargo test --workspace --locked
+350 passed; 0 failed; 0 ignored
+
+cargo check
+PASS
+
+cargo build
+PASS
+
+git status
+## main...origin/main
+```
+
+### Round7 claim boundary at chat migration
+
+Allowed:
+
+> Control semantic path + product valid-LC3 Media/Clock/Bridge/logical-HCI data plane are software-complete; dedicated real-hardware First Sound HIL is ready.
+
+Not yet allowed:
+
+> Round7 valid-LC3 First Sound HIL PASS.
+
+The new HIL still reuses sealed Review-2D setup/teardown as an oracle; full Core/Lifecycle product runtime integration is the next software step after HIL.
+
+### Round7 active references
+
+- [Round7.md](./Round7.md)
+- [Round6.md](./Round6.md)
+- [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md)
+- [../reference-index/README.md](../reference-index/README.md)
+
+This chat migration is **not** the Round7 engineering boundary. The next chat continues Round7 from the valid-LC3 First Sound HIL.
