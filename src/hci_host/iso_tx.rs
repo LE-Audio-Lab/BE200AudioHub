@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::architecture::types::{AudioSide, SessionId, StreamId};
+
 pub const MAX_HCI_CONNECTION_HANDLE: u16 = 0x0EFF;
 pub const MAX_ISO_SDU_LENGTH: usize = 0x0FFF;
 /// Review's first product stream is one stereo interval group: at most one SDU
@@ -9,6 +11,43 @@ pub const MAX_ISO_SDU_GROUP_MEMBERS: usize = 2;
 /// HCI ISO first fragments carry PSN + SDU length/status metadata inside the
 /// controller-advertised ISO data packet length.
 pub const ISO_SDU_INFO_LENGTH: usize = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogicalIsoSduGroupRequest {
+    pub session_id: SessionId,
+    pub stream_id: StreamId,
+    pub left: Vec<u8>,
+    pub right: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalIsoSduGroupConfigError {
+    SduTooLarge {
+        side: AudioSide,
+        length: usize,
+    },
+}
+
+impl LogicalIsoSduGroupRequest {
+    pub fn validate(
+        &self,
+    ) -> Result<(), LogicalIsoSduGroupConfigError> {
+        for (side, payload) in [
+            (AudioSide::Left, self.left.as_slice()),
+            (AudioSide::Right, self.right.as_slice()),
+        ] {
+            if payload.len() > MAX_ISO_SDU_LENGTH {
+                return Err(
+                    LogicalIsoSduGroupConfigError::SduTooLarge {
+                        side,
+                        length: payload.len(),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsoSduRequest {
@@ -206,6 +245,48 @@ mod tests {
             connection_handle: handle,
             payload: vec![0; length],
         }
+    }
+
+    #[test]
+    fn logical_stereo_group_is_transport_handle_free_and_bounded() {
+        let request = LogicalIsoSduGroupRequest {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            left: vec![0x11; 100],
+            right: vec![0x22; 100],
+        };
+        request.validate().unwrap();
+        assert_eq!(request.session_id, SessionId(7));
+        assert_eq!(request.stream_id, StreamId(11));
+        assert_eq!(request.left.len(), 100);
+        assert_eq!(request.right.len(), 100);
+    }
+
+    #[test]
+    fn logical_stereo_group_rejects_oversize_per_side() {
+        let mut request = LogicalIsoSduGroupRequest {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            left: vec![0; MAX_ISO_SDU_LENGTH + 1],
+            right: vec![0; 100],
+        };
+        assert_eq!(
+            request.validate(),
+            Err(LogicalIsoSduGroupConfigError::SduTooLarge {
+                side: AudioSide::Left,
+                length: MAX_ISO_SDU_LENGTH + 1,
+            })
+        );
+
+        request.left = vec![0; 100];
+        request.right = vec![0; MAX_ISO_SDU_LENGTH + 1];
+        assert_eq!(
+            request.validate(),
+            Err(LogicalIsoSduGroupConfigError::SduTooLarge {
+                side: AudioSide::Right,
+                length: MAX_ISO_SDU_LENGTH + 1,
+            })
+        );
     }
 
     #[test]
