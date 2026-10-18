@@ -86,6 +86,8 @@ use crate::plane::l1_control::{
         ase_control::AseControlOperation,
         audio_discovery::AudioDiscoveryOperation,
         rollback::RollbackOperation,
+        stream_route::StreamRouteOperation,
+        streaming::StreamingOperation,
     },
     planning::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
@@ -386,8 +388,8 @@ pub struct ControlMachine {
     next_gatt_request_id: GattRequestId,
     discovery_operation: AudioDiscoveryOperation,
     ase_control_operation: AseControlOperation,
-    streaming_gate: Option<StreamingGateMachine>,
-    pending_stream_binding: Option<StreamBinding>,
+    streaming_operation: StreamingOperation,
+    stream_route_operation: StreamRouteOperation,
     failure: Option<ControlFailure>,
 }
 
@@ -404,8 +406,8 @@ impl ControlMachine {
             next_gatt_request_id: 1,
             discovery_operation: AudioDiscoveryOperation::new(),
             ase_control_operation: AseControlOperation::new(),
-            streaming_gate: None,
-            pending_stream_binding: None,
+            streaming_operation: StreamingOperation::new(),
+            stream_route_operation: StreamRouteOperation::new(),
             failure: None,
         })
     }
@@ -460,7 +462,7 @@ impl ControlMachine {
             ControlPhase::Faulted => ControlState::Faulted,
         };
 
-        let binding = self.confirmed.active_stream_binding.or(self.pending_stream_binding);
+        let binding = self.confirmed.active_stream_binding.or(self.stream_route_operation.pending_binding);
         ControlConditionUpdate {
             state,
             stream_id: binding.map(|binding| binding.stream_id),
@@ -583,7 +585,7 @@ impl ControlMachine {
                 qos.left.parameters.presentation_delay,
             topology: StreamTopology::StereoSplit,
         };
-        self.pending_stream_binding = Some(binding);
+        self.stream_route_operation.pending_binding = Some(binding);
         self.confirmed.active_stream_binding = None;
         self.phase = ControlPhase::BindingStreamRoute {
             session_id,
@@ -614,9 +616,9 @@ impl ControlMachine {
         if self.phase != ControlPhase::IsoPathsReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.streaming_gate = None;
+        self.streaming_operation.gate = None;
         self.confirmed.streaming_statuses = [None, None];
-        self.pending_stream_binding = None;
+        self.stream_route_operation.pending_binding = None;
         self.confirmed.active_stream_binding = None;
         self.rollback.stream_route = None;
         self.rollback.stream_route_unbind_pending = false;
@@ -631,7 +633,7 @@ impl ControlMachine {
         }
         self.confirmed.iso_paths_ready.clear();
         self.cleanup_knowledge.iso_paths_may_exist.clear();
-        self.streaming_gate = None;
+        self.streaming_operation.gate = None;
         self.confirmed.streaming_statuses = [None, None];
         self.start_iso_path_setup(AudioSide::Left)
     }
@@ -649,7 +651,7 @@ impl ControlMachine {
         self.confirmed.live_cis.clear();
         self.confirmed.iso_paths_ready.clear();
         self.cleanup_knowledge.iso_paths_may_exist.clear();
-        self.streaming_gate = None;
+        self.streaming_operation.gate = None;
         self.confirmed.streaming_statuses = [None, None];
         self.phase = ControlPhase::CreatingCis;
         Ok(vec![
@@ -984,8 +986,7 @@ impl ControlMachine {
                         .map(|sink| sink.member_index)
                         .ok() == Some(member_index)
             )
-                && self
-                    .streaming_gate
+                && self.streaming_operation.gate
                     .as_ref()
                     .and_then(|gate| gate.pending_request_id())
                     == Some(request_id) =>
@@ -995,7 +996,7 @@ impl ControlMachine {
                     _ => unreachable!(),
                 };
                 let connection = self.planned_sink(side)?.connection;
-                self.streaming_gate = None;
+                self.streaming_operation.gate = None;
                 let mut actions = vec![
                     ControlAction::CancelGatt {
                         connection,
@@ -1100,14 +1101,12 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::StreamingProbe { side },
             ) if self.phase == ControlPhase::AwaitingStreaming { side }
-                && self
-                    .streaming_gate
+                && self.streaming_operation.gate
                     .as_ref()
                     .map(|gate| gate.phase())
                     == Some(StreamingGatePhase::WaitingRetry) =>
             {
-                let mut gate = self
-                    .streaming_gate
+                let mut gate = self.streaming_operation.gate
                     .take()
                     .expect("streaming retry requires gate");
                 let action = match gate.retry() {
@@ -1131,7 +1130,7 @@ impl ControlMachine {
                     }
                 };
                 self.next_gatt_request_id = gate.next_request_id();
-                self.streaming_gate = Some(gate);
+                self.streaming_operation.gate = Some(gate);
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::StreamingProbe { side },
                 )];
@@ -1148,11 +1147,10 @@ impl ControlMachine {
                 ControlTimer::StreamingDeadline { side },
             ) if self.phase == ControlPhase::AwaitingStreaming { side } =>
             {
-                let pending = self
-                    .streaming_gate
+                let pending = self.streaming_operation.gate
                     .as_ref()
                     .and_then(|gate| gate.pending_request_id());
-                self.streaming_gate = None;
+                self.streaming_operation.gate = None;
                 let mut actions = vec![
                     ControlAction::DisarmTimer(
                         ControlTimer::StreamingProbe { side },
@@ -1960,8 +1958,7 @@ impl ControlMachine {
             ) if session_id == *actual_session
                 && stream_id == *actual_stream =>
             {
-                let binding = self
-                    .pending_stream_binding
+                let binding = self.stream_route_operation.pending_binding
                     .take()
                     .expect("binding phase requires pending StreamBinding");
                 self.confirmed.active_stream_binding = Some(binding);
@@ -2292,7 +2289,7 @@ impl ControlMachine {
             ControlFailure::StreamingGate { side, failure }
         })?;
         self.next_gatt_request_id = gate.next_request_id();
-        self.streaming_gate = Some(gate);
+        self.streaming_operation.gate = Some(gate);
         self.phase = ControlPhase::AwaitingStreaming { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
@@ -2309,8 +2306,7 @@ impl ControlMachine {
         side: AudioSide,
         report: &GattReport,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let mut gate = self
-            .streaming_gate
+        let mut gate = self.streaming_operation.gate
             .take()
             .expect("streaming phase missing gate");
         let pending_before = gate.pending_request_id();
@@ -2344,12 +2340,12 @@ impl ControlMachine {
 
         match outcome {
             Ok(StreamingGateAction::Ignored) => {
-                self.streaming_gate = Some(gate);
+                self.streaming_operation.gate = Some(gate);
                 Ok(Vec::new())
             }
             Ok(action @ StreamingGateAction::BeginGatt(_))
             | Ok(action @ StreamingGateAction::RetryLater) => {
-                self.streaming_gate = Some(gate);
+                self.streaming_operation.gate = Some(gate);
                 self.translate_streaming_action(
                     side,
                     completed_request,
@@ -2357,7 +2353,7 @@ impl ControlMachine {
                 )
             }
             Ok(action @ StreamingGateAction::Complete(_)) => {
-                self.streaming_gate = None;
+                self.streaming_operation.gate = None;
                 self.translate_streaming_action(
                     side,
                     completed_request,
@@ -2365,7 +2361,7 @@ impl ControlMachine {
                 )
             }
             Err(failure) => {
-                self.streaming_gate = None;
+                self.streaming_operation.gate = None;
                 let mut actions =
                     self.disarm_gatt_request(side, completed_request)?;
                 if let Some(request_id) = pending_before
@@ -3432,11 +3428,11 @@ impl ControlMachine {
 
     fn prepare_stream_route_rollback(&mut self) {
         let binding = self.confirmed.active_stream_binding
-            .or(self.pending_stream_binding);
+            .or(self.stream_route_operation.pending_binding);
         self.rollback.stream_route =
             binding.map(|value| (value.session_id, value.stream_id));
         self.rollback.stream_route_unbind_pending = false;
-        self.pending_stream_binding = None;
+        self.stream_route_operation.pending_binding = None;
         self.confirmed.active_stream_binding = None;
     }
 
