@@ -10,10 +10,6 @@ use crate::{
         types::{AudioSide, SessionId, StreamId},
     },
     hci_host::{
-    engine::{
-        ControllerIdentityFailure, OperationalAttachFailure,
-        OperationalAttachState, PassiveScanState,
-    },
     iso::{
         CigAllocation, CigConfig, CigConfigureFailure,
         CigConfigureState, CisCreateRequest, CisRef,
@@ -37,6 +33,10 @@ use crate::{
     },
     },
     plane::l1_hci::{
+        host::engine::{
+            ControllerIdentityFailure, OperationalAttachFailure,
+            OperationalAttachState, PassiveScanState,
+        },
         acl::{
             connection::{
                 ConnectionToken, DisconnectFailure, DisconnectState,
@@ -3840,12 +3840,14 @@ mod tests {
 
     use crate::{
         control::plan::ControlMemberPlan,
-        hci_host::engine::{
-            ControllerCapabilities, ControllerIdentity, PacketPoolSnapshot,
-        },
-        plane::l1_hci::acl::{
+        plane::l1_hci::{
+            host::engine::{
+                ControllerCapabilities, ControllerIdentity, PacketPoolSnapshot,
+            },
+            acl::{
             scan::{ScanObservation, ScanSummary},
             security::StoredLeKeyMaterial,
+            },
         },
     };
 

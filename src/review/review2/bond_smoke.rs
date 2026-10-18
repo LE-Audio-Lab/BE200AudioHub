@@ -9,17 +9,20 @@ use std::{
 
 use crate::{
     hci_host::{
-        engine::{
-            ControllerIdentity, ControllerIdentityFailure,
-            OperationalAttachState, PassiveScanState,
-        },
         iso_host_feature::CisHostFeatureState,
         mailbox::{HciReport, HciReportInbox},
-        stack::{
-            spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
-        },
     },
-    plane::l1_hci::acl::{
+    plane::l1_hci::{
+        host::{
+            engine::{
+                ControllerIdentity, ControllerIdentityFailure,
+                OperationalAttachState, PassiveScanState,
+            },
+            stack::{
+                spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
+            },
+        },
+        acl::{
         connection::{
             ConnectionToken, DisconnectState, FalConnectRequest,
             FalConnectionState, LeConnectionSetSnapshot,
@@ -33,6 +36,7 @@ use crate::{
         security::{
             StoredEncryptionRequest, StoredEncryptionState,
             StoredLeKeyMaterial,
+        },
         },
     },
     platform::{

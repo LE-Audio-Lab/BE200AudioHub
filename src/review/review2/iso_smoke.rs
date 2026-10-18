@@ -51,10 +51,11 @@ use crate::{
             IsoSduRequest,
         },
         mailbox::HciReport,
-        stack::HciStack,
+
         stream_route::{StereoStreamRouteBinding, StreamRouteState},
     },
     plane::l1_hci::{
+        host::stack::HciStack,
         acl::connection::ConnectionToken,
         gatt::transaction::{
             GattCharacteristic, GattOperation, GattReport, GattRequest,

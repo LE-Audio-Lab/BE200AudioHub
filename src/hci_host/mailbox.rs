@@ -25,11 +25,12 @@ use crate::{
     runtime::mailbox::{RecvError, SendError},
 };
 
+use crate::plane::l1_hci::host::engine::{
+    ControllerCapabilities, ControllerIdentity,
+    ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
+};
+
 use super::{
-    engine::{
-        ControllerCapabilities, ControllerIdentity,
-        ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
-    },
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
         CisRef, SemanticCisCreateState,

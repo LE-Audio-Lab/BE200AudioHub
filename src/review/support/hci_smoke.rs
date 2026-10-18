@@ -8,10 +8,12 @@ use crate::{
     runtime::mailbox::RecvError,
 };
 
-use crate::hci_host::{
-    engine::{OperationalAttachState, PassiveScanState},
-    mailbox::{HciReport, HciReportInbox},
-    stack::{spawn_be200_hci_stack, HciStackConfig, HciStackExit},
+use crate::{
+    hci_host::mailbox::{HciReport, HciReportInbox},
+    plane::l1_hci::host::{
+        engine::{OperationalAttachState, PassiveScanState},
+        stack::{spawn_be200_hci_stack, HciStackConfig, HciStackExit},
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,9 +190,9 @@ fn wait_until<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hci_host::{
-        engine::ControllerCapabilities,
-        mailbox::hci_mailbox,
+    use crate::{
+        hci_host::mailbox::hci_mailbox,
+        plane::l1_hci::host::engine::ControllerCapabilities,
     };
 
     fn empty_capabilities() -> ControllerCapabilities {
@@ -266,7 +268,7 @@ mod tests {
         ports
             .report_tx
             .try_send(HciReport::AttachState(OperationalAttachState::Failed(
-                super::super::engine::OperationalAttachFailure::HostInitializationFailed,
+                crate::plane::l1_hci::host::engine::OperationalAttachFailure::HostInitializationFailed,
             )))
             .unwrap();
 

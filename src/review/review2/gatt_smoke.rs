@@ -139,7 +139,7 @@ pub enum GattSmokeExecuteError {
         detail: String,
         cleanup: BondSmokeCleanupSummary,
         bond_unchanged: bool,
-        exit: crate::hci_host::stack::HciStackExit,
+        exit: crate::plane::l1_hci::host::stack::HciStackExit,
     },
     ProbeAndCleanup {
         detail: String,
@@ -152,7 +152,7 @@ fn send_error(stage: &str, error: SendError) -> String {
 }
 
 fn wait_gatt_result(
-    stack: &crate::hci_host::stack::HciStack,
+    stack: &crate::plane::l1_hci::host::stack::HciStack,
     tracker: &mut BondSmokeTracker,
     connection: ConnectionToken,
     request_id: u64,
@@ -223,7 +223,7 @@ fn wait_gatt_result(
 }
 
 pub(crate) fn execute_gatt(
-    stack: &crate::hci_host::stack::HciStack,
+    stack: &crate::plane::l1_hci::host::stack::HciStack,
     tracker: &mut BondSmokeTracker,
     connection: ConnectionToken,
     request_id: u64,
@@ -285,7 +285,7 @@ pub(crate) fn required_service(
 }
 
 fn inspect_member(
-    stack: &crate::hci_host::stack::HciStack,
+    stack: &crate::plane::l1_hci::host::stack::HciStack,
     tracker: &mut BondSmokeTracker,
     identity_address: &str,
     connection: ConnectionToken,
