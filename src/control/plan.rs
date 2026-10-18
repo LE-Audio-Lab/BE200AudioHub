@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(encryption.connection, token);
         assert_eq!(
             encryption.key.encrypted_diversifier,
-            u16::from(0x20)
+            0x20u16
         );
     }
 
