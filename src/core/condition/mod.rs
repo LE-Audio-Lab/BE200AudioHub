@@ -95,11 +95,22 @@ mod tests {
     use super::*;
     use crate::{
         core::lifecycle::{LifecycleState, SessionState, StreamId},
-        plane::l1_control::interface::{
-            condition::{ControlConditionUpdate, ControlState},
-            stream::LeAudioFormat,
+        plane::{
+            l1_control::interface::{
+                condition::{ControlConditionUpdate, ControlState},
+                stream::LeAudioFormat,
+            },
+            l1_hci::{
+                interface::condition::{
+                    HciConditionState, HciConditionUpdate, HciHostState,
+                },
+                telemetry::HciIsoTelemetrySnapshot,
+            },
         },
-        runtime::generation::Generation,
+        runtime::{
+            generation::Generation,
+            telemetry::TelemetryRingStats,
+        },
     };
 
     fn lifecycle(generation: u64, session: Option<u64>) -> LifecycleSnapshot {
@@ -144,6 +155,41 @@ mod tests {
         condition.apply_lifecycle(lifecycle(8, None));
         assert_eq!(condition.snapshot().control, ControlConditionUpdate::initial());
         assert_eq!(condition.snapshot().generation, Generation(8));
+    }
+
+    #[test]
+    fn coalesced_hci_telemetry_does_not_clobber_newer_semantic_state() {
+        let mut condition = Condition::new(lifecycle(7, Some(11)));
+        let scope = ConditionScope::session(Generation(7), SessionId(11));
+
+        let semantic = HciConditionState {
+            state: HciHostState::StreamBound,
+            stream_id: Some(StreamId(99)),
+            controller_iso_capacity: Some(8),
+            controller_iso_in_flight: 2,
+        };
+        condition.apply_hci(scope, HciConditionUpdate::State(semantic));
+
+        let telemetry = HciIsoTelemetrySnapshot {
+            controller_limit: Some(8),
+            submitted_packets: 20,
+            completed_packets: 18,
+            retired_packets: 0,
+            in_flight_packets: 2,
+            peak_in_flight_packets: 8,
+            trace: TelemetryRingStats {
+                capacity: 256,
+                len: 12,
+                stored: 12,
+                dropped_newest: 0,
+                overwritten_oldest: 0,
+            },
+        };
+        condition.apply_hci(scope, HciConditionUpdate::Telemetry(telemetry));
+
+        let snapshot = condition.snapshot();
+        assert_eq!(snapshot.hci.state, semantic);
+        assert_eq!(snapshot.hci.iso_telemetry, Some(telemetry));
     }
 
     #[test]
