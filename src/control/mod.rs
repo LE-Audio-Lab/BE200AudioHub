@@ -6,6 +6,7 @@
 
 pub(crate) mod audio_discovery;
 pub(crate) mod audio_snapshot;
+pub(crate) mod ascs_control;
 pub(crate) mod codec_plan;
 pub(crate) mod discovery;
 pub(crate) mod machine;
