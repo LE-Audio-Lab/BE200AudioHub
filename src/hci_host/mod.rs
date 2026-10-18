@@ -8,6 +8,5 @@ pub mod iso_tx;
 pub mod link;
 pub mod mailbox;
 pub mod stream_route;
-pub mod smoke;
 pub mod stack;
 pub mod worker;
