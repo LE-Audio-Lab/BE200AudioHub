@@ -13,11 +13,157 @@ mod review2_bond;
 mod review2_bond_smoke;
 mod review2_gatt_smoke;
 mod review2_iso_smoke;
+mod round7_first_sound;
 
 fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("round7")
+            && args.get(1).map(String::as_str) == Some("first-sound")
+        {
+            let config =
+                match round7_first_sound::parse_first_sound_args(
+                    &args[2..],
+                ) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!(
+                            "Round7 First Sound argument error: {error}"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+
+            println!(
+                "Round7 First Sound HIL: sealed Review-2D setup -> route-acknowledged logical stream -> valid LC3 -> absolute StreamClock grid -> IsoTxBridge -> logical HCI ISO lane -> drain -> reverse teardown"
+            );
+            println!("Target set: {}", config.bond.target_name);
+            println!(
+                "Frames: {} × 10 ms; LC3 48 kHz mono/ear, 100 B/ear",
+                config.frames
+            );
+            println!(
+                "Test signal: Left=400 Hz, Right=600 Hz, approx -50 dBFS digital peak, 100 ms fades."
+            );
+            println!(
+                "SAFETY: dBFS is not calibrated acoustic SPL. First run with both earbuds OUT of your ears."
+            );
+            println!(
+                "Scope: validates the new Media/Clock/Bridge/logical-HCI data plane; setup/teardown still reuse the sealed Review-2D HIL oracle, so this is not yet full Core/Lifecycle runtime acceptance."
+            );
+
+            match round7_first_sound::execute_first_sound(config) {
+                Ok(result) => {
+                    let submitted = result
+                        .audit_after
+                        .total_submitted
+                        .saturating_sub(
+                            result.audit_before.total_submitted
+                        );
+                    let completed = result
+                        .audit_after
+                        .total_completed
+                        .saturating_sub(
+                            result.audit_before.total_completed
+                        );
+
+                    println!(
+                        "Firmware bypass: {:?}",
+                        result.bond.firmware
+                    );
+                    println!(
+                        "Controller identity guard: PASS ({})",
+                        result.bond.controller_identity
+                    );
+                    println!(
+                        "Product data plane: valid LC3 -> StreamClock -> IsoTxBridge -> logical HCI route: PASS"
+                    );
+                    println!(
+                        "ISO Host audit: frames={} submitted={} completed={} in_flight_after={}",
+                        result.frames,
+                        submitted,
+                        completed,
+                        result.audit_after.in_flight
+                    );
+                    println!(
+                        "Controller ISO packet window: {:?}",
+                        result.audit_before.limit
+                    );
+                    println!(
+                        "Logical route unbind + ISO drain + reverse teardown: PASS"
+                    );
+                    for (connection, reason) in
+                        &result.bond.cleanup.disconnected
+                    {
+                        println!(
+                            "Cleanup ACL disconnect: handle=0x{:04X}@gen{} reason=0x{:02X}",
+                            connection.connection_handle,
+                            connection.generation,
+                            reason,
+                        );
+                    }
+                    println!(
+                        "Privacy cleanup: {}",
+                        result.bond.cleanup.privacy_cleared
+                    );
+                    println!(
+                        "Bond store unchanged: {}",
+                        result.bond.bond_unchanged
+                    );
+                    println!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        result.bond.exit.hci,
+                        result.bond.exit.transport
+                    );
+                    return;
+                }
+                Err(review2_iso_smoke::IsoSmokeExecuteError::Bond(
+                    error,
+                )) => {
+                    eprintln!(
+                        "Round7 First Sound session FAILED: {error:?}"
+                    );
+                    std::process::exit(1);
+                }
+                Err(review2_iso_smoke::IsoSmokeExecuteError::Probe {
+                    detail,
+                    bond,
+                }) => {
+                    eprintln!(
+                        "Round7 First Sound PROBE FAILED: {detail}"
+                    );
+                    for error in &bond.cleanup.errors {
+                        eprintln!("Cleanup issue: {error}");
+                    }
+                    eprintln!(
+                        "Privacy cleanup: {}; Bond store unchanged: {}",
+                        bond.cleanup.privacy_cleared,
+                        bond.bond_unchanged
+                    );
+                    eprintln!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        bond.exit.hci, bond.exit.transport
+                    );
+                    std::process::exit(1);
+                }
+                Err(
+                    review2_iso_smoke::IsoSmokeExecuteError::ProbeAndCleanup {
+                        detail,
+                        bond,
+                    },
+                ) => {
+                    eprintln!(
+                        "Round7 First Sound PROBE FAILED: {detail}"
+                    );
+                    eprintln!(
+                        "Round7 First Sound cleanup also FAILED: {bond:?}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+
         if args.first().map(String::as_str) == Some("review2")
             && args.get(1).map(String::as_str) == Some("iso-smoke")
         {
