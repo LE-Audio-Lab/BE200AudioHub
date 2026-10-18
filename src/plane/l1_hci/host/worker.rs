@@ -523,7 +523,7 @@ fn maybe_publish_iso_audit(
 }
 
 fn stream_route_bind_ack(
-    binding: super::stream_route::StereoStreamRouteBinding,
+    binding: crate::hci_host::stream_route::StereoStreamRouteBinding,
     result: Result<(), EngineFault>,
 ) -> Result<StreamRouteState, EngineFault> {
     match result {
