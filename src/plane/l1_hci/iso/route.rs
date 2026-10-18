@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::architecture::types::{
-    AudioSide, SessionId, StreamId,
+use crate::{
+    architecture::types::{SessionId, StreamId},
+    plane::l1_control::interface::stream::AudioSide,
 };
 
 use super::cig_cis::CisRef;

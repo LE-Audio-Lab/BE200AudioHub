@@ -1,7 +1,8 @@
 //! One nonblocking semantic Control transition exposed to Core composition.
 
 use crate::{
-    architecture::control::{ControlSnapshot, StreamBinding},
+    architecture::control::ControlSnapshot,
+    plane::l1_control::interface::stream::StreamBinding,
     plane::l1_control::engine::machine::ControlAction,
 };
 

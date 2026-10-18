@@ -4465,7 +4465,7 @@ mod tests {
         use bumble_profiles::bap::{
             AudioLocation, ContextType,
         };
-        use crate::architecture::control::LeAudioFormat;
+        use crate::plane::l1_control::interface::stream::LeAudioFormat;
 
         let mut machine = machine_at_set_connected();
         machine.phase = ControlPhase::CodecPlanned;
@@ -5869,7 +5869,7 @@ mod tests {
         assert_eq!(binding.stream_id, StreamId(11));
         assert_eq!(
             binding.format,
-            crate::architecture::control::LeAudioFormat {
+            crate::plane::l1_control::interface::stream::LeAudioFormat {
                 sample_rate_hz: 48_000,
                 frame_duration_us: 10_000,
                 octets_per_sdu: 100,

@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::architecture::types::{AudioSide, SessionId, StreamId};
+use crate::{
+    architecture::types::{SessionId, StreamId},
+    plane::l1_control::interface::stream::AudioSide,
+};
 
 pub const MAX_HCI_CONNECTION_HANDLE: u16 = 0x0EFF;
 pub const MAX_ISO_SDU_LENGTH: usize = 0x0FFF;

@@ -17,7 +17,8 @@ use bumble_host::{
 };
 
 use crate::{
-    architecture::types::{AudioSide, SessionId, StreamId},
+    architecture::types::{SessionId, StreamId},
+    plane::l1_control::interface::stream::AudioSide,
     plane::{
         l1_hci::{
             iso::{
@@ -3627,7 +3628,7 @@ mod tests {
             engine.resolve_stream_cis(
                 route.session_id,
                 route.stream_id,
-                crate::architecture::types::AudioSide::Left,
+                crate::plane::l1_control::interface::stream::AudioSide::Left,
             ),
             Some(route.left)
         );
@@ -3635,7 +3636,7 @@ mod tests {
             engine.resolve_stream_handle(
                 route.session_id,
                 route.stream_id,
-                crate::architecture::types::AudioSide::Left,
+                crate::plane::l1_control::interface::stream::AudioSide::Left,
             ),
             Some(0x0900)
         );
@@ -3643,7 +3644,7 @@ mod tests {
             engine.resolve_stream_handle(
                 route.session_id,
                 route.stream_id,
-                crate::architecture::types::AudioSide::Right,
+                crate::plane::l1_control::interface::stream::AudioSide::Right,
             ),
             Some(0x0901)
         );
@@ -3759,7 +3760,7 @@ mod tests {
             engine.resolve_stream_handle(
                 route.session_id,
                 route.stream_id,
-                crate::architecture::types::AudioSide::Right,
+                crate::plane::l1_control::interface::stream::AudioSide::Right,
             ),
             None,
             "removing a live Input Path must invalidate its logical route",
@@ -3783,7 +3784,7 @@ mod tests {
             engine.resolve_stream_handle(
                 route.session_id,
                 route.stream_id,
-                crate::architecture::types::AudioSide::Left,
+                crate::plane::l1_control::interface::stream::AudioSide::Left,
             ),
             Some(0x0900),
             "unrelated side remains independently resolvable",

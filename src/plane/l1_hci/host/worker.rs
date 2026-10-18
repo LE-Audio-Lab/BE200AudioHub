@@ -474,12 +474,12 @@ fn iso_data_group_should_drop(
             let left = engine.resolve_stream_handle(
                 group.session_id,
                 group.stream_id,
-                crate::architecture::types::AudioSide::Left,
+                crate::plane::l1_control::interface::stream::AudioSide::Left,
             );
             let right = engine.resolve_stream_handle(
                 group.session_id,
                 group.stream_id,
-                crate::architecture::types::AudioSide::Right,
+                crate::plane::l1_control::interface::stream::AudioSide::Right,
             );
             match (left, right) {
                 (Some(left), Some(right)) => {
