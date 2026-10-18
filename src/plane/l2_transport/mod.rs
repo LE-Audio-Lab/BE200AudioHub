@@ -7,3 +7,5 @@ pub mod packet;
 pub mod reactor;
 pub mod sink;
 pub mod worker;
+
+pub mod interface;
