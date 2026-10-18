@@ -50,6 +50,12 @@ impl LogicalIsoSduGroupRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IsoDataGroupRequest {
+    Raw(IsoSduGroupRequest),
+    Logical(LogicalIsoSduGroupRequest),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsoSduRequest {
     pub connection_handle: u16,
     pub payload: Vec<u8>,
@@ -245,6 +251,28 @@ mod tests {
             connection_handle: handle,
             payload: vec![0; length],
         }
+    }
+
+    #[test]
+    fn data_lane_envelope_preserves_raw_and_logical_group_identity() {
+        let raw = IsoSduGroupRequest {
+            sdus: vec![sdu(0x0900, 100)],
+        };
+        assert_eq!(
+            IsoDataGroupRequest::Raw(raw.clone()),
+            IsoDataGroupRequest::Raw(raw)
+        );
+
+        let logical = LogicalIsoSduGroupRequest {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            left: vec![0x11; 100],
+            right: vec![0x22; 100],
+        };
+        assert_eq!(
+            IsoDataGroupRequest::Logical(logical.clone()),
+            IsoDataGroupRequest::Logical(logical)
+        );
     }
 
     #[test]
