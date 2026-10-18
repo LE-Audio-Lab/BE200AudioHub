@@ -355,6 +355,8 @@ route -> path -> CIS -> Release ASE -> CIG -> ACL/privacy
 ```
 
 AOSP also accepts Release completion into either Idle or cached Codec
-Configured. BE200AudioHub currently still targets Idle; that is recorded as a
-separate robustness gap because this HIL failed by timeout before readback, not
-by a readback-state mismatch.
+Configured. BE200AudioHub now preserves strict readback validation for all
+other ASCS operations but treats Codec Configured as an additional valid
+terminal readback for Release. The HIL-3 failure itself was still a timeout
+before readback; this compatibility fix closes the adjacent caching gap before
+the next longevity run.

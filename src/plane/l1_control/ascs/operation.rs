@@ -588,7 +588,12 @@ impl AseOperationMachine {
                     }
                 };
                 self.verify_status_identity(&status)?;
-                if status.state != self.expected_readback_state {
+                let release_cached_codec_configured =
+                    matches!(&self.operation, AseOperation::Release(_))
+                        && status.state == AseState::CODEC_CONFIGURED;
+                if status.state != self.expected_readback_state
+                    && !release_cached_codec_configured
+                {
                     return self.fail(
                         AseOperationFailure::ReadbackStateMismatch {
                             ase_id: status.ase_id,
@@ -1185,6 +1190,87 @@ mod tests {
             AseOperationAction::Complete(AseStatus {
                 ase_id: 1,
                 state: AseState::IDLE,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn release_allows_cached_codec_configured_readback() {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+
+        let prepared = prepared();
+        let mut machine = AseOperationMachine::new_with_states(
+            prepared.clone(),
+            AseOperation::Release(vec![prepared.sink.ase_id]),
+            AseState::RELEASING,
+            AseState::IDLE,
+            220,
+        );
+
+        let write = operation_request(machine.start().unwrap());
+        let _ = machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: write.request_id,
+                connection: write.connection,
+                result: GattResult::WriteComplete {
+                    attribute_handle: 0x0043,
+                    with_response: true,
+                },
+            })
+            .unwrap();
+
+        let cp = AseControlResponse {
+            opcode: AseOpcode::Release,
+            responses: vec![AseResponse {
+                ase_id: 1,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        let _ = machine
+            .on_gatt_report(&GattReport::Value(
+                GattValueEvent::Notification {
+                    connection: prepared.sink.connection,
+                    attribute_handle: 0x0043,
+                    value: cp,
+                },
+            ))
+            .unwrap();
+
+        let readback = operation_request(
+            machine
+                .on_gatt_report(&GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: prepared.sink.connection,
+                        attribute_handle: 0x0046,
+                        value: vec![1, AseState::RELEASING.0],
+                    },
+                ))
+                .unwrap(),
+        );
+
+        let action = machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: readback.request_id,
+                connection: readback.connection,
+                result: GattResult::Value {
+                    attribute_handle: 0x0046,
+                    value: codec_status_bytes(),
+                },
+            })
+            .unwrap();
+
+        assert!(matches!(
+            action,
+            AseOperationAction::Complete(AseStatus {
+                ase_id: 1,
+                state: AseState::CODEC_CONFIGURED,
                 ..
             })
         ));
