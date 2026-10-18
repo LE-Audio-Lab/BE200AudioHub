@@ -220,9 +220,9 @@ impl AsePrepareMachine {
                 let GattResult::Subscription {
                     value_handle,
                     cccd_handle,
-                    enabled: true,
-                    ..
-                } = result
+                    indicate,
+                    enabled,
+                } = result.clone()
                 else {
                     return self.unexpected(result);
                 };
@@ -231,15 +231,10 @@ impl AsePrepareMachine {
                         != self
                             .ase_cccd_handle
                             .expect("stored Sink ASE CCCD")
+                    || indicate
+                    || !enabled
                 {
-                    return self.unexpected(
-                        GattResult::Subscription {
-                            value_handle,
-                            cccd_handle,
-                            indicate: false,
-                            enabled: true,
-                        },
-                    );
+                    return self.unexpected(result);
                 }
 
                 self.issue(
@@ -260,9 +255,9 @@ impl AsePrepareMachine {
                 let GattResult::Subscription {
                     value_handle,
                     cccd_handle,
-                    enabled: true,
-                    ..
-                } = result
+                    indicate,
+                    enabled,
+                } = result.clone()
                 else {
                     return self.unexpected(result);
                 };
@@ -272,15 +267,10 @@ impl AsePrepareMachine {
                         != self
                             .control_point_cccd_handle
                             .expect("stored Control Point CCCD")
+                    || indicate
+                    || !enabled
                 {
-                    return self.unexpected(
-                        GattResult::Subscription {
-                            value_handle,
-                            cccd_handle,
-                            indicate: false,
-                            enabled: true,
-                        },
-                    );
+                    return self.unexpected(result);
                 }
 
                 let prepared = PreparedAseControl {
@@ -354,4 +344,205 @@ fn exactly_one_cccd(
         return Err(AsePrepareFailure::DuplicateCccd { label });
     }
     Ok(first.handle)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use bumble_hci::CodingFormat;
+    use bumble_profiles::bap::{
+        AudioLocation, CodecSpecificConfiguration, FrameDuration,
+        SamplingFrequency,
+    };
+
+    use crate::{
+        architecture::types::AudioSide,
+        control::audio_snapshot::GattCharacteristicRange,
+        hci_host::{
+            connection::ConnectionToken,
+            gatt::{GattDescriptor, GattResult},
+        },
+    };
+
+    use super::*;
+
+    fn sink() -> PlannedSink {
+        PlannedSink {
+            side: AudioSide::Left,
+            member_index: 1,
+            connection: ConnectionToken {
+                connection_handle: 0x0801,
+                generation: 2,
+            },
+            ase_id: 1,
+            ase_value_handle: 0x0046,
+            ase_end_group_handle: 0x0048,
+            ascs_control_point: GattCharacteristicRange {
+                declaration_handle: 0x0042,
+                value_handle: 0x0043,
+                end_group_handle: 0x0045,
+                properties: 0x12,
+            },
+            audio_location: AudioLocation::FRONT_LEFT,
+            codec_id: CodingFormat::LC3,
+            codec_specific_configuration:
+                CodecSpecificConfiguration {
+                    sampling_frequency: Some(
+                        SamplingFrequency::FREQ_48000,
+                    ),
+                    frame_duration: Some(
+                        FrameDuration::DURATION_10000_US,
+                    ),
+                    audio_channel_allocation: Some(
+                        AudioLocation::FRONT_LEFT,
+                    ),
+                    octets_per_codec_frame: Some(100),
+                    codec_frames_per_sdu: Some(1),
+                },
+        }
+    }
+
+    fn cccd(handle: u16) -> GattDescriptor {
+        GattDescriptor {
+            handle,
+            uuid: Uuid::from_16_bits(CCCD_UUID),
+        }
+    }
+
+    fn request(action: AsePrepareAction) -> GattRequest {
+        let AsePrepareAction::BeginGatt(request) = action else {
+            panic!("expected BeginGatt");
+        };
+        request
+    }
+
+    fn complete(
+        machine: &mut AsePrepareMachine,
+        request: GattRequest,
+        result: GattResult,
+    ) -> AsePrepareAction {
+        machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: request.request_id,
+                connection: request.connection,
+                result,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn preparation_discovers_both_cccds_then_subscribes_ase_and_cp() {
+        let mut machine = AsePrepareMachine::new(sink(), 40);
+
+        let request = request(machine.start().unwrap());
+        assert_eq!(
+            request.operation,
+            GattOperation::DiscoverDescriptors {
+                starting_handle: 0x0047,
+                ending_handle: 0x0048,
+            }
+        );
+
+        let request = request(complete(
+            &mut machine,
+            request,
+            GattResult::Descriptors(vec![cccd(0x0048)]),
+        ));
+        assert_eq!(
+            request.operation,
+            GattOperation::DiscoverDescriptors {
+                starting_handle: 0x0044,
+                ending_handle: 0x0045,
+            }
+        );
+
+        let request = request(complete(
+            &mut machine,
+            request,
+            GattResult::Descriptors(vec![cccd(0x0045)]),
+        ));
+        assert_eq!(
+            request.operation,
+            GattOperation::Subscribe {
+                value_handle: 0x0046,
+                cccd_handle: 0x0048,
+                indicate: false,
+            }
+        );
+
+        let request = request(complete(
+            &mut machine,
+            request,
+            GattResult::Subscription {
+                value_handle: 0x0046,
+                cccd_handle: 0x0048,
+                indicate: false,
+                enabled: true,
+            },
+        ));
+        assert_eq!(
+            request.operation,
+            GattOperation::Subscribe {
+                value_handle: 0x0043,
+                cccd_handle: 0x0045,
+                indicate: false,
+            }
+        );
+
+        let action = complete(
+            &mut machine,
+            request,
+            GattResult::Subscription {
+                value_handle: 0x0043,
+                cccd_handle: 0x0045,
+                indicate: false,
+                enabled: true,
+            },
+        );
+
+        let AsePrepareAction::Complete(prepared) = action else {
+            panic!("expected prepared ASE control");
+        };
+        assert_eq!(machine.phase(), AsePreparePhase::Complete);
+        assert_eq!(prepared.ase_cccd_handle, 0x0048);
+        assert_eq!(prepared.control_point_cccd_handle, 0x0045);
+        assert_eq!(prepared.sink.ase_id, 1);
+        assert_eq!(machine.next_request_id(), 44);
+    }
+
+    #[test]
+    fn preparation_rejects_missing_or_duplicate_cccd() {
+        let mut machine = AsePrepareMachine::new(sink(), 1);
+        let request = request(machine.start().unwrap());
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Complete {
+                    request_id: request.request_id,
+                    connection: request.connection,
+                    result: GattResult::Descriptors(vec![]),
+                })
+                .unwrap_err(),
+            AsePrepareFailure::MissingCccd {
+                label: "Sink ASE",
+            }
+        );
+
+        let mut machine = AsePrepareMachine::new(sink(), 10);
+        let request = request(machine.start().unwrap());
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Complete {
+                    request_id: request.request_id,
+                    connection: request.connection,
+                    result: GattResult::Descriptors(vec![
+                        cccd(0x0047),
+                        cccd(0x0048),
+                    ]),
+                })
+                .unwrap_err(),
+            AsePrepareFailure::DuplicateCccd {
+                label: "Sink ASE",
+            }
+        );
+    }
 }
