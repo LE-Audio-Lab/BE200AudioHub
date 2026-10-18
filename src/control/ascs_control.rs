@@ -412,7 +412,8 @@ pub enum AseOperationFailure {
 pub struct AseOperationMachine {
     prepared: PreparedAseControl,
     operation: AseOperation,
-    expected_state: AseState,
+    expected_notification_state: AseState,
+    expected_readback_state: AseState,
     phase: AseOperationPhase,
     pending_request_id: Option<GattRequestId>,
     next_request_id: GattRequestId,
@@ -428,10 +429,27 @@ impl AseOperationMachine {
         expected_state: AseState,
         first_request_id: GattRequestId,
     ) -> Self {
-        Self {
+        Self::new_with_states(
             prepared,
             operation,
             expected_state,
+            expected_state,
+            first_request_id,
+        )
+    }
+
+    pub fn new_with_states(
+        prepared: PreparedAseControl,
+        operation: AseOperation,
+        expected_notification_state: AseState,
+        expected_readback_state: AseState,
+        first_request_id: GattRequestId,
+    ) -> Self {
+        Self {
+            prepared,
+            operation,
+            expected_notification_state,
+            expected_readback_state,
             phase: AseOperationPhase::Idle,
             pending_request_id: None,
             next_request_id: first_request_id,
@@ -571,11 +589,12 @@ impl AseOperationMachine {
                     }
                 };
                 self.verify_status_identity(&status)?;
-                if status.state != self.expected_state {
+                if status.state != self.expected_readback_state {
                     return self.fail(
                         AseOperationFailure::ReadbackStateMismatch {
                             ase_id: status.ase_id,
-                            expected_state: self.expected_state.0,
+                            expected_state:
+                                self.expected_readback_state.0,
                             actual_state: status.state.0,
                         },
                     );
@@ -666,7 +685,7 @@ impl AseOperationMachine {
                 }
             };
             self.verify_status_identity(&status)?;
-            if status.state == self.expected_state {
+            if status.state == self.expected_notification_state {
                 self.notified_status = Some(status);
                 return self.maybe_begin_readback();
             }
@@ -1080,6 +1099,96 @@ mod tests {
         assert_eq!(status.state, AseState::CODEC_CONFIGURED);
         assert_eq!(machine.phase(), AseOperationPhase::Complete);
         assert_eq!(machine.next_request_id(), 102);
+    }
+
+    #[test]
+    fn release_allows_releasing_notification_then_idle_readback() {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+
+        let prepared = prepared();
+        let mut machine = AseOperationMachine::new_with_states(
+            prepared.clone(),
+            AseOperation::Release(vec![prepared.sink.ase_id]),
+            AseState::RELEASING,
+            AseState::IDLE,
+            200,
+        );
+
+        let write = operation_request(machine.start().unwrap());
+        let _ = machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: write.request_id,
+                connection: write.connection,
+                result: GattResult::WriteComplete {
+                    attribute_handle: 0x0043,
+                    with_response: true,
+                },
+            })
+            .unwrap();
+
+        let cp = AseControlResponse {
+            opcode: AseOpcode::Release,
+            responses: vec![AseResponse {
+                ase_id: 1,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap();
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: prepared.sink.connection,
+                        attribute_handle: 0x0043,
+                        value: cp,
+                    },
+                ))
+                .unwrap(),
+            AseOperationAction::Await
+        );
+
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: prepared.sink.connection,
+                        attribute_handle: 0x0046,
+                        value: vec![1, AseState::RELEASING.0],
+                    },
+                ))
+                .unwrap(),
+            AseOperationAction::BeginGatt(GattRequest {
+                request_id: 201,
+                connection: prepared.sink.connection,
+                operation: GattOperation::ReadValue {
+                    attribute_handle: 0x0046,
+                },
+            })
+        );
+
+        let action = machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: 201,
+                connection: prepared.sink.connection,
+                result: GattResult::Value {
+                    attribute_handle: 0x0046,
+                    value: vec![1, AseState::IDLE.0],
+                },
+            })
+            .unwrap();
+        assert!(matches!(
+            action,
+            AseOperationAction::Complete(AseStatus {
+                ase_id: 1,
+                state: AseState::IDLE,
+                ..
+            })
+        ));
     }
 
     #[test]
