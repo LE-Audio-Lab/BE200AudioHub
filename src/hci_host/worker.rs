@@ -1080,6 +1080,70 @@ mod tests {
     }
 
     #[test]
+    fn queued_logical_group_without_live_route_is_stale_drop() {
+        let (transport_tx, _transport_rx) =
+            TransportTx::test_channel(4);
+        let engine = HciEngine::new(transport_tx);
+        let request = IsoDataGroupRequest::Logical(
+            super::super::iso_tx::LogicalIsoSduGroupRequest {
+                session_id:
+                    crate::architecture::types::SessionId(7),
+                stream_id:
+                    crate::architecture::types::StreamId(11),
+                left: vec![0x11; 100],
+                right: vec![0x22; 100],
+            },
+        );
+
+        assert_eq!(
+            iso_data_group_should_drop(
+                &engine,
+                &request,
+                &BTreeSet::new(),
+            ),
+            Ok(true),
+        );
+    }
+
+    #[test]
+    fn queued_raw_group_still_obeys_reliable_drain_block_set() {
+        let (transport_tx, _transport_rx) =
+            TransportTx::test_channel(4);
+        let engine = HciEngine::new(transport_tx);
+        let request = IsoDataGroupRequest::Raw(
+            IsoSduGroupRequest {
+                sdus: vec![
+                    super::super::iso_tx::IsoSduRequest {
+                        connection_handle: 0x0900,
+                        payload: vec![0x11; 100],
+                    },
+                    super::super::iso_tx::IsoSduRequest {
+                        connection_handle: 0x0901,
+                        payload: vec![0x22; 100],
+                    },
+                ],
+            },
+        );
+
+        assert_eq!(
+            iso_data_group_should_drop(
+                &engine,
+                &request,
+                &BTreeSet::from([0x0901]),
+            ),
+            Ok(true),
+        );
+        assert_eq!(
+            iso_data_group_should_drop(
+                &engine,
+                &request,
+                &BTreeSet::from([0x0902]),
+            ),
+            Ok(false),
+        );
+    }
+
+    #[test]
     fn logical_route_ack_maps_expected_engine_results() {
         let binding = route_binding();
 
