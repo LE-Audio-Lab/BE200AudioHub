@@ -182,3 +182,38 @@ cargo build --workspace --locked  PASS
 ```
 
 The remaining acceptance step is real-hardware `round8 live-relay` HIL.
+
+
+## HIL findings
+
+### HIL-1 — process-loopback activation rejected — FIXED
+
+Observed on real BE200 + Galaxy Buds3 Pro:
+
+```text
+Current Control/LE Audio setup reached the earbuds successfully.
+Earbud connection tone was audible.
+Windows Process Loopback then failed immediately with:
+ActivateAudioInterface(-2147483634)
+```
+
+`-2147483634 == 0x8000000E == E_ILLEGAL_METHOD_CALL`.
+
+Root cause: the hand-written `IActivateAudioInterfaceCompletionHandler`
+advertised `IUnknown` and the completion-handler IID but did not advertise
+`IAgileObject`. `ActivateAudioInterfaceAsync` requires an agile completion
+handler and rejects a non-agile handler before asynchronous activation begins.
+
+Fix:
+
+```text
+18cf4e13  fix(wasapi): expose agile completion handler
+da16206b  test(wasapi): keep agile COM regression inside adapter
+```
+
+Software regression after the fix:
+
+```text
+cargo test --workspace --locked   PASS — 400 passed / 0 failed
+cargo build --workspace --locked  PASS
+```
