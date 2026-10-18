@@ -64,7 +64,6 @@ mod imp {
             Arc,
         },
         thread,
-        time::Duration,
     };
 
     type HResult = i32;
