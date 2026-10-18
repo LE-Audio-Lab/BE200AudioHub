@@ -13,13 +13,132 @@ use review::{
         iso_smoke as review2_iso_smoke,
     },
     round7::first_sound as round7_first_sound,
-    round8::current_path as round8_current_path,
+    round8::{
+        current_path as round8_current_path,
+        live_relay as round8_live_relay,
+    },
 };
 
 fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.first().map(String::as_str) == Some("round8")
+            && args.get(1).map(String::as_str) == Some("live-relay")
+        {
+            let config =
+                match round8_live_relay::parse_live_relay_args(
+                    &args[2..],
+                ) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!(
+                            "Round8 live relay argument error: {error}"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+
+            println!(
+                "Round8 live relay HIL: Windows Process Loopback -> Relay PCM boundary -> live LC3/StreamClock/IsoTxBridge -> current logical HCI ISO path"
+            );
+            println!("Target set: {}", config.target_name);
+            println!(
+                "Live duration: {:.1} s; PCM=48 kHz Float32 stereo; LC3=100 B/ear/10 ms",
+                config.live_duration.as_secs_f64()
+            );
+            println!(
+                "PCM boundary: 80 ms physical ring, 10 ms retained cushion, 40 ms startup hold, 20 ms activation threshold."
+            );
+            println!(
+                "IMPORTANT: play audio through a sacrificial physical Windows render endpoint. The BE200AudioHub process tree is excluded from capture."
+            );
+            println!(
+                "SAFETY: live PCM uses unity gain before LC3. Start with low application volume and both earbuds OUT of your ears."
+            );
+
+            match round8_live_relay::execute_live_relay(config) {
+                Ok(result) => {
+                    let submitted = result
+                        .media
+                        .audit_after
+                        .total_submitted
+                        .saturating_sub(
+                            result.media.audit_before.total_submitted,
+                        );
+                    let completed = result
+                        .media
+                        .audit_after
+                        .total_completed
+                        .saturating_sub(
+                            result.media.audit_before.total_completed,
+                        );
+
+                    println!("Firmware bypass: {:?}", result.firmware);
+                    println!(
+                        "Stored controller identity: {}",
+                        result.controller_identity
+                    );
+                    println!("Current Control setup path: PASS");
+                    println!(
+                        "Process Loopback capture: packets={} frames={} silent_frames={} discontinuities={}",
+                        result.media.capture.packets,
+                        result.media.capture.frames,
+                        result.media.capture.silent_frames,
+                        result.media.capture.discontinuities,
+                    );
+                    println!(
+                        "PCM boundary: captured={} written={} dropped={} silent_trim={}",
+                        result.media.source.captured_frames,
+                        result.media.source.written_frames,
+                        result.media.source.dropped_frames,
+                        result.media.source.intentional_silent_trim_frames,
+                    );
+                    println!(
+                        "Media clock: intervals={} keepalive={} source_skipped={} underflow_frames={} startup_trim={} gradual_trim={} emergency_trim={}",
+                        result.media.media.pcm.intervals_consumed,
+                        result.media.media.pcm.keepalive_intervals,
+                        result.media.media.pcm.source_intervals_skipped,
+                        result.media.media.pcm.pcm_underflow_frames,
+                        result.media.media.pcm.startup_trim_frames,
+                        result.media.media.pcm.gradual_drift_trim_frames,
+                        result.media.media.pcm.emergency_drift_trim_frames,
+                    );
+                    println!(
+                        "Bridge: submitted={} backpressure_drop={} fallback={} grid_skipped={} stale={}",
+                        result.media.media.bridge.submitted_intervals,
+                        result.media.media.bridge.dropped_backpressure_intervals,
+                        result.media.media.bridge.fallback_intervals,
+                        result.media.media.bridge.skipped_intervals,
+                        result.media.media.bridge.stale_frames_dropped,
+                    );
+                    println!(
+                        "ISO Host delta: submitted={} completed={} in_flight_after={}",
+                        submitted,
+                        completed,
+                        result.media.audit_after.in_flight,
+                    );
+                    println!(
+                        "StopControl reverse teardown -> Control Idle: PASS"
+                    );
+                    println!(
+                        "Bond store unchanged: {}",
+                        result.bond_unchanged
+                    );
+                    println!(
+                        "Shutdown: hci={:?} transport={:?}",
+                        result.exit.hci,
+                        result.exit.transport
+                    );
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("Round8 live relay HIL FAILED: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         if args.first().map(String::as_str) == Some("round8")
             && args.get(1).map(String::as_str)
                 == Some("control-first-sound")
@@ -140,7 +259,7 @@ fn main() {
                 config.frames
             );
             println!(
-                "Test signal: Left=400 Hz, Right=600 Hz, approx -50 dBFS digital peak, 100 ms fades."
+                "Test signal: Left=400 Hz, Right=600 Hz, approx -40 dBFS digital peak, 100 ms fades."
             );
             println!(
                 "SAFETY: dBFS is not calibrated acoustic SPL. First run with both earbuds OUT of your ears."

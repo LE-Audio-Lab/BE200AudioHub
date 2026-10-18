@@ -154,7 +154,18 @@ thread. It starts before Process Loopback activation and emits encoded zero PCM
 while capture is not ready, so COM/WASAPI startup cannot starve an already-live
 CIS.
 
-### M6 — current-path live HIL — NEXT
+### M6 — current-path live HIL — LANDED / SOFTWARE GATE PENDING
 
 Use the existing Round8 current Control/HCI setup and teardown path, replacing
 only the synthetic source with live Process Loopback input.
+
+
+## Current HIL entry point
+
+```text
+be200hub round8 live-relay
+```
+
+The harness reuses the same current-path Control driver as First Sound. Runtime
+shutdown order is source -> Media worker -> ISO drain -> StopControl reverse
+teardown.
