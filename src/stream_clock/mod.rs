@@ -167,3 +167,176 @@ impl LocalStreamClock {
         })
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::architecture::{
+        control::{
+            LeAudioFormat, StreamBinding, StreamTopology,
+        },
+        types::{SessionId, StreamId},
+    };
+
+    use super::*;
+
+    const EPOCH_US: u64 = 1_000_000;
+
+    fn binding() -> StreamBinding {
+        StreamBinding {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            format: LeAudioFormat {
+                sample_rate_hz: 48_000,
+                frame_duration_us: 10_000,
+                octets_per_sdu: 100,
+            },
+            presentation_delay_us: 40_000,
+            topology: StreamTopology::StereoSplit,
+        }
+    }
+
+    #[test]
+    fn binding_establishes_one_absolute_ten_ms_grid() {
+        let clock =
+            LocalStreamClock::from_binding(binding(), EPOCH_US)
+                .unwrap();
+
+        assert_eq!(clock.session_id(), SessionId(7));
+        assert_eq!(clock.stream_id(), StreamId(11));
+        assert_eq!(clock.epoch_us(), EPOCH_US);
+        assert_eq!(clock.period_us(), 10_000);
+
+        assert_eq!(
+            clock.target_time_us(FrameId(0)).unwrap(),
+            EPOCH_US
+        );
+        assert_eq!(
+            clock.target_time_us(FrameId(1)).unwrap(),
+            EPOCH_US + 10_000
+        );
+        assert_eq!(
+            clock.target_time_us(FrameId(100)).unwrap(),
+            EPOCH_US + 1_000_000
+        );
+    }
+
+    #[test]
+    fn timer_callback_jitter_does_not_move_logical_grid() {
+        let clock =
+            LocalStreamClock::from_binding(binding(), EPOCH_US)
+                .unwrap();
+
+        assert_eq!(
+            clock
+                .classify(FrameId(3), EPOCH_US + 30_007)
+                .unwrap(),
+            FrameTiming::Current {
+                elapsed_us: 7,
+                until_next_us: 9_993,
+            }
+        );
+        assert_eq!(
+            clock
+                .classify(FrameId(4), EPOCH_US + 30_007)
+                .unwrap(),
+            FrameTiming::Early {
+                frames_ahead: 1,
+                lead_us: 9_993,
+            }
+        );
+
+        // The next target remains epoch + N*period. Callback jitter is an
+        // observation only; there is no "last callback + period" state.
+        assert_eq!(
+            clock.target_time_us(FrameId(4)).unwrap(),
+            EPOCH_US + 40_000
+        );
+    }
+
+    #[test]
+    fn large_time_jump_marks_old_frames_stale_without_stretching_period() {
+        let clock =
+            LocalStreamClock::from_binding(binding(), EPOCH_US)
+                .unwrap();
+
+        assert_eq!(
+            clock.current_frame_at(EPOCH_US + 55_000),
+            Some(FrameId(5))
+        );
+        assert_eq!(
+            clock
+                .classify(FrameId(2), EPOCH_US + 55_000)
+                .unwrap(),
+            FrameTiming::Stale {
+                frames_behind: 3,
+                late_us: 35_000,
+            }
+        );
+        assert_eq!(
+            clock.target_time_us(FrameId(6)).unwrap(),
+            EPOCH_US + 60_000
+        );
+    }
+
+    #[test]
+    fn before_epoch_is_early_and_snapshot_is_not_running_yet() {
+        let clock =
+            LocalStreamClock::from_binding(binding(), EPOCH_US)
+                .unwrap();
+
+        assert_eq!(
+            clock.classify(FrameId(0), EPOCH_US - 250).unwrap(),
+            FrameTiming::Early {
+                frames_ahead: 0,
+                lead_us: 250,
+            }
+        );
+        assert_eq!(
+            clock.snapshot(EPOCH_US - 1),
+            Err(StreamClockError::BeforeEpoch {
+                now_us: EPOCH_US - 1,
+                epoch_us: EPOCH_US,
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_projects_local_monotonic_lock_without_rate_error() {
+        let clock =
+            LocalStreamClock::from_binding(binding(), EPOCH_US)
+                .unwrap();
+
+        assert_eq!(
+            clock.snapshot(EPOCH_US + 29_999).unwrap(),
+            StreamClockSnapshot {
+                period_us: 10_000,
+                current_frame: FrameId(2),
+                lock: ClockLock::LocalMonotonic,
+                rate_error_ppm: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_period_and_target_overflow_fail_explicitly() {
+        let mut invalid = binding();
+        invalid.format.frame_duration_us = 0;
+        assert_eq!(
+            LocalStreamClock::from_binding(invalid, EPOCH_US),
+            Err(StreamClockError::ZeroPeriod)
+        );
+
+        let clock = LocalStreamClock::from_binding(
+            binding(),
+            u64::MAX - 5_000,
+        )
+        .unwrap();
+        assert_eq!(
+            clock.target_time_us(FrameId(1)),
+            Err(StreamClockError::TargetTimeOverflow {
+                frame_id: FrameId(1),
+            })
+        );
+    }
+}
