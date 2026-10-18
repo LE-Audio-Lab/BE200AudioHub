@@ -1,13 +1,20 @@
 use bumble::Uuid;
+use bumble_profiles::ascs::{
+    AseControlResponse, AseOperation, AseResponseCode, AseState,
+    AseStatus,
+};
 
 use crate::hci_host::{
     gatt::{
         GattFailure, GattOperation, GattReport, GattRequest,
-        GattRequestId, GattResult,
+        GattRequestId, GattResult, GattValueEvent,
     },
 };
 
-use super::codec_plan::PlannedSink;
+use super::{
+    audio_discovery::parse_ase_status_compat,
+    codec_plan::PlannedSink,
+};
 
 pub const CCCD_UUID: u16 = 0x2902;
 
@@ -346,6 +353,406 @@ fn exactly_one_cccd(
     Ok(first.handle)
 }
 
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AseOperationPhase {
+    Idle,
+    WaitingGates,
+    ReadingBack,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AseOperationAction {
+    BeginGatt(GattRequest),
+    Await,
+    Complete(AseStatus),
+    Ignored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AseOperationFailure {
+    InvalidStartState(AseOperationPhase),
+    RequestIdOverflow,
+    Encode(String),
+    Gatt(GattFailure),
+    BearerPoisoned {
+        request_id: GattRequestId,
+    },
+    UnexpectedResult {
+        phase: AseOperationPhase,
+        result: GattResult,
+    },
+    ControlPointParse(String),
+    ControlPointMissingAse {
+        ase_id: u8,
+    },
+    ControlPointDuplicateAse {
+        ase_id: u8,
+    },
+    ControlPointRejected {
+        ase_id: u8,
+        code: u8,
+        reason: u8,
+    },
+    AseStatusParse(String),
+    AseIdentityMismatch {
+        expected: u8,
+        actual: u8,
+    },
+    ReadbackStateMismatch {
+        ase_id: u8,
+        expected_state: u8,
+        actual_state: u8,
+    },
+}
+
+pub struct AseOperationMachine {
+    prepared: PreparedAseControl,
+    operation: AseOperation,
+    expected_state: AseState,
+    phase: AseOperationPhase,
+    pending_request_id: Option<GattRequestId>,
+    next_request_id: GattRequestId,
+    write_complete: bool,
+    cp_success: bool,
+    notified_status: Option<AseStatus>,
+}
+
+impl AseOperationMachine {
+    pub fn new(
+        prepared: PreparedAseControl,
+        operation: AseOperation,
+        expected_state: AseState,
+        first_request_id: GattRequestId,
+    ) -> Self {
+        Self {
+            prepared,
+            operation,
+            expected_state,
+            phase: AseOperationPhase::Idle,
+            pending_request_id: None,
+            next_request_id: first_request_id,
+            write_complete: false,
+            cp_success: false,
+            notified_status: None,
+        }
+    }
+
+    pub fn phase(&self) -> AseOperationPhase {
+        self.phase
+    }
+
+    pub fn pending_request_id(&self) -> Option<GattRequestId> {
+        self.pending_request_id
+    }
+
+    pub fn next_request_id(&self) -> GattRequestId {
+        self.next_request_id
+    }
+
+    pub fn start(
+        &mut self,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        if self.phase != AseOperationPhase::Idle {
+            return Err(AseOperationFailure::InvalidStartState(
+                self.phase,
+            ));
+        }
+        let value = self
+            .operation
+            .to_bytes()
+            .map_err(|error| {
+                AseOperationFailure::Encode(error.to_string())
+            })?;
+        self.issue(
+            AseOperationPhase::WaitingGates,
+            GattOperation::WriteRequest {
+                attribute_handle:
+                    self.prepared.sink.ascs_control_point.value_handle,
+                value,
+            },
+        )
+    }
+
+    pub fn on_gatt_report(
+        &mut self,
+        report: &GattReport,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        match report {
+            GattReport::Value(event) => self.on_value_event(event),
+
+            GattReport::Complete {
+                request_id,
+                connection,
+                result,
+            } if Some(*request_id) == self.pending_request_id
+                && *connection == self.prepared.sink.connection =>
+            {
+                self.pending_request_id = None;
+                self.on_result(result.clone())
+            }
+
+            GattReport::Failed(failure)
+                if Some(failure.request_id) == self.pending_request_id
+                    && failure.connection
+                        == self.prepared.sink.connection =>
+            {
+                self.phase = AseOperationPhase::Failed;
+                self.pending_request_id = None;
+                Err(AseOperationFailure::Gatt(failure.clone()))
+            }
+
+            GattReport::BearerPoisoned {
+                connection,
+                request_id,
+            } if Some(*request_id) == self.pending_request_id
+                && *connection == self.prepared.sink.connection =>
+            {
+                self.phase = AseOperationPhase::Failed;
+                self.pending_request_id = None;
+                Err(AseOperationFailure::BearerPoisoned {
+                    request_id: *request_id,
+                })
+            }
+
+            _ => Ok(AseOperationAction::Ignored),
+        }
+    }
+
+    fn on_result(
+        &mut self,
+        result: GattResult,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        match self.phase {
+            AseOperationPhase::WaitingGates => {
+                let GattResult::WriteComplete {
+                    attribute_handle,
+                    with_response: true,
+                } = result.clone()
+                else {
+                    return self.unexpected(result);
+                };
+                if attribute_handle
+                    != self.prepared.sink.ascs_control_point.value_handle
+                {
+                    return self.unexpected(result);
+                }
+                self.write_complete = true;
+                self.maybe_begin_readback()
+            }
+
+            AseOperationPhase::ReadingBack => {
+                let GattResult::Value {
+                    attribute_handle,
+                    value,
+                } = result.clone()
+                else {
+                    return self.unexpected(result);
+                };
+                if attribute_handle
+                    != self.prepared.sink.ase_value_handle
+                {
+                    return self.unexpected(result);
+                }
+
+                let status = parse_ase_status_compat(&value)
+                    .map_err(|error| {
+                        AseOperationFailure::AseStatusParse(
+                            format!("{error:?}"),
+                        )
+                    })?;
+                self.verify_status_identity(&status)?;
+                if status.state != self.expected_state {
+                    return self.fail(
+                        AseOperationFailure::ReadbackStateMismatch {
+                            ase_id: status.ase_id,
+                            expected_state: self.expected_state.0,
+                            actual_state: status.state.0,
+                        },
+                    );
+                }
+
+                self.phase = AseOperationPhase::Complete;
+                Ok(AseOperationAction::Complete(status))
+            }
+
+            AseOperationPhase::Idle
+            | AseOperationPhase::Complete
+            | AseOperationPhase::Failed => self.unexpected(result),
+        }
+    }
+
+    fn on_value_event(
+        &mut self,
+        event: &GattValueEvent,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        if self.phase != AseOperationPhase::WaitingGates {
+            return Ok(AseOperationAction::Ignored);
+        }
+
+        let (connection, attribute_handle, value) =
+            value_event_parts(event);
+        if connection != self.prepared.sink.connection {
+            return Ok(AseOperationAction::Ignored);
+        }
+
+        if attribute_handle
+            == self.prepared.sink.ascs_control_point.value_handle
+        {
+            let response = AseControlResponse::from_bytes(value)
+                .map_err(|error| {
+                    AseOperationFailure::ControlPointParse(
+                        error.to_string(),
+                    )
+                })?;
+            if response.opcode != self.operation.opcode() {
+                return Ok(AseOperationAction::Ignored);
+            }
+
+            let mut matches = response
+                .responses
+                .iter()
+                .filter(|entry| {
+                    entry.ase_id == self.prepared.sink.ase_id
+                });
+            let entry = matches.next().ok_or(
+                AseOperationFailure::ControlPointMissingAse {
+                    ase_id: self.prepared.sink.ase_id,
+                },
+            )?;
+            if matches.next().is_some() {
+                return self.fail(
+                    AseOperationFailure::ControlPointDuplicateAse {
+                        ase_id: self.prepared.sink.ase_id,
+                    },
+                );
+            }
+            if entry.code != AseResponseCode::SUCCESS {
+                return self.fail(
+                    AseOperationFailure::ControlPointRejected {
+                        ase_id: entry.ase_id,
+                        code: entry.code.0,
+                        reason: entry.reason.0,
+                    },
+                );
+            }
+
+            self.cp_success = true;
+            return self.maybe_begin_readback();
+        }
+
+        if attribute_handle == self.prepared.sink.ase_value_handle {
+            let status = parse_ase_status_compat(value)
+                .map_err(|error| {
+                    AseOperationFailure::AseStatusParse(
+                        format!("{error:?}"),
+                    )
+                })?;
+            self.verify_status_identity(&status)?;
+            if status.state == self.expected_state {
+                self.notified_status = Some(status);
+                return self.maybe_begin_readback();
+            }
+            return Ok(AseOperationAction::Await);
+        }
+
+        Ok(AseOperationAction::Ignored)
+    }
+
+    fn verify_status_identity(
+        &mut self,
+        status: &AseStatus,
+    ) -> Result<(), AseOperationFailure> {
+        if status.ase_id != self.prepared.sink.ase_id {
+            return self.fail(
+                AseOperationFailure::AseIdentityMismatch {
+                    expected: self.prepared.sink.ase_id,
+                    actual: status.ase_id,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn maybe_begin_readback(
+        &mut self,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        if self.phase == AseOperationPhase::WaitingGates
+            && self.pending_request_id.is_none()
+            && self.write_complete
+            && self.cp_success
+            && self.notified_status.is_some()
+        {
+            return self.issue(
+                AseOperationPhase::ReadingBack,
+                GattOperation::ReadValue {
+                    attribute_handle:
+                        self.prepared.sink.ase_value_handle,
+                },
+            );
+        }
+
+        Ok(AseOperationAction::Await)
+    }
+
+    fn issue(
+        &mut self,
+        phase: AseOperationPhase,
+        operation: GattOperation,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or(AseOperationFailure::RequestIdOverflow)?;
+        self.phase = phase;
+        self.pending_request_id = Some(request_id);
+        Ok(AseOperationAction::BeginGatt(GattRequest {
+            request_id,
+            connection: self.prepared.sink.connection,
+            operation,
+        }))
+    }
+
+    fn unexpected(
+        &mut self,
+        result: GattResult,
+    ) -> Result<AseOperationAction, AseOperationFailure> {
+        self.fail(AseOperationFailure::UnexpectedResult {
+            phase: self.phase,
+            result,
+        })
+    }
+
+    fn fail<T>(
+        &mut self,
+        failure: AseOperationFailure,
+    ) -> Result<T, AseOperationFailure> {
+        self.phase = AseOperationPhase::Failed;
+        self.pending_request_id = None;
+        Err(failure)
+    }
+}
+
+fn value_event_parts(
+    event: &GattValueEvent,
+) -> (crate::hci_host::connection::ConnectionToken, u16, &[u8]) {
+    match event {
+        GattValueEvent::Notification {
+            connection,
+            attribute_handle,
+            value,
+        }
+        | GattValueEvent::Indication {
+            connection,
+            attribute_handle,
+            value,
+        } => (*connection, *attribute_handle, value),
+    }
+}
 
 #[cfg(test)]
 mod tests {
