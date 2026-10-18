@@ -983,6 +983,112 @@ mod tests {
         }
     }
 
+    fn route_binding() -> super::super::stream_route::StereoStreamRouteBinding {
+        super::super::stream_route::StereoStreamRouteBinding {
+            session_id: crate::architecture::types::SessionId(7),
+            stream_id: crate::architecture::types::StreamId(11),
+            left: super::super::iso::CisRef {
+                cig_id: 1,
+                cis_id: 1,
+            },
+            right: super::super::iso::CisRef {
+                cig_id: 1,
+                cis_id: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn logical_route_ack_maps_expected_engine_results() {
+        let binding = route_binding();
+
+        assert_eq!(
+            stream_route_bind_ack(binding, Ok(())),
+            Ok(StreamRouteState::Bound {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+            })
+        );
+
+        let config =
+            super::super::stream_route::StreamRouteConfigError::
+                DuplicateCis(binding.left);
+        assert_eq!(
+            stream_route_bind_ack(
+                binding,
+                Err(EngineFault::StreamRouteConfig(config)),
+            ),
+            Ok(StreamRouteState::Failed(StreamRouteFailure {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                kind: StreamRouteFailureKind::Config(config),
+            }))
+        );
+
+        assert_eq!(
+            stream_route_bind_ack(
+                binding,
+                Err(EngineFault::StreamRouteCisNotReady(
+                    binding.right,
+                )),
+            ),
+            Ok(StreamRouteState::Failed(StreamRouteFailure {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                kind: StreamRouteFailureKind::CisNotReady(
+                    binding.right,
+                ),
+            }))
+        );
+
+        assert_eq!(
+            stream_route_bind_ack(
+                binding,
+                Err(EngineFault::InvalidState),
+            ),
+            Err(EngineFault::InvalidState),
+        );
+    }
+
+    #[test]
+    fn logical_route_commands_ack_not_ready_and_unbound_without_fault() {
+        let (transport_tx, _transport_rx) =
+            TransportTx::test_channel(4);
+        let mut engine = HciEngine::new(transport_tx);
+        let binding = route_binding();
+
+        assert_eq!(
+            process_stream_route_command(
+                &mut engine,
+                &HciCommand::BindStreamRoute(binding),
+            )
+            .unwrap(),
+            Some(StreamRouteState::Failed(StreamRouteFailure {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                kind: StreamRouteFailureKind::CisNotReady(
+                    binding.left,
+                ),
+            }))
+        );
+
+        assert_eq!(
+            process_stream_route_command(
+                &mut engine,
+                &HciCommand::UnbindStreamRoute {
+                    session_id: binding.session_id,
+                    stream_id: binding.stream_id,
+                },
+            )
+            .unwrap(),
+            Some(StreamRouteState::Unbound {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+                was_bound: false,
+            })
+        );
+    }
+
     #[test]
     fn worker_owns_device_and_completes_minimal_resetless_attach() {
         let (control, ingress, reports, ports) = hci_mailbox(16, 4, 8);
