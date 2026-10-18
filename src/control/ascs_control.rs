@@ -409,7 +409,7 @@ mod tests {
         }
     }
 
-    fn request(action: AsePrepareAction) -> GattRequest {
+    fn expect_request(action: AsePrepareAction) -> GattRequest {
         let AsePrepareAction::BeginGatt(request) = action else {
             panic!("expected BeginGatt");
         };
@@ -434,7 +434,7 @@ mod tests {
     fn preparation_discovers_both_cccds_then_subscribes_ase_and_cp() {
         let mut machine = AsePrepareMachine::new(sink(), 40);
 
-        let request = request(machine.start().unwrap());
+        let request = expect_request(machine.start().unwrap());
         assert_eq!(
             request.operation,
             GattOperation::DiscoverDescriptors {
@@ -443,7 +443,7 @@ mod tests {
             }
         );
 
-        let request = request(complete(
+        let request = expect_request(complete(
             &mut machine,
             request,
             GattResult::Descriptors(vec![cccd(0x0048)]),
@@ -456,7 +456,7 @@ mod tests {
             }
         );
 
-        let request = request(complete(
+        let request = expect_request(complete(
             &mut machine,
             request,
             GattResult::Descriptors(vec![cccd(0x0045)]),
@@ -470,7 +470,7 @@ mod tests {
             }
         );
 
-        let request = request(complete(
+        let request = expect_request(complete(
             &mut machine,
             request,
             GattResult::Subscription {
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn preparation_rejects_missing_or_duplicate_cccd() {
         let mut machine = AsePrepareMachine::new(sink(), 1);
-        let request = request(machine.start().unwrap());
+        let request = expect_request(machine.start().unwrap());
         assert_eq!(
             machine
                 .on_gatt_report(&GattReport::Complete {
@@ -528,7 +528,7 @@ mod tests {
         );
 
         let mut machine = AsePrepareMachine::new(sink(), 10);
-        let request = request(machine.start().unwrap());
+        let request = expect_request(machine.start().unwrap());
         assert_eq!(
             machine
                 .on_gatt_report(&GattReport::Complete {
