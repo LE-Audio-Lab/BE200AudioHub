@@ -30,6 +30,9 @@ use super::{
     audio_snapshot::{
         AudioMemberSnapshot, AudioSetSnapshot,
     },
+    codec_plan::{
+        plan_first_stream, CodecPlanError, StereoCodecPlan,
+    },
     discovery::{
         resolve_connectable_members, ControlDiscoveryError,
         ResolvedMemberPresence,
@@ -53,6 +56,7 @@ pub enum ControlPhase {
     SetConnected,
     DiscoveringAudioMember { member_index: usize },
     AudioSetDiscovered,
+    CodecPlanned,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -156,6 +160,7 @@ pub enum ControlFailure {
         request_id: GattRequestId,
     },
     AudioSet(String),
+    CodecPlan(CodecPlanError),
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -183,6 +188,7 @@ pub struct ControlMachine {
     audio_discovery: Option<AudioDiscoveryMachine>,
     audio_members: Vec<AudioMemberSnapshot>,
     audio_set: Option<AudioSetSnapshot>,
+    codec_plan: Option<StereoCodecPlan>,
     failure: Option<ControlFailure>,
 }
 
@@ -203,6 +209,7 @@ impl ControlMachine {
             audio_discovery: None,
             audio_members: Vec::new(),
             audio_set: None,
+            codec_plan: None,
             failure: None,
         })
     }
@@ -227,6 +234,27 @@ impl ControlMachine {
         self.audio_set.as_ref()
     }
 
+    pub fn codec_plan(&self) -> Option<&StereoCodecPlan> {
+        self.codec_plan.as_ref()
+    }
+
+    pub fn plan_codec(
+        &mut self,
+    ) -> Result<(), ControlFailure> {
+        if self.phase != ControlPhase::AudioSetDiscovered {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let set = self
+            .audio_set
+            .as_ref()
+            .expect("AudioSetDiscovered requires snapshot");
+        let plan = plan_first_stream(set)
+            .map_err(ControlFailure::CodecPlan)?;
+        self.codec_plan = Some(plan);
+        self.phase = ControlPhase::CodecPlanned;
+        Ok(())
+    }
+
     pub fn begin_audio_discovery(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -235,6 +263,7 @@ impl ControlMachine {
         }
         self.audio_members.clear();
         self.audio_set = None;
+        self.codec_plan = None;
         self.start_audio_member_discovery(0)
     }
 
@@ -1637,6 +1666,108 @@ mod tests {
             }),
         ];
         machine
+    }
+
+    #[test]
+    fn audio_set_checkpoint_plans_first_stereo_stream() {
+        use bumble_hci::CodingFormat;
+        use bumble_profiles::{
+            ascs::{AseState, AseStatus, AseStatusDetails},
+            bap::{
+                AudioLocation, CodecSpecificCapabilities, ContextType,
+                SupportedFrameDuration, SupportedSamplingFrequency,
+            },
+            le_audio::Metadata,
+            pacs::{AudioContexts, PacCodecCapabilities, PacRecord},
+        };
+        use crate::control::audio_snapshot::{
+            AscsSinkSnapshot, CasSnapshot, GattServiceRange,
+            PacsSinkSnapshot, SinkAseSnapshot,
+        };
+
+        let service = GattServiceRange {
+            start_handle: 1,
+            end_handle: 20,
+        };
+        let member = |member_index: usize, location: AudioLocation| {
+            let contexts = AudioContexts {
+                sink: ContextType::MEDIA,
+                source: ContextType::PROHIBITED,
+            };
+            AudioMemberSnapshot {
+                member_index,
+                connection: ConnectionToken {
+                    connection_handle: 0x0800 + member_index as u16,
+                    generation: member_index as u64 + 1,
+                },
+                mtu: 247,
+                pacs: PacsSinkSnapshot {
+                    service,
+                    sink_pac_handle: 2,
+                    sink_audio_location_handle: 3,
+                    available_contexts_handle: 4,
+                    supported_contexts_handle: 5,
+                    sink_pac_records: vec![PacRecord {
+                        coding_format: CodingFormat::LC3,
+                        codec_specific_capabilities:
+                            PacCodecCapabilities::Standard(
+                                CodecSpecificCapabilities {
+                                    supported_sampling_frequencies:
+                                        SupportedSamplingFrequency::FREQ_48000,
+                                    supported_frame_durations:
+                                        SupportedFrameDuration::
+                                            DURATION_10000_US_SUPPORTED,
+                                    supported_audio_channel_count: vec![1],
+                                    min_octets_per_codec_frame: 26,
+                                    max_octets_per_codec_frame: 155,
+                                    supported_max_codec_frames_per_sdu: 1,
+                                },
+                            ),
+                        metadata: Metadata::default(),
+                    }],
+                    sink_audio_location: location,
+                    available_contexts: contexts,
+                    supported_contexts: contexts,
+                },
+                ascs: AscsSinkSnapshot {
+                    service,
+                    sink_ases: vec![SinkAseSnapshot {
+                        declaration_handle: 6,
+                        value_handle: 7,
+                        end_group_handle: 8,
+                        properties: 0x12,
+                        status: AseStatus {
+                            ase_id: 1,
+                            state: AseState::IDLE,
+                            details: AseStatusDetails::None,
+                        },
+                    }],
+                    control_point_handle: 9,
+                },
+                cas: CasSnapshot {
+                    service,
+                    included_csis: service,
+                },
+            }
+        };
+
+        let mut machine = machine_at_set_connected();
+        machine.phase = ControlPhase::AudioSetDiscovered;
+        machine.audio_set = Some(AudioSetSnapshot {
+            members: vec![
+                member(0, AudioLocation::FRONT_RIGHT),
+                member(1, AudioLocation::FRONT_LEFT),
+            ],
+        });
+
+        machine.plan_codec().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::CodecPlanned);
+        let plan = machine.codec_plan().unwrap();
+        assert_eq!(plan.left.member_index, 1);
+        assert_eq!(plan.right.member_index, 0);
+        assert_eq!(plan.format.sample_rate_hz, 48_000);
+        assert_eq!(plan.format.frame_duration_us, 10_000);
+        assert_eq!(plan.format.octets_per_sdu, 100);
     }
 
     #[test]
