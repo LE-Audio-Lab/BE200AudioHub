@@ -1,3 +1,5 @@
+pub mod runtime;
+
 //! Initial interval-group scheduler for the Media -> HCI boundary.
 //!
 //! This core is deterministic and I/O-free. MediaRt owns it alongside the
