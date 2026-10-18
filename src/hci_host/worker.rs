@@ -22,8 +22,9 @@ use super::{
     iso_lifecycle::{CigRemoveState, CisDisconnectState},
     iso_path::IsoPathOperationState,
     iso_tx::{
-        iso_group_touches_handles, IsoDrainRequest, IsoDrainState,
-        IsoSduGroupRequest, IsoSubmitOutcome,
+        iso_group_touches_handles, IsoDataGroupRequest,
+        IsoDrainRequest, IsoDrainState, IsoSduGroupRequest,
+        IsoSubmitOutcome,
     },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
     privacy::ControllerPrivacyState,
@@ -112,7 +113,7 @@ fn run_loop(
     let mut last_iso_path_state =
         engine.iso_path_state().clone();
     let mut last_connection_set = engine.connection_set_snapshot();
-    let mut pending_iso_group: Option<IsoSduGroupRequest> = None;
+    let mut pending_iso_group: Option<IsoDataGroupRequest> = None;
     let mut blocked_iso_handles = BTreeSet::new();
     let mut iso_drain_state = IsoDrainState::Idle;
     let mut last_iso_drain_state = IsoDrainState::Idle;
@@ -266,24 +267,39 @@ fn run_loop(
                 },
             };
 
-            if iso_group_touches_handles(
+            match iso_data_group_should_drop(
+                &engine,
                 &request,
                 &blocked_iso_handles,
             ) {
-                // Realtime data already superseded by a reliable drain gate is
-                // stale by definition. Drop the complete group, never one ear.
-                did_work = true;
-                continue;
+                Ok(true) => {
+                    // Realtime data superseded by route teardown or a reliable
+                    // drain gate is stale. Drop the complete stereo group,
+                    // never one ear.
+                    did_work = true;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(fault) => {
+                    return HciWorkerExit::Faulted(
+                        HciWorkerFault::Engine(fault),
+                    )
+                }
             }
 
-            match engine.submit_iso_group(&request) {
-                Ok(IsoSubmitOutcome::Accepted) => {
+            match submit_iso_data_group(&mut engine, &request) {
+                Ok(Some(IsoSubmitOutcome::Accepted)) => {
                     did_work = true;
                     iso_accepted = true;
                 }
-                Ok(IsoSubmitOutcome::Backpressured) => {
+                Ok(Some(IsoSubmitOutcome::Backpressured)) => {
                     pending_iso_group = Some(request);
                     break;
+                }
+                Ok(None) => {
+                    // A logical route may disappear between queueing and
+                    // submission. Treat it as stale realtime data.
+                    did_work = true;
                 }
                 Err(fault) => {
                     return HciWorkerExit::Faulted(
@@ -447,6 +463,43 @@ fn run_loop(
     }
 }
 
+fn iso_data_group_should_drop(
+    engine: &HciEngine,
+    request: &IsoDataGroupRequest,
+    blocked_iso_handles: &BTreeSet<u16>,
+) -> Result<bool, EngineFault> {
+    match request {
+        IsoDataGroupRequest::Raw(group) => Ok(
+            iso_group_touches_handles(group, blocked_iso_handles),
+        ),
+        IsoDataGroupRequest::Logical(group) => {
+            let Some(handles) =
+                engine.resolve_logical_iso_handles(group)?
+            else {
+                // Route invalidation makes queued realtime data stale.
+                return Ok(true);
+            };
+            Ok(handles
+                .iter()
+                .any(|handle| blocked_iso_handles.contains(handle)))
+        }
+    }
+}
+
+fn submit_iso_data_group(
+    engine: &mut HciEngine,
+    request: &IsoDataGroupRequest,
+) -> Result<Option<IsoSubmitOutcome>, EngineFault> {
+    match request {
+        IsoDataGroupRequest::Raw(group) => {
+            engine.submit_iso_group(group).map(Some)
+        }
+        IsoDataGroupRequest::Logical(group) => {
+            engine.submit_logical_iso_group(group)
+        }
+    }
+}
+
 fn maybe_publish_iso_audit(
     engine: &HciEngine,
     command: &HciCommand,
@@ -493,7 +546,7 @@ fn process_worker_command(
     engine: &mut HciEngine,
     command: HciCommand,
     blocked_iso_handles: &mut BTreeSet<u16>,
-    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    pending_iso_group: &mut Option<IsoDataGroupRequest>,
     iso_drain_state: &mut IsoDrainState,
 ) -> Result<Option<StreamRouteState>, EngineFault> {
     let route_state =
@@ -538,7 +591,7 @@ fn process_command(
     engine: &mut HciEngine,
     command: HciCommand,
     blocked_iso_handles: &mut BTreeSet<u16>,
-    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    pending_iso_group: &mut Option<IsoDataGroupRequest>,
     iso_drain_state: &mut IsoDrainState,
 ) -> Result<(), EngineFault> {
     match command {
@@ -648,7 +701,7 @@ fn begin_iso_drain(
     engine: &HciEngine,
     request: IsoDrainRequest,
     blocked_iso_handles: &mut BTreeSet<u16>,
-    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    pending_iso_group: &mut Option<IsoDataGroupRequest>,
     iso_drain_state: &mut IsoDrainState,
 ) -> Result<(), EngineFault> {
     engine.validate_iso_drain(&request)?;
@@ -667,9 +720,15 @@ fn begin_iso_drain(
     blocked_iso_handles.extend(
         request.connection_handles.iter().copied(),
     );
-    if pending_iso_group.as_ref().is_some_and(|group| {
-        iso_group_touches_handles(group, blocked_iso_handles)
-    }) {
+    let drop_pending = match pending_iso_group.as_ref() {
+        Some(group) => iso_data_group_should_drop(
+            engine,
+            group,
+            blocked_iso_handles,
+        )?,
+        None => false,
+    };
+    if drop_pending {
         *pending_iso_group = None;
     }
 
