@@ -5407,6 +5407,80 @@ mod tests {
         request
     }
 
+    fn drive_to_streaming_ready() -> ControlMachine {
+        use crate::hci_host::gatt::GattResult;
+
+        let mut machine = drive_to_iso_paths_ready();
+        let actions = machine.begin_streaming_gate().unwrap();
+        let left_read = only_read_gatt(&actions);
+        let left_streaming = streaming_status_bytes(
+            &machine,
+            AudioSide::Left,
+            AseState::STREAMING,
+        );
+        let actions = complete_gatt(
+            &mut machine,
+            &left_read,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: left_streaming,
+            },
+        );
+
+        let right_read = only_read_gatt(&actions);
+        let right_streaming = streaming_status_bytes(
+            &machine,
+            AudioSide::Right,
+            AseState::STREAMING,
+        );
+        complete_gatt(
+            &mut machine,
+            &right_read,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: right_streaming,
+            },
+        );
+
+        assert_eq!(machine.phase(), ControlPhase::StreamingReady);
+        machine
+    }
+
+    #[test]
+    fn stream_binding_is_available_only_after_confirmed_streaming() {
+        let machine = drive_to_iso_paths_ready();
+        assert_eq!(
+            machine.stream_binding(SessionId(7), StreamId(11)),
+            Err(ControlFailure::InvalidStartState(
+                ControlPhase::IsoPathsReady,
+            ))
+        );
+    }
+
+    #[test]
+    fn stream_binding_contains_only_logical_stream_contract() {
+        let machine = drive_to_streaming_ready();
+        let binding = machine
+            .stream_binding(SessionId(7), StreamId(11))
+            .unwrap();
+
+        assert_eq!(binding.session_id, SessionId(7));
+        assert_eq!(binding.stream_id, StreamId(11));
+        assert_eq!(
+            binding.format,
+            crate::architecture::control::LeAudioFormat {
+                sample_rate_hz: 48_000,
+                frame_duration_us: 10_000,
+                octets_per_sdu: 100,
+            }
+        );
+        assert_eq!(binding.presentation_delay_us, 40_000);
+        assert_eq!(
+            binding.topology,
+            StreamTopology::StereoSplit
+        );
+    }
+
     #[test]
     fn streaming_gate_retries_left_then_confirms_both_ears() {
         use crate::hci_host::gatt::GattResult;
