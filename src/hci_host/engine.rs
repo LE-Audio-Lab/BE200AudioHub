@@ -55,9 +55,11 @@ use super::{
         SemanticCisDisconnectState,
     },
     iso_path::{
-        IsoDataPathConfig, IsoDataPathDirection, IsoPathConfigError,
-        IsoPathOperationState, IsoPathRemoveAction, IsoPathRemoveTransaction,
-        IsoPathSetupAction, IsoPathSetupTransaction,
+        semantic_iso_path_failure, IsoDataPathConfig,
+        IsoDataPathDirection, IsoPathConfigError,
+        IsoPathOperationState, IsoPathRemoveAction,
+        IsoPathRemoveTransaction, IsoPathSetupAction,
+        IsoPathSetupTransaction, SemanticIsoPathState,
     },
     iso_tx::{
         iso_group_fits, iso_group_packet_count, IsoDrainConfigError,
@@ -219,6 +221,7 @@ pub struct HciEngine {
     iso_path_state: IsoPathOperationState,
     iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
     iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
+    semantic_iso_path_target: Option<CisRef>,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -265,6 +268,7 @@ impl HciEngine {
             iso_path_state: IsoPathOperationState::Idle,
             iso_path_setup_transaction: None,
             iso_path_remove_transaction: None,
+            semantic_iso_path_target: None,
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -735,6 +739,47 @@ impl HciEngine {
         &self.iso_path_state
     }
 
+    pub fn semantic_iso_path_state(
+        &self,
+    ) -> Option<SemanticIsoPathState> {
+        let cis = self.semantic_iso_path_target?;
+        match &self.iso_path_state {
+            IsoPathOperationState::Idle => None,
+            IsoPathOperationState::SettingUp(config) => {
+                Some(SemanticIsoPathState::SettingUp {
+                    cis,
+                    direction: config.direction,
+                })
+            }
+            IsoPathOperationState::SetupComplete {
+                direction,
+                ..
+            } => Some(SemanticIsoPathState::SetupComplete {
+                cis,
+                direction: *direction,
+            }),
+            IsoPathOperationState::Removing {
+                directions,
+                ..
+            } => Some(SemanticIsoPathState::Removing {
+                cis,
+                directions: *directions,
+            }),
+            IsoPathOperationState::RemoveComplete {
+                directions,
+                ..
+            } => Some(SemanticIsoPathState::RemoveComplete {
+                cis,
+                directions: *directions,
+            }),
+            IsoPathOperationState::Failed(failure) => {
+                Some(SemanticIsoPathState::Failed(
+                    semantic_iso_path_failure(cis, failure),
+                ))
+            }
+        }
+    }
+
     pub fn validate_iso_drain(
         &self,
         request: &IsoDrainRequest,
@@ -863,6 +908,20 @@ impl HciEngine {
         ready && self.device.cis_link(connection_handle).is_some()
     }
 
+    pub fn begin_iso_input_path_setup_by_ref(
+        &mut self,
+        cis: CisRef,
+    ) -> Result<(), EngineFault> {
+        let connection_handle = self
+            .resolve_established_cis_handle(cis)
+            .ok_or(EngineFault::InvalidState)?;
+        self.begin_iso_path_setup(
+            IsoDataPathConfig::hci_input(connection_handle),
+        )?;
+        self.semantic_iso_path_target = Some(cis);
+        Ok(())
+    }
+
     pub fn begin_iso_path_setup(
         &mut self,
         config: IsoDataPathConfig,
@@ -899,6 +958,20 @@ impl HciEngine {
 
         self.iso_path_setup_transaction = Some(transaction);
         self.iso_path_state = IsoPathOperationState::SettingUp(config);
+        self.semantic_iso_path_target = None;
+        Ok(())
+    }
+
+    pub fn begin_iso_path_remove_by_ref(
+        &mut self,
+        cis: CisRef,
+        directions: u8,
+    ) -> Result<(), EngineFault> {
+        let connection_handle = self
+            .resolve_established_cis_handle(cis)
+            .ok_or(EngineFault::InvalidState)?;
+        self.begin_iso_path_remove(connection_handle, directions)?;
+        self.semantic_iso_path_target = Some(cis);
         Ok(())
     }
 
@@ -946,6 +1019,7 @@ impl HciEngine {
             connection_handle,
             directions,
         };
+        self.semantic_iso_path_target = None;
         Ok(())
     }
 
