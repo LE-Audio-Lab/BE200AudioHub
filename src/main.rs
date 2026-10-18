@@ -2,6 +2,7 @@ mod architecture;
 mod runtime;
 mod platform;
 mod transport;
+mod media;
 
 mod hci_host;
 mod review2;
