@@ -82,7 +82,10 @@ use crate::plane::l1_control::{
         planned_configuration::PlannedConfiguration,
         set_plan::{ControlPlanError, ControlSetPlan},
     },
-    operation::rollback::RollbackOperation,
+    operation::{
+        audio_discovery::AudioDiscoveryOperation,
+        rollback::RollbackOperation,
+    },
     planning::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
         enable::{plan_first_enable, EnablePlanError, StereoEnablePlan},
@@ -380,8 +383,7 @@ pub struct ControlMachine {
     rollback: RollbackOperation,
     phase: ControlPhase,
     next_gatt_request_id: GattRequestId,
-    audio_discovery: Option<AudioDiscoveryMachine>,
-    audio_members: Vec<AudioMemberSnapshot>,
+    discovery_operation: AudioDiscoveryOperation,
     ase_prepare: Option<AsePrepareMachine>,
     ase_operation: Option<AseOperationMachine>,
     streaming_gate: Option<StreamingGateMachine>,
@@ -400,8 +402,7 @@ impl ControlMachine {
             rollback: RollbackOperation::new(),
             phase: ControlPhase::Idle,
             next_gatt_request_id: 1,
-            audio_discovery: None,
-            audio_members: Vec::new(),
+            discovery_operation: AudioDiscoveryOperation::new(),
             ase_prepare: None,
             ase_operation: None,
             streaming_gate: None,
@@ -805,7 +806,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::SetConnected {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.audio_members.clear();
+        self.discovery_operation.members.clear();
         self.confirmed.audio_set = None;
         self.planned.codec_plan = None;
         self.planned.iso_plan = None;
@@ -901,15 +902,14 @@ impl ControlMachine {
                 == ControlPhase::DiscoveringAudioMember {
                     member_index,
                 }
-                && self
-                    .audio_discovery
+                && self.discovery_operation.machine
                     .as_ref()
                     .and_then(|value| value.pending_request_id())
                     == Some(request_id) =>
             {
                 let connection = self.confirmed.connections[member_index]
                     .expect("audio discovery requires live connection");
-                self.audio_discovery = None;
+                self.discovery_operation.machine = None;
                 let mut actions = vec![
                     ControlAction::CancelGatt {
                         connection,
@@ -3045,7 +3045,7 @@ impl ControlMachine {
             }
         })?;
         self.next_gatt_request_id = discovery.next_request_id();
-        self.audio_discovery = Some(discovery);
+        self.discovery_operation.machine = Some(discovery);
         self.phase = ControlPhase::DiscoveringAudioMember {
             member_index,
         };
@@ -3057,8 +3057,7 @@ impl ControlMachine {
         member_index: usize,
         report: &GattReport,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let mut discovery = self
-            .audio_discovery
+        let mut discovery = self.discovery_operation.machine
             .take()
             .expect("audio discovery phase missing member FSM");
         let pending = discovery.pending_request_id();
@@ -3067,11 +3066,11 @@ impl ControlMachine {
 
         match outcome {
             Ok(AudioDiscoveryAction::Ignored) => {
-                self.audio_discovery = Some(discovery);
+                self.discovery_operation.machine = Some(discovery);
                 Ok(Vec::new())
             }
             Ok(action) => {
-                self.audio_discovery = if matches!(
+                self.discovery_operation.machine = if matches!(
                     action,
                     AudioDiscoveryAction::Complete(_)
                 ) {
@@ -3086,7 +3085,7 @@ impl ControlMachine {
                 )
             }
             Err(failure) => {
-                self.audio_discovery = None;
+                self.discovery_operation.machine = None;
                 let mut actions = Vec::new();
                 if let Some(request_id) = pending {
                     actions.push(ControlAction::DisarmTimer(
@@ -3136,7 +3135,7 @@ impl ControlMachine {
                 Ok(actions)
             }
             AudioDiscoveryAction::Complete(snapshot) => {
-                self.audio_members.push(snapshot);
+                self.discovery_operation.members.push(snapshot);
                 if member_index + 1 < self.plan.members.len() {
                     actions.extend(
                         self.start_audio_member_discovery(
@@ -3147,7 +3146,7 @@ impl ControlMachine {
                 }
 
                 let set = AudioSetSnapshot {
-                    members: std::mem::take(&mut self.audio_members),
+                    members: std::mem::take(&mut self.discovery_operation.members),
                 };
                 if let Err(error) = set.validate_dual_sink() {
                     actions.extend(self.begin_rollback(
