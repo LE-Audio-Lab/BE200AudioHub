@@ -373,6 +373,9 @@ pub enum ControlFailure {
         was_bound: bool,
     },
     Timeout(ControlTimer),
+    TeardownFailed {
+        cleanup: Vec<ControlCleanupFailure>,
+    },
     RollbackFailed {
         primary: Box<ControlFailure>,
         cleanup: Vec<ControlCleanupFailure>,

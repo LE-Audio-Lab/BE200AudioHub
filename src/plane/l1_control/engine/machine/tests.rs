@@ -2993,3 +2993,57 @@
             matches!(action, ControlAction::BeginGatt(_))
         }));
     }
+
+
+    #[test]
+    fn normal_teardown_reuses_reverse_cleanup_and_returns_idle_on_success() {
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Bound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        let actions = machine.begin_teardown().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert_eq!(machine.failure(), None);
+        assert!(matches!(
+            actions.first(),
+            Some(ControlAction::UnbindStreamRoute {
+                session_id: SessionId(7),
+                stream_id: StreamId(11),
+            })
+        ));
+
+        machine.rollback.stream_route = None;
+        machine.rollback.stream_route_unbind_pending = false;
+        machine.rollback.iso_path_queue.clear();
+        machine.rollback.iso_path_current = None;
+        machine.rollback.cis_queue.clear();
+        machine.rollback.cis_current = None;
+        machine.rollback.ase_queue.clear();
+        machine.rollback.ase_current = None;
+        machine.rollback.ase_operation = None;
+        machine.rollback.cig_pending = false;
+        machine.rollback.acl_queue.clear();
+        machine.rollback.acl_current = None;
+        machine.cleanup_knowledge.cig_may_exist = false;
+        machine.confirmed.privacy_active = false;
+
+        assert_eq!(
+            machine.finish_rollback().unwrap(),
+            Vec::<ControlAction>::new()
+        );
+        assert_eq!(machine.phase(), ControlPhase::Idle);
+        assert_eq!(
+            machine.condition_update(),
+            ControlConditionUpdate::initial()
+        );
+        assert!(machine.stream_binding().is_err());
+    }

@@ -182,6 +182,49 @@ impl ControlMachine {
         self.confirmed.active_stream_binding = None;
     }
 
+    /// Begin a normal product teardown from a route-bound stream.
+    ///
+    /// This reuses the proven rollback ordering but carries no primary failure:
+    /// successful cleanup returns Control to Idle, while cleanup failures become
+    /// TeardownFailed.
+    pub fn begin_teardown(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::StreamBoundReady {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+
+        self.failure = None;
+        self.prepare_stream_route_rollback();
+        self.rollback.acl_queue = self.confirmed.connections
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        self.rollback.acl_current = None;
+
+        self.rollback.iso_path_queue =
+            self.cleanup_knowledge.iso_paths_may_exist.iter().copied().collect();
+        self.rollback.iso_path_current = None;
+
+        self.rollback.cis_queue =
+            self.confirmed.live_cis.iter().copied().collect();
+        self.rollback.cis_current = None;
+
+        self.rollback.ase_queue.clear();
+        for side in [AudioSide::Left, AudioSide::Right] {
+            if self.confirmed.prepared_ases[side_index(side)].is_some() {
+                self.rollback.ase_queue.push(side);
+            }
+        }
+        self.rollback.ase_current = None;
+        self.rollback.ase_operation = None;
+        self.rollback.cleanup_failures.clear();
+
+        self.phase = ControlPhase::RollingBack;
+        self.continue_rollback()
+    }
+
     pub(super) fn begin_rollback(
         &mut self,
         failure: ControlFailure,
@@ -354,13 +397,41 @@ impl ControlMachine {
         self.finish_rollback()
     }
 
+    fn reset_after_successful_teardown(&mut self) {
+        self.confirmed = ConfirmedStatus::new();
+        self.planned = PlannedConfiguration::new();
+        self.cleanup_knowledge = CleanupKnowledge::new();
+        self.rollback = RollbackOperation::new();
+        self.discovery_operation = AudioDiscoveryOperation::new();
+        self.ase_control_operation = AseControlOperation::new();
+        self.streaming_operation = StreamingOperation::new();
+        self.stream_route_operation = StreamRouteOperation::new();
+        self.failure = None;
+        self.phase = ControlPhase::Idle;
+    }
+
     pub(super) fn finish_rollback(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.failure.is_none() {
+            if self.rollback.cleanup_failures.is_empty() {
+                self.reset_after_successful_teardown();
+                return Ok(Vec::new());
+            }
+
+            self.phase = ControlPhase::Faulted;
+            let final_failure = ControlFailure::TeardownFailed {
+                cleanup: std::mem::take(
+                    &mut self.rollback.cleanup_failures,
+                ),
+            };
+            self.failure = Some(final_failure.clone());
+            return Err(final_failure);
+        }
+
         self.phase = ControlPhase::Faulted;
-        let primary = self.failure.take().unwrap_or(
-            ControlFailure::ConnectionSetMismatch,
-        );
+        let primary = self.failure.take()
+            .expect("failure rollback requires primary failure");
         let final_failure = if self.rollback.cleanup_failures.is_empty() {
             primary
         } else {
