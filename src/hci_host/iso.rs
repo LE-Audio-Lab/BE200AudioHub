@@ -154,6 +154,13 @@ pub struct CisAclBinding {
     pub acl: ConnectionToken,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CisRef {
+    pub cig_id: u8,
+    pub cis_id: u8,
+}
+
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CisCreateRequest {
     pub cig_id: u8,
