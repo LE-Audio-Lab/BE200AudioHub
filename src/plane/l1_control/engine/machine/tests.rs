@@ -2978,3 +2978,18 @@
         assert_eq!(machine.phase(), ControlPhase::Faulted);
     }
 
+
+
+    #[test]
+    fn ready_stage_continuation_starts_audio_discovery_without_core_protocol_command() {
+        let mut machine = machine_at_set_connected();
+        let actions = machine.continue_ready_stage().unwrap();
+
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::DiscoveringAudioMember { member_index: 0 }
+        );
+        assert!(actions.iter().any(|action| {
+            matches!(action, ControlAction::BeginGatt(_))
+        }));
+    }

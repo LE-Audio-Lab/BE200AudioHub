@@ -3,6 +3,40 @@
 use super::*;
 
 impl ControlMachine {
+    /// Continue one internally ready product stage without inventing a new
+    /// Core command for protocol-local progression.
+    ///
+    /// This is composition glue: external waits still stop on their normal
+    /// report/timer cursors, while confirmed checkpoints advance into the next
+    /// Control-owned operation.
+    pub fn continue_ready_stage(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        match self.phase {
+            ControlPhase::SetConnected => self.begin_audio_discovery(),
+            ControlPhase::AudioSetDiscovered => {
+                self.plan_codec()?;
+                self.begin_codec_configuration()
+            }
+            ControlPhase::CodecConfigured => {
+                self.plan_iso()?;
+                self.begin_cig_configuration()
+            }
+            ControlPhase::CigConfigured => {
+                self.plan_qos()?;
+                self.begin_qos_configuration()
+            }
+            ControlPhase::QosConfigured => {
+                self.plan_enable()?;
+                self.begin_enable()
+            }
+            ControlPhase::Enabled => self.begin_cis_creation(),
+            ControlPhase::CisEstablished => self.begin_iso_path_setup(),
+            ControlPhase::IsoPathsReady => self.begin_streaming_gate(),
+            _ => Ok(Vec::new()),
+        }
+    }
+
     pub fn begin_stream_handoff(
         &mut self,
         session_id: SessionId,
