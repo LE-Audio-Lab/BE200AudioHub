@@ -16,5 +16,6 @@ pub(crate) mod enable_plan;
 pub(crate) mod iso_plan;
 pub(crate) mod machine;
 pub(crate) mod plan;
+pub(crate) mod plane;
 pub(crate) mod qos_plan;
 pub(crate) mod streaming_gate;
