@@ -67,7 +67,8 @@ use super::{
     iso_tx::{
         iso_group_fits, iso_group_packet_count, IsoDrainConfigError,
         IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
-        IsoSubmitOutcome,
+        IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
+        LogicalIsoSduGroupRequest,
     },
     link::{HciObservation, LinkFault, QueueHostTransport},
     privacy::{
@@ -106,6 +107,7 @@ pub enum EngineFault {
     IsoPathSendRejected { connection_handle: u16 },
     IsoDrainConfig(IsoDrainConfigError),
     IsoSduGroupConfig(IsoSduGroupConfigError),
+    LogicalIsoSduGroupConfig(LogicalIsoSduGroupConfigError),
     IsoControllerPoolUnavailable,
     IsoInputPathNotReady { connection_handle: u16 },
     IsoSduSendRejected { connection_handle: u16 },
@@ -854,6 +856,35 @@ impl HciEngine {
         let cis =
             self.resolve_stream_cis(session_id, stream_id, side)?;
         self.resolve_established_cis_handle(cis)
+    }
+
+    pub fn resolve_logical_iso_handles(
+        &self,
+        request: &LogicalIsoSduGroupRequest,
+    ) -> Result<Option<[u16; 2]>, EngineFault> {
+        request
+            .validate()
+            .map_err(EngineFault::LogicalIsoSduGroupConfig)?;
+
+        let Some(left) = self.resolve_stream_handle(
+            request.session_id,
+            request.stream_id,
+            AudioSide::Left,
+        ) else {
+            return Ok(None);
+        };
+        let Some(right) = self.resolve_stream_handle(
+            request.session_id,
+            request.stream_id,
+            AudioSide::Right,
+        ) else {
+            return Ok(None);
+        };
+
+        if left == right {
+            return Err(EngineFault::InvalidState);
+        }
+        Ok(Some([left, right]))
     }
 
     pub fn validate_iso_drain(
@@ -3531,6 +3562,20 @@ mod tests {
             Some(0x0901)
         );
 
+        let logical_group =
+            super::super::iso_tx::LogicalIsoSduGroupRequest {
+                session_id: route.session_id,
+                stream_id: route.stream_id,
+                left: vec![0x11; 100],
+                right: vec![0x22; 100],
+            };
+        assert_eq!(
+            engine
+                .resolve_logical_iso_handles(&logical_group)
+                .unwrap(),
+            Some([0x0900, 0x0901]),
+        );
+
         let group = super::super::iso_tx::IsoSduGroupRequest {
             sdus: vec![
                 super::super::iso_tx::IsoSduRequest {
@@ -3620,6 +3665,13 @@ mod tests {
             ),
             None,
             "removing a live Input Path must invalidate its logical route",
+        );
+        assert_eq!(
+            engine
+                .resolve_logical_iso_handles(&logical_group)
+                .unwrap(),
+            None,
+            "a stereo realtime group becomes stale atomically when either route disappears",
         );
         assert_eq!(
             engine.resolve_stream_handle(
