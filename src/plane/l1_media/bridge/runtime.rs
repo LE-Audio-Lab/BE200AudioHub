@@ -168,11 +168,9 @@ impl LogicalIsoTxBridge {
 #[cfg(test)]
 mod tests {
     use crate::{
-        architecture::{
-            control::{
-                LeAudioFormat, StreamBinding, StreamTopology,
-            },
-            types::{SessionId, StreamId},
+        architecture::types::{SessionId, StreamId},
+        plane::l1_control::interface::stream::{
+            LeAudioFormat, StreamBinding, StreamTopology,
         },
         plane::{
             l1_hci::{

@@ -10,7 +10,7 @@ use bumble_codecs::lc3::{
 };
 
 use crate::{
-    architecture::control::{LeAudioFormat, StreamBinding, StreamTopology},
+    plane::l1_control::interface::stream::{LeAudioFormat, StreamBinding, StreamTopology},
     plane::l1_media::interface::frame::EncodedStereoFrame,
 };
 

@@ -5,10 +5,7 @@
 //! waits for HCI/controller progress.
 
 use crate::{
-    architecture::{
-        control::StreamBinding,
-        types::AudioSide,
-    },
+    plane::l1_control::interface::stream::{AudioSide, StreamBinding},
     plane::{
         l1_hci::interface::iso_tx::LogicalIsoSduGroupRequest,
         l1_media::{
@@ -295,11 +292,9 @@ impl<P: Clone> IntervalGroupScheduler<P> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        architecture::{
-            control::{
-                LeAudioFormat, StreamBinding, StreamTopology,
-            },
-            types::{SessionId, StreamId},
+        architecture::types::{SessionId, StreamId},
+        plane::l1_control::interface::stream::{
+            LeAudioFormat, StreamBinding, StreamTopology,
         },
         plane::l1_media::{
             clock::frame::FrameId,

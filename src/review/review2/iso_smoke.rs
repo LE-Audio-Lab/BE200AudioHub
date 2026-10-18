@@ -22,9 +22,9 @@ use bumble_profiles::{
 };
 
 use crate::{
-    architecture::{
-        control::{LeAudioFormat, StreamBinding, StreamTopology},
-        types::{AudioSide, SessionId, StreamId},
+    architecture::types::{SessionId, StreamId},
+    plane::l1_control::interface::stream::{
+        AudioSide, LeAudioFormat, StreamBinding, StreamTopology,
     },
     plane::l1_media::{
         bridge::{

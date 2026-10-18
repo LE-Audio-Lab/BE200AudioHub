@@ -7,10 +7,10 @@
 
 use crate::{
     architecture::{
-        control::StreamBinding,
         stream_clock::{ClockLock, StreamClockSnapshot},
         types::{SessionId, StreamId},
     },
+    plane::l1_control::interface::stream::StreamBinding,
     plane::l1_media::clock::frame::FrameId,
 };
 
