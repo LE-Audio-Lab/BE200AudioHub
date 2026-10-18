@@ -26,11 +26,11 @@ use crate::{
         control::{LeAudioFormat, StreamBinding, StreamTopology},
         types::{AudioSide, SessionId, StreamId},
     },
-    iso_tx_bridge::{
-        runtime::{BridgeTxStep, LogicalIsoTxBridge},
-        FrameInsertOutcome, StereoFallback,
-    },
     plane::l1_media::{
+        bridge::{
+            runtime::{BridgeTxStep, LogicalIsoTxBridge},
+            scheduler::{FrameInsertOutcome, StereoFallback},
+        },
         codec::lc3::{encode_lc3_silence, prepare_synthetic_lc3},
         source::synthetic::SyntheticToneConfig,
     },

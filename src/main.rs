@@ -2,7 +2,6 @@ mod architecture;
 mod runtime;
 mod platform;
 mod plane;
-mod iso_tx_bridge;
 mod control;
 
 mod review;
