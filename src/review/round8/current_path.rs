@@ -401,6 +401,7 @@ fn process_timer(
     )
 }
 
+#[derive(Clone, Copy)]
 enum DriveTarget {
     StreamReadyUnbound,
     StreamBound,
