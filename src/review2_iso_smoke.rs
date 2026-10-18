@@ -22,7 +22,18 @@ use bumble_profiles::{
 };
 
 use crate::{
-    architecture::types::AudioSide,
+    architecture::{
+        control::{LeAudioFormat, StreamBinding, StreamTopology},
+        types::{AudioSide, SessionId, StreamId},
+    },
+    iso_tx_bridge::{
+        runtime::{BridgeTxStep, LogicalIsoTxBridge},
+        FrameInsertOutcome, StereoFallback,
+    },
+    media::{
+        lc3::{encode_lc3_silence, prepare_synthetic_lc3},
+        synthetic::SyntheticToneConfig,
+    },
     hci_host::{
         connection::ConnectionToken,
         gatt::{
@@ -31,7 +42,8 @@ use crate::{
         },
         iso::{
             CigAllocation, CigConfig, CigConfigureState, CisAclBinding,
-            CisConfig, CisCreateRequest, CisCreateState, EstablishedCis,
+            CisConfig, CisCreateRequest, CisCreateState, CisRef,
+            EstablishedCis,
         },
         iso_credit::IsoCreditSnapshot,
         iso_lifecycle::{CigRemoveState, CisDisconnectState},
@@ -45,6 +57,7 @@ use crate::{
         },
         mailbox::HciReport,
         stack::HciStack,
+        stream_route::{StereoStreamRouteBinding, StreamRouteState},
     },
     review2_bond_smoke::{
         open_dual_encrypted_bond_session_for_iso,
@@ -60,6 +73,9 @@ use crate::{
 const DEFAULT_FRAMES: usize = 100;
 const MAX_FRAMES: usize = 500;
 const OCTETS_PER_SDU: usize = 100;
+const PRODUCT_SESSION_ID: SessionId = SessionId(7);
+const PRODUCT_STREAM_ID: StreamId = StreamId(11);
+const PRODUCT_BRIDGE_START_LEAD_US: u64 = 20_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsoSmokeConfig {
@@ -1534,6 +1550,223 @@ fn submit_transport_frames(
             }
         }
     }
+    Ok(())
+}
+
+fn product_stream_binding() -> StreamBinding {
+    StreamBinding {
+        session_id: PRODUCT_SESSION_ID,
+        stream_id: PRODUCT_STREAM_ID,
+        format: LeAudioFormat {
+            sample_rate_hz: 48_000,
+            frame_duration_us: SDU_INTERVAL_US,
+            octets_per_sdu: OCTETS_PER_SDU as u16,
+        },
+        presentation_delay_us: PRESENTATION_DELAY_US,
+        topology: StreamTopology::StereoSplit,
+    }
+}
+
+fn bind_product_stream_route(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<(), String> {
+    let binding = StereoStreamRouteBinding {
+        session_id: PRODUCT_SESSION_ID,
+        stream_id: PRODUCT_STREAM_ID,
+        left: CisRef {
+            cig_id: CIG_ID,
+            cis_id: LEFT_CIS_ID,
+        },
+        right: CisRef {
+            cig_id: CIG_ID,
+            cis_id: RIGHT_CIS_ID,
+        },
+    };
+    stack
+        .control()
+        .try_bind_stream_route(binding)
+        .map_err(|error| {
+            format!("logical stream route bind submit: {error:?}")
+        })?;
+
+    wait_hci(
+        stack,
+        tracker,
+        HCI_STAGE_TIMEOUT,
+        "logical stream route bind",
+        |report| match report {
+            HciReport::StreamRouteState(StreamRouteState::Bound {
+                session_id,
+                stream_id,
+            }) if *session_id == PRODUCT_SESSION_ID
+                && *stream_id == PRODUCT_STREAM_ID =>
+            {
+                Some(Ok(()))
+            }
+            HciReport::StreamRouteState(StreamRouteState::Failed(
+                failure,
+            )) if failure.session_id == PRODUCT_SESSION_ID
+                && failure.stream_id == PRODUCT_STREAM_ID =>
+            {
+                Some(Err(format!(
+                    "logical stream route bind failed: {failure:?}"
+                )))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn unbind_product_stream_route(
+    stack: &HciStack,
+    tracker: &mut BondSmokeTracker,
+) -> Result<(), String> {
+    stack
+        .control()
+        .try_unbind_stream_route(
+            PRODUCT_SESSION_ID,
+            PRODUCT_STREAM_ID,
+        )
+        .map_err(|error| {
+            format!("logical stream route unbind submit: {error:?}")
+        })?;
+
+    wait_hci(
+        stack,
+        tracker,
+        HCI_STAGE_TIMEOUT,
+        "logical stream route unbind",
+        |report| match report {
+            HciReport::StreamRouteState(StreamRouteState::Unbound {
+                session_id,
+                stream_id,
+                was_bound: true,
+            }) if *session_id == PRODUCT_SESSION_ID
+                && *stream_id == PRODUCT_STREAM_ID =>
+            {
+                Some(Ok(()))
+            }
+            HciReport::StreamRouteState(StreamRouteState::Unbound {
+                session_id,
+                stream_id,
+                was_bound: false,
+            }) if *session_id == PRODUCT_SESSION_ID
+                && *stream_id == PRODUCT_STREAM_ID =>
+            {
+                Some(Err(
+                    "logical stream route was already absent during unbind"
+                        .into(),
+                ))
+            }
+            HciReport::StreamRouteState(StreamRouteState::Failed(
+                failure,
+            )) if failure.session_id == PRODUCT_SESSION_ID
+                && failure.stream_id == PRODUCT_STREAM_ID =>
+            {
+                Some(Err(format!(
+                    "logical stream route unbind failed: {failure:?}"
+                )))
+            }
+            _ => None,
+        },
+    )
+}
+
+fn submit_product_lc3_frames(
+    stack: &HciStack,
+    frame_count: usize,
+) -> Result<(), String> {
+    let binding = product_stream_binding();
+    let frame_count_u64 = u64::try_from(frame_count)
+        .map_err(|_| "frame count does not fit u64".to_string())?;
+    let frames = prepare_synthetic_lc3(
+        binding,
+        SyntheticToneConfig {
+            frame_count: frame_count_u64,
+            ..SyntheticToneConfig::default()
+        },
+    )
+    .map_err(|error| format!("LC3 synthetic preparation: {error:?}"))?;
+
+    let (silence_left, silence_right) =
+        encode_lc3_silence(binding.format)
+            .map_err(|error| {
+                format!("LC3 silence preparation: {error:?}")
+            })?;
+
+    let origin = Instant::now();
+    let mut bridge = LogicalIsoTxBridge::new(
+        binding,
+        PRODUCT_BRIDGE_START_LEAD_US,
+        frame_count,
+        StereoFallback {
+            left: silence_left,
+            right: silence_right,
+        },
+        stack.logical_iso_tx(),
+    )
+    .map_err(|error| format!("logical ISO bridge init: {error:?}"))?;
+
+    for frame in frames {
+        match bridge.push_encoded(frame) {
+            FrameInsertOutcome::Accepted => {}
+            other => {
+                return Err(format!(
+                    "logical ISO bridge preload rejected frame: {other:?}"
+                ))
+            }
+        }
+    }
+
+    let mut submitted = 0usize;
+    while submitted < frame_count {
+        let now_us = u64::try_from(origin.elapsed().as_micros())
+            .unwrap_or(u64::MAX);
+
+        match bridge
+            .on_wake(now_us)
+            .map_err(|error| {
+                format!("logical ISO bridge wake: {error:?}")
+            })?
+        {
+            BridgeTxStep::Wait { deadline_us, .. } => {
+                if deadline_us > now_us {
+                    thread::sleep(Duration::from_micros(
+                        deadline_us - now_us,
+                    ));
+                }
+            }
+            BridgeTxStep::Submitted {
+                frame_id,
+                skipped_intervals,
+                stale_frames_dropped,
+                ..
+            } => {
+                if skipped_intervals != 0
+                    || stale_frames_dropped != 0
+                {
+                    return Err(format!(
+                        "logical ISO scheduler missed absolute grid at frame {}: skipped={} stale_dropped={}",
+                        frame_id.0,
+                        skipped_intervals,
+                        stale_frames_dropped,
+                    ));
+                }
+                submitted += 1;
+            }
+            BridgeTxStep::DroppedBackpressure {
+                frame_id,
+                ..
+            } => {
+                return Err(format!(
+                    "logical HCI ISO lane backpressured frame {}; product bridge correctly dropped the interval",
+                    frame_id.0,
+                ))
+            }
+        }
+    }
+
     Ok(())
 }
 
