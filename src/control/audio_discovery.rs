@@ -23,8 +23,9 @@ use crate::hci_host::{
 };
 
 use super::audio_snapshot::{
-    AscsSinkSnapshot, AudioMemberSnapshot, CasSnapshot, GattServiceRange,
-    PacsSinkSnapshot, SinkAseSnapshot,
+    AscsSinkSnapshot, AudioMemberSnapshot, CasSnapshot,
+    GattCharacteristicRange, GattServiceRange, PacsSinkSnapshot,
+    SinkAseSnapshot,
 };
 
 pub const PACS_UUID: u16 = 0x1850;
@@ -606,11 +607,18 @@ impl AudioDiscoveryMachine {
                     .ascs_service
                     .expect("completed discovery missing ASCS"),
                 sink_ases: self.sink_ases.clone(),
-                control_point_handle: self
-                    .control_point
-                    .as_ref()
-                    .expect("completed discovery missing control point")
-                    .handle,
+                control_point: {
+                    let value = self
+                        .control_point
+                        .as_ref()
+                        .expect("completed discovery missing control point");
+                    GattCharacteristicRange {
+                        declaration_handle: value.declaration_handle,
+                        value_handle: value.handle,
+                        end_group_handle: value.end_group_handle,
+                        properties: value.properties,
+                    }
+                },
             },
             cas: CasSnapshot {
                 service: self
@@ -1030,7 +1038,7 @@ mod tests {
         assert_eq!(snapshot.ascs.sink_ases[0].status.ase_id, 1);
         assert_eq!(snapshot.ascs.sink_ases[1].status.ase_id, 2);
         assert_eq!(
-            snapshot.ascs.control_point_handle,
+            snapshot.ascs.control_point.value_handle,
             0x42
         );
         assert_eq!(
