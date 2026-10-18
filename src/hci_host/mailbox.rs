@@ -22,10 +22,14 @@ use super::{
     gatt::{GattReport, GattRequest, GattRequestId},
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
+        CisRef,
     },
     iso_credit::IsoCreditSnapshot,
     iso_host_feature::CisHostFeatureState,
-    iso_lifecycle::{CigRemoveState, CisDisconnectState},
+    iso_lifecycle::{
+        CigRemoveState, CisDisconnectState,
+        SemanticCisDisconnectState,
+    },
     iso_path::{IsoDataPathConfig, IsoPathOperationState},
     iso_tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
@@ -50,6 +54,7 @@ pub enum HciCommand {
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     DisconnectCis { connection_handle: u16 },
+    DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     SetupIsoPath(IsoDataPathConfig),
     RemoveIsoPath {
@@ -83,6 +88,7 @@ pub enum HciReport {
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
     CisDisconnectState(CisDisconnectState),
+    SemanticCisDisconnectState(SemanticCisDisconnectState),
     CigRemoveState(CigRemoveState),
     IsoPathState(IsoPathOperationState),
     IsoDrainState(IsoDrainState),
@@ -303,6 +309,15 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_disconnect_cis_by_ref(
+        &self,
+        cis: CisRef,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::DisconnectCisByRef { cis })
+            .map_err(map_send_error)
+    }
+
     pub fn try_remove_cig(&self, cig_id: u8) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::RemoveCig { cig_id })
@@ -510,6 +525,22 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::ConfigureCig(config)
+        );
+    }
+
+    #[test]
+    fn semantic_cis_disconnect_uses_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 2, 1, 1);
+        let cis = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+
+        control.try_disconnect_cis_by_ref(cis).unwrap();
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::DisconnectCisByRef { cis }
         );
     }
 
