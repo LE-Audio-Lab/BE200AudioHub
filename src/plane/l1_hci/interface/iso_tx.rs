@@ -1,8 +1,10 @@
 use crossbeam_channel::{Sender, TrySendError};
 
+pub use crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest;
+
 use crate::{
     plane::l1_hci::iso::tx::{
-        IsoDataGroupRequest, IsoSduGroupRequest, LogicalIsoSduGroupRequest,
+        IsoDataGroupRequest, IsoSduGroupRequest,
     },
     runtime::mailbox::SendError,
 };

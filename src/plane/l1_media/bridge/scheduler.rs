@@ -10,7 +10,7 @@ use crate::{
         types::AudioSide,
     },
     plane::{
-        l1_hci::iso::tx::LogicalIsoSduGroupRequest,
+        l1_hci::interface::iso_tx::LogicalIsoSduGroupRequest,
         l1_media::{
             clock::{
                 frame::FrameId,
