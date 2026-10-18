@@ -6,8 +6,3 @@
 
 pub mod synthetic;
 
-pub use synthetic::{
-    PcmStereoFrame, SyntheticToneConfig, SyntheticToneSource,
-    FRAME_DURATION_US, FRAMES_PER_SECOND, SAMPLE_RATE_HZ,
-    SAMPLES_PER_FRAME,
-};
