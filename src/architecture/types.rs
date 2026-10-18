@@ -1,9 +1,6 @@
-//! Transitional logical identities not yet assigned their final V2 owner.
+//! Transitional import path during Round 6 architecture retirement.
 //!
-//! AudioSide moved to L1-Control/interface/stream in Round 5.
+//! The identity types are owned by Core/Lifecycle. This file defines no new
+//! identity and is removed once all consumers use the Core path.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SessionId(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StreamId(pub u64);
+pub use crate::core::lifecycle::{SessionId, StreamId};

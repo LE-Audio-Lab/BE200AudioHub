@@ -1,43 +1,8 @@
-//! L0 — LifeCycle / Orchestration.
+//! Transitional import path during Round 6 architecture retirement.
 //!
-//! Owns desired state, generation, session lifetime, recovery policy and
-//! ordered startup/teardown. It does not own Bluetooth packet semantics.
+//! Lifecycle ownership is in Core/Lifecycle. This file defines no duplicate
+//! state and is removed after Condition/Core consumers switch paths.
 
-use super::types::SessionId;
-use crate::runtime::generation::Generation;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LifecycleState {
-    Stopped,
-    Starting,
-    Waiting,
-    Running,
-    Recovering,
-    Stopping,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionState {
-    Idle,
-    Preparing,
-    Priming,
-    Streaming,
-    Draining,
-    TearingDown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecoveryClass {
-    RestartMedia,
-    RebuildStream,
-    RestartController,
-    RestartWorker,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LifecycleSnapshot {
-    pub generation: Generation,
-    pub session_id: Option<SessionId>,
-    pub lifecycle: LifecycleState,
-    pub session: SessionState,
-}
+pub use crate::core::lifecycle::{
+    LifecycleSnapshot, LifecycleState, RecoveryClass, SessionState,
+};
