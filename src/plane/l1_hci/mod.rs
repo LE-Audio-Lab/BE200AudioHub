@@ -7,3 +7,4 @@ pub mod gatt;
 pub mod host;
 pub mod iso;
 pub mod interface;
+pub mod telemetry;
