@@ -1,7 +1,4 @@
-pub mod acl_credit;
-pub mod connection;
 pub mod engine;
-pub mod gatt;
 pub mod iso;
 pub mod iso_credit;
 pub mod iso_host_feature;
@@ -10,9 +7,6 @@ pub mod iso_path;
 pub mod iso_tx;
 pub mod link;
 pub mod mailbox;
-pub mod privacy;
-pub mod scan;
-pub mod security;
 pub mod stream_route;
 pub mod smoke;
 pub mod stack;
