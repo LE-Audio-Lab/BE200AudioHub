@@ -14,8 +14,15 @@ use crate::{
         ControllerIdentityFailure, OperationalAttachFailure,
         OperationalAttachState, PassiveScanState,
     },
+    iso::{
+        CigAllocation, CigConfig, CigConfigureFailure,
+        CigConfigureState,
+    },
     iso_host_feature::{
         CisHostFeatureFailure, CisHostFeatureState,
+    },
+    iso_lifecycle::{
+        CigRemoveFailure, CigRemoveState,
     },
     gatt::{GattReport, GattRequest, GattRequestId},
     mailbox::HciReport,
@@ -49,6 +56,9 @@ use super::{
         resolve_connectable_members, ControlDiscoveryError,
         ResolvedMemberPresence,
     },
+    iso_plan::{
+        plan_first_iso, IsoPlanError, StereoIsoPlan,
+    },
     plan::{ControlPlanError, ControlSetPlan},
 };
 
@@ -72,6 +82,9 @@ pub enum ControlPhase {
     PreparingCodecAse { side: AudioSide },
     ConfiguringCodec { side: AudioSide },
     CodecConfigured,
+    IsoPlanned,
+    ConfiguringCig,
+    CigConfigured,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -95,6 +108,8 @@ pub enum ControlTimer {
         request_id: GattRequestId,
     },
     AseOperation { side: AudioSide },
+    CigConfig,
+    CleanupCig { cig_id: u8 },
     CleanupDisconnect(ConnectionToken),
     CleanupPrivacy,
 }
@@ -120,6 +135,8 @@ pub enum ControlAction {
         connection: ConnectionToken,
     },
     ClearControllerPrivacy,
+    ConfigureCig(CigConfig),
+    RemoveCig { cig_id: u8 },
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -131,6 +148,7 @@ pub enum ControlAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlCleanupFailure {
+    CigRemove(CigRemoveFailure),
     Disconnect(DisconnectFailure),
     Privacy(PrivacyFailure),
     Timeout(ControlTimer),
@@ -196,6 +214,17 @@ pub enum ControlFailure {
         side: AudioSide,
         detail: String,
     },
+    IsoPlan(IsoPlanError),
+    CigAllocationMismatch {
+        expected_cig_id: u8,
+        actual_cig_id: u8,
+        expected_cis_ids: Vec<u8>,
+        actual_cis_ids: Vec<u8>,
+    },
+    CigConfigure(CigConfigureFailure),
+    CigConfigureTimeout {
+        cig_id: u8,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -228,6 +257,9 @@ pub struct ControlMachine {
     ase_operation: Option<AseOperationMachine>,
     prepared_ases: [Option<PreparedAseControl>; 2],
     codec_statuses: [Option<AseStatus>; 2],
+    iso_plan: Option<StereoIsoPlan>,
+    cig_may_exist: bool,
+    rollback_cig_pending: bool,
     failure: Option<ControlFailure>,
 }
 
@@ -253,6 +285,9 @@ impl ControlMachine {
             ase_operation: None,
             prepared_ases: [None, None],
             codec_statuses: [None, None],
+            iso_plan: None,
+            cig_may_exist: false,
+            rollback_cig_pending: false,
             failure: None,
         })
     }
@@ -295,6 +330,44 @@ impl ControlMachine {
         self.codec_statuses[side_index(side)].as_ref()
     }
 
+    pub fn iso_plan(&self) -> Option<&StereoIsoPlan> {
+        self.iso_plan.as_ref()
+    }
+
+    pub fn plan_iso(
+        &mut self,
+    ) -> Result<(), ControlFailure> {
+        if self.phase != ControlPhase::CodecConfigured {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let codec = self
+            .codec_plan
+            .as_ref()
+            .expect("CodecConfigured requires codec plan");
+        let plan = plan_first_iso(codec)
+            .map_err(ControlFailure::IsoPlan)?;
+        self.iso_plan = Some(plan);
+        self.phase = ControlPhase::IsoPlanned;
+        Ok(())
+    }
+
+    pub fn begin_cig_configuration(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::IsoPlanned {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let plan = self
+            .iso_plan
+            .as_ref()
+            .expect("IsoPlanned requires ISO plan");
+        self.phase = ControlPhase::ConfiguringCig;
+        Ok(vec![
+            ControlAction::ConfigureCig(plan.cig_config()),
+            ControlAction::ArmTimer(ControlTimer::CigConfig),
+        ])
+    }
+
     pub fn begin_codec_configuration(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -321,6 +394,9 @@ impl ControlMachine {
         let plan = plan_first_stream(set)
             .map_err(ControlFailure::CodecPlan)?;
         self.codec_plan = Some(plan);
+        self.iso_plan = None;
+        self.cig_may_exist = false;
+        self.rollback_cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
         self.prepared_ases = [None, None];
@@ -338,6 +414,9 @@ impl ControlMachine {
         self.audio_members.clear();
         self.audio_set = None;
         self.codec_plan = None;
+        self.iso_plan = None;
+        self.cig_may_exist = false;
+        self.rollback_cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
         self.prepared_ases = [None, None];
@@ -575,6 +654,44 @@ impl ControlMachine {
                 actions.extend(self.begin_rollback(
                     ControlFailure::AseOperationTimeout { side },
                 )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CigConfig,
+            ) if self.phase == ControlPhase::ConfiguringCig =>
+            {
+                let cig_id = self
+                    .iso_plan
+                    .as_ref()
+                    .expect("ConfiguringCig requires ISO plan")
+                    .cig_id;
+                // The command may have reached the controller even if the
+                // completion is lost. Treat allocation as possible.
+                self.cig_may_exist = true;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CigConfig,
+                )];
+                actions.extend(self.begin_rollback(
+                    ControlFailure::CigConfigureTimeout { cig_id },
+                )?);
+                Ok(actions)
+            }
+            ControlEvent::TimerExpired(
+                ControlTimer::CleanupCig { cig_id },
+            ) if self.phase == ControlPhase::RollingBack
+                && self.rollback_cig_pending =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupCig { cig_id },
+                    ),
+                );
+                self.rollback_cig_pending = false;
+                self.cig_may_exist = false;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupCig { cig_id },
+                )];
+                actions.extend(self.continue_rollback()?);
                 Ok(actions)
             }
             ControlEvent::TimerExpired(
@@ -892,6 +1009,105 @@ impl ControlMachine {
                         ControlTimer::CancelConnect { member_index },
                     ),
                 ];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+
+            (
+                ControlPhase::ConfiguringCig,
+                HciReport::CigConfigureState(
+                    CigConfigureState::Ready(allocation),
+                ),
+            ) => {
+                let plan = self
+                    .iso_plan
+                    .as_ref()
+                    .expect("ConfiguringCig requires ISO plan");
+                if !cig_allocation_matches_plan(allocation, plan) {
+                    let expected_cis_ids =
+                        vec![plan.left.cis_id, plan.right.cis_id];
+                    let actual_cis_ids = allocation
+                        .cis
+                        .iter()
+                        .map(|cis| cis.cis_id)
+                        .collect::<Vec<_>>();
+                    self.cig_may_exist = true;
+                    let mut actions = vec![
+                        ControlAction::DisarmTimer(
+                            ControlTimer::CigConfig,
+                        ),
+                    ];
+                    actions.extend(self.begin_rollback(
+                        ControlFailure::CigAllocationMismatch {
+                            expected_cig_id: plan.cig_id,
+                            actual_cig_id: allocation.cig_id,
+                            expected_cis_ids,
+                            actual_cis_ids,
+                        },
+                    )?);
+                    return Ok(actions);
+                }
+
+                self.cig_may_exist = true;
+                self.phase = ControlPhase::CigConfigured;
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::CigConfig,
+                )])
+            }
+            (
+                ControlPhase::ConfiguringCig,
+                HciReport::CigConfigureState(
+                    CigConfigureState::Failed(failure),
+                ),
+            ) => {
+                self.cig_may_exist = failure.may_have_allocated;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CigConfig,
+                )];
+                actions.extend(self.begin_rollback(
+                    ControlFailure::CigConfigure(failure.clone()),
+                )?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::CigRemoveState(
+                    CigRemoveState::Removed { cig_id },
+                ),
+            ) if self.rollback_cig_pending
+                && self
+                    .iso_plan
+                    .as_ref()
+                    .map(|plan| plan.cig_id)
+                    == Some(*cig_id) =>
+            {
+                self.rollback_cig_pending = false;
+                self.cig_may_exist = false;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupCig { cig_id: *cig_id },
+                )];
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::CigRemoveState(
+                    CigRemoveState::Failed(failure),
+                ),
+            ) if self.rollback_cig_pending =>
+            {
+                self.cleanup_failures.push(
+                    ControlCleanupFailure::CigRemove(
+                        failure.clone(),
+                    ),
+                );
+                self.rollback_cig_pending = false;
+                self.cig_may_exist = false;
+                let mut actions = vec![ControlAction::DisarmTimer(
+                    ControlTimer::CleanupCig {
+                        cig_id: failure.cig_id,
+                    },
+                )];
                 actions.extend(self.continue_rollback()?);
                 Ok(actions)
             }
@@ -1494,6 +1710,24 @@ impl ControlMachine {
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.phase = ControlPhase::RollingBack;
 
+        if self.cig_may_exist {
+            if self.rollback_cig_pending {
+                return Ok(Vec::new());
+            }
+            let cig_id = self
+                .iso_plan
+                .as_ref()
+                .expect("CIG cleanup requires ISO plan")
+                .cig_id;
+            self.rollback_cig_pending = true;
+            return Ok(vec![
+                ControlAction::RemoveCig { cig_id },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupCig { cig_id },
+                ),
+            ]);
+        }
+
         if self.rollback_current.is_none() {
             if let Some(connection) = self.rollback_queue.pop() {
                 self.rollback_current = Some(connection);
@@ -1613,6 +1847,29 @@ impl ControlMachine {
         self.failure = Some(failure.clone());
         Err(failure)
     }
+}
+
+fn cig_allocation_matches_plan(
+    allocation: &CigAllocation,
+    plan: &StereoIsoPlan,
+) -> bool {
+    if allocation.cig_id != plan.cig_id
+        || allocation.cis.len() != 2
+    {
+        return false;
+    }
+
+    let mut actual = allocation
+        .cis
+        .iter()
+        .map(|cis| cis.cis_id)
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+
+    let mut expected =
+        vec![plan.left.cis_id, plan.right.cis_id];
+    expected.sort_unstable();
+    actual == expected
 }
 
 fn side_index(side: AudioSide) -> usize {
