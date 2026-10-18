@@ -153,11 +153,18 @@ mod tests {
             control::{
                 LeAudioFormat, StreamBinding, StreamTopology,
             },
-            media::EncodedStereoFrame,
-            types::{FrameId, SessionId, StreamId},
+            types::{SessionId, StreamId},
         },
-        plane::l1_hci::interface::mailbox::hci_mailbox_with_iso,
-        plane::l1_hci::iso::tx::IsoDataGroupRequest,
+        plane::{
+            l1_hci::{
+                interface::mailbox::hci_mailbox_with_iso,
+                iso::tx::IsoDataGroupRequest,
+            },
+            l1_media::{
+                clock::frame::FrameId,
+                interface::frame::EncodedStereoFrame,
+            },
+        },
     };
 
     use super::*;

@@ -301,15 +301,16 @@ mod tests {
             control::{
                 LeAudioFormat, StreamBinding, StreamTopology,
             },
-            media::EncodedStereoFrame,
-            types::{FrameId, SessionId, StreamId},
+            types::{SessionId, StreamId},
         },
-        media::{
-            lc3::{
+        plane::l1_media::{
+            clock::frame::FrameId,
+            codec::lc3::{
                 encode_lc3_silence,
                 prepare_synthetic_lc3,
             },
-            synthetic::SyntheticToneConfig,
+            interface::frame::EncodedStereoFrame,
+            source::synthetic::SyntheticToneConfig,
         },
     };
 
