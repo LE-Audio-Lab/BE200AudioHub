@@ -89,7 +89,8 @@ mod tests {
                 StreamHandoffAdmission::SessionMismatch,
             )),
         );
-    
+    }
+
     #[test]
     fn stop_control_requires_a_bound_stream_projection() {
         let mut condition = test_condition();
