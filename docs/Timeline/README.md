@@ -1,6 +1,6 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1；Round6 跨越原网页会话与 successor-chat continuation，最终完成 Review-2A/2B/2C/2D 的软件实现与真实 HIL、ToolHub 构建纪律和 Apache-2.0 项目治理。聊天迁移只作为 Round6 内部历史边界，不再视为 Engineering Round 边界；Round7 从 Control semantic migration 开始。旧 Round 原文不回写，新阶段以独立 Round 追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 记录 R5.3 Experiment 封板与 Review-1；Round6 完成 Review-2A/2B/2C/2D software + real HIL 并正式封板；Round7 当前正在推进 Control semantic migration 与产品 Media/Clock/Bridge/logical-HCI 数据面。Round7 已达到 valid-LC3 First Sound **HIL READY / NOT YET RUN**，聊天迁移不视为 Engineering Round 结束。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
 **时间范围**：2026-10-11—持续更新；**活动分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
@@ -17,10 +17,11 @@
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
 | [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
 | [Round6.md](./Round6.md) | **Round6**：Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部发生 chat migration，但 Round6 最终在 Review-2D HIL 后封板 |
+| [Round7.md](./Round7.md) | **Round7（ACTIVE）**：Control semantic path、StreamBinding/route ACK、LocalStreamClock、valid LC3、IsoTxBridge、logical HCI ISO lane；First Sound HIL ready / not yet run |
 
 ## 推荐阅读顺序
 
-需要快速接手当前 Review：**README → TIMELINE → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**。需要追溯 Experiment 成功基线再看 Round5/Round4/Round3；调查固件/硬件再看 Round1。
+需要快速接手当前 Review：**README → TIMELINE → Round7 → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**。需要追溯 Experiment 成功基线再看 Round5/Round4/Round3；调查固件/硬件再看 Round1。
 
 需要完整追溯：直接阅读 **AllRounds.md**，或四份 Round 原文。它们是**历史快照**：Round1 文档的“尚无 ACL”和 Round2 文档的“尚无 SMP”是当时真实状态，但都已在后续 Round 得到新的 HIL 证明；**不得**截取早期状态冒充项目当前状态。遇新旧结论矛盾，以更晚的独立 HIL/源码证据更新当前视图，同时保留原文。
 
@@ -54,10 +55,12 @@
 | **Review-2B Privacy / Dual ACL / Stored LTK** | **Software + HIL PASS** |
 | **Review-2C ACL / L2CAP / ATT / GATT** | **Software + HIL PASS** |
 | **Review-2D CIG / CIS / ISO Host** | **Software + HIL PASS** |
+| **Round7 Control semantic path** | **Software PASS / HIL-ready** |
+| **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software PASS / First Sound HIL READY / NOT YET RUN** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
-**下一步 / Round7 起点**：Control semantic migration。Round6 已正式完成 Review-2A/2B/2C/2D；Review-2D successor-chat implementation 与 real HIL 现在计入 Round6 工程成果。详见 [Round6.md](./Round6.md) §17–§24 和 [TIMELINE.md](./TIMELINE.md)。
+**当前 Round7 checkpoint**：Control semantic path 与产品 valid-LC3 Media/Clock/Bridge/logical-HCI 数据面软件实现已完成，专用 `round7 first-sound` 真机入口已就绪；**尚未执行该 HIL**。下一步是在 Windows 真机运行 First Sound HIL，成功后再推进 full Core/Lifecycle runtime integration。详见 [Round7.md](./Round7.md) 与 [TIMELINE.md](./TIMELINE.md)。
 
 ## 新 Round 维护规则
 
@@ -74,7 +77,7 @@ Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Rev
 
 当前最短阅读顺序：
 
-**README → TIMELINE → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**
+**README → TIMELINE → Round7 → Round6 → BUG_FIX_REGISTER → docs/reference-index/README.md**
 
 当前工程门槛：
 
@@ -85,4 +88,7 @@ Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Rev
 - Review-2C ACL/L2CAP/ATT/GATT：complete + real HIL PASS；
 - Review-2D CIG/CIS/ISO Host：complete + real HIL PASS；
 - Round6：正式封板；
-- Round7：从 Control semantic migration 开始。
+- Round7 Control semantic path：software complete；
+- Round7 Media/Clock/Bridge/logical-HCI data plane：software complete；
+- Round7 valid-LC3 First Sound HIL：ready / not yet run；
+- full Core/Lifecycle runtime、egui、WASAPI/ASRC：后续。
