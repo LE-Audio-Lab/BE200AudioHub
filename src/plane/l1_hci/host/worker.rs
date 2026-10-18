@@ -1078,8 +1078,8 @@ mod tests {
         }
     }
 
-    fn route_binding() -> super::super::stream_route::StereoStreamRouteBinding {
-        super::super::stream_route::StereoStreamRouteBinding {
+    fn route_binding() -> crate::hci_host::stream_route::StereoStreamRouteBinding {
+        crate::hci_host::stream_route::StereoStreamRouteBinding {
             session_id: crate::architecture::types::SessionId(7),
             stream_id: crate::architecture::types::StreamId(11),
             left: crate::hci_host::iso::CisRef {
@@ -1194,7 +1194,7 @@ mod tests {
         );
 
         let config =
-            super::super::stream_route::StreamRouteConfigError::
+            crate::hci_host::stream_route::StreamRouteConfigError::
                 DuplicateCis(binding.left);
         assert_eq!(
             stream_route_bind_ack(

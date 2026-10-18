@@ -3213,8 +3213,8 @@ mod tests {
         ])
     }
 
-    fn cig_config() -> super::super::iso::CigConfig {
-        let cis = |cis_id| super::super::iso::CisConfig {
+    fn cig_config() -> crate::hci_host::iso::CigConfig {
+        let cis = |cis_id| crate::hci_host::iso::CisConfig {
             cis_id,
             max_sdu_c_to_p: 100,
             max_sdu_p_to_c: 0,
@@ -3223,7 +3223,7 @@ mod tests {
             rtn_c_to_p: 13,
             rtn_p_to_c: 0,
         };
-        super::super::iso::CigConfig {
+        crate::hci_host::iso::CigConfig {
             cig_id: 1,
             sdu_interval_c_to_p: 10_000,
             sdu_interval_p_to_c: 10_000,
@@ -3236,7 +3236,7 @@ mod tests {
         }
     }
 
-    fn single_cig_config() -> super::super::iso::CigConfig {
+    fn single_cig_config() -> crate::hci_host::iso::CigConfig {
         let mut config = cig_config();
         config.cis.truncate(1);
         config
@@ -3251,7 +3251,7 @@ mod tests {
         assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
         assert_eq!(
             engine.cig_configure_state(),
-            &super::super::iso::CigConfigureState::Configuring
+            &crate::hci_host::iso::CigConfigureState::Configuring
         );
 
         engine
@@ -3265,15 +3265,15 @@ mod tests {
 
         assert_eq!(
             engine.cig_configure_state(),
-            &super::super::iso::CigConfigureState::Ready(
-                super::super::iso::CigAllocation {
+            &crate::hci_host::iso::CigConfigureState::Ready(
+                crate::hci_host::iso::CigAllocation {
                     cig_id: 1,
                     cis: vec![
-                        super::super::iso::CisAllocation {
+                        crate::hci_host::iso::CisAllocation {
                             cis_id: 1,
                             connection_handle: 0x0040,
                         },
-                        super::super::iso::CisAllocation {
+                        crate::hci_host::iso::CisAllocation {
                             cis_id: 2,
                             connection_handle: 0x0041,
                         },
@@ -3304,7 +3304,7 @@ mod tests {
         assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2065);
         assert_eq!(
             engine.cig_remove_state(),
-            &super::super::iso_lifecycle::CigRemoveState::Removing {
+            &crate::hci_host::iso_lifecycle::CigRemoveState::Removing {
                 cig_id: 1,
             }
         );
@@ -3314,17 +3314,17 @@ mod tests {
 
         assert_eq!(
             engine.cig_remove_state(),
-            &super::super::iso_lifecycle::CigRemoveState::Removed {
+            &crate::hci_host::iso_lifecycle::CigRemoveState::Removed {
                 cig_id: 1,
             }
         );
         assert_eq!(
             engine.cig_configure_state(),
-            &super::super::iso::CigConfigureState::Idle
+            &crate::hci_host::iso::CigConfigureState::Idle
         );
         assert_eq!(
             engine.cis_create_state(),
-            &super::super::iso::CisCreateState::Idle
+            &crate::hci_host::iso::CisCreateState::Idle
         );
     }
 
@@ -3371,14 +3371,14 @@ mod tests {
 
         engine
             .begin_cis_creation(
-                super::super::iso::CisCreateRequest {
+                crate::hci_host::iso::CisCreateRequest {
                     cig_id: 1,
                     bindings: vec![
-                        super::super::iso::CisAclBinding {
+                        crate::hci_host::iso::CisAclBinding {
                             cis_id: 1,
                             acl: first,
                         },
-                        super::super::iso::CisAclBinding {
+                        crate::hci_host::iso::CisAclBinding {
                             cis_id: 2,
                             acl: second,
                         },
@@ -3394,14 +3394,14 @@ mod tests {
         );
         assert_eq!(
             engine.cis_create_state(),
-            &super::super::iso::CisCreateState::Submitting { cig_id: 1 }
+            &crate::hci_host::iso::CisCreateState::Submitting { cig_id: 1 }
         );
 
         engine.ingest(command_status(create_opcode, 0)).unwrap();
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_create_state(),
-            &super::super::iso::CisCreateState::AwaitingEstablished {
+            &crate::hci_host::iso::CisCreateState::AwaitingEstablished {
                 cig_id: 1,
                 established: vec![],
             }
@@ -3411,7 +3411,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.cis_create_state(),
-            super::super::iso::CisCreateState::AwaitingEstablished {
+            crate::hci_host::iso::CisCreateState::AwaitingEstablished {
                 cig_id: 1,
                 established,
             } if established.len() == 1
@@ -3421,7 +3421,7 @@ mod tests {
         engine.ingest(cis_established(0x0900, 0)).unwrap();
         engine.poll_until_quiescent().unwrap();
 
-        let super::super::iso::CisCreateState::Ready {
+        let crate::hci_host::iso::CisCreateState::Ready {
             cig_id,
             established,
         } = engine.cis_create_state()
@@ -3450,7 +3450,7 @@ mod tests {
         assert!(engine.device().cis_link(0x0900).is_some());
         assert!(matches!(
             engine.cis_create_state(),
-            super::super::iso::CisCreateState::Ready {
+            crate::hci_host::iso::CisCreateState::Ready {
                 cig_id: 1,
                 established,
             } if established.len() == 1
@@ -3470,7 +3470,7 @@ mod tests {
         assert!(engine.device().cis_link(0x0900).is_none());
         assert_eq!(
             engine.cis_create_state(),
-            &super::super::iso::CisCreateState::Idle
+            &crate::hci_host::iso::CisCreateState::Idle
         );
 
         engine.begin_cig_removal(1).unwrap();
@@ -3516,14 +3516,14 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
 
         engine
-            .begin_cis_creation(super::super::iso::CisCreateRequest {
+            .begin_cis_creation(crate::hci_host::iso::CisCreateRequest {
                 cig_id: 1,
                 bindings: vec![
-                    super::super::iso::CisAclBinding {
+                    crate::hci_host::iso::CisAclBinding {
                         cis_id: 1,
                         acl,
                     },
-                    super::super::iso::CisAclBinding {
+                    crate::hci_host::iso::CisAclBinding {
                         cis_id: 2,
                         acl,
                     },
@@ -3538,16 +3538,16 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
 
         let route =
-            super::super::stream_route::StereoStreamRouteBinding {
+            crate::hci_host::stream_route::StereoStreamRouteBinding {
                 session_id:
                     crate::architecture::types::SessionId(7),
                 stream_id:
                     crate::architecture::types::StreamId(11),
-                left: super::super::iso::CisRef {
+                left: crate::hci_host::iso::CisRef {
                     cig_id: 1,
                     cis_id: 1,
                 },
-                right: super::super::iso::CisRef {
+                right: crate::hci_host::iso::CisRef {
                     cig_id: 1,
                     cis_id: 2,
                 },
@@ -3563,7 +3563,7 @@ mod tests {
         for handle in [0x0900, 0x0901] {
             engine
                 .begin_iso_path_setup(
-                    super::super::iso_path::IsoDataPathConfig::hci_input(
+                    crate::hci_host::iso_path::IsoDataPathConfig::hci_input(
                         handle,
                     ),
                 )
@@ -3609,7 +3609,7 @@ mod tests {
         );
 
         let logical_group =
-            super::super::iso_tx::LogicalIsoSduGroupRequest {
+            crate::hci_host::iso_tx::LogicalIsoSduGroupRequest {
                 session_id: route.session_id,
                 stream_id: route.stream_id,
                 left: vec![0x11; 100],
@@ -3622,13 +3622,13 @@ mod tests {
             Some([0x0900, 0x0901]),
         );
 
-        let group = super::super::iso_tx::IsoSduGroupRequest {
+        let group = crate::hci_host::iso_tx::IsoSduGroupRequest {
             sdus: vec![
-                super::super::iso_tx::IsoSduRequest {
+                crate::hci_host::iso_tx::IsoSduRequest {
                     connection_handle: 0x0900,
                     payload: vec![0x11; 100],
                 },
-                super::super::iso_tx::IsoSduRequest {
+                crate::hci_host::iso_tx::IsoSduRequest {
                     connection_handle: 0x0901,
                     payload: vec![0x22; 100],
                 },
@@ -3638,7 +3638,7 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(
                 engine.submit_iso_group(&group).unwrap(),
-                super::super::iso_tx::IsoSubmitOutcome::Accepted
+                crate::hci_host::iso_tx::IsoSubmitOutcome::Accepted
             );
             engine.poll_until_quiescent().unwrap();
         }
@@ -3647,7 +3647,7 @@ mod tests {
 
         assert_eq!(
             engine.submit_iso_group(&group).unwrap(),
-            super::super::iso_tx::IsoSubmitOutcome::Backpressured
+            crate::hci_host::iso_tx::IsoSubmitOutcome::Backpressured
         );
         assert_eq!(engine.device().iso_packets_pending(), Some(8));
 
@@ -3671,7 +3671,7 @@ mod tests {
             engine
                 .submit_logical_iso_group(&logical_group)
                 .unwrap(),
-            Some(super::super::iso_tx::IsoSubmitOutcome::Accepted)
+            Some(crate::hci_host::iso_tx::IsoSubmitOutcome::Accepted)
         );
         engine.poll_until_quiescent().unwrap();
         assert_eq!(engine.iso_credit_audit.in_flight(), 2);
@@ -3767,9 +3767,9 @@ mod tests {
 
         engine
             .begin_cis_creation(
-                super::super::iso::CisCreateRequest {
+                crate::hci_host::iso::CisCreateRequest {
                     cig_id: 1,
-                    bindings: vec![super::super::iso::CisAclBinding {
+                    bindings: vec![crate::hci_host::iso::CisAclBinding {
                         cis_id: 1,
                         acl,
                     }],
@@ -3787,13 +3787,13 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.cis_create_state(),
-            super::super::iso::CisCreateState::Ready { established, .. }
+            crate::hci_host::iso::CisCreateState::Ready { established, .. }
                 if established.len() == 1
                     && established[0].link.connection_handle == 0x0900
         ));
 
         let setup =
-            super::super::iso_path::IsoDataPathConfig::hci_input(0x0900);
+            crate::hci_host::iso_path::IsoDataPathConfig::hci_input(0x0900);
         engine.begin_iso_path_setup(setup.clone()).unwrap();
         assert_eq!(
             command_opcode(rx.try_recv().unwrap()),
@@ -3801,7 +3801,7 @@ mod tests {
         );
         assert_eq!(
             engine.iso_path_state(),
-            &super::super::iso_path::IsoPathOperationState::SettingUp(
+            &crate::hci_host::iso_path::IsoPathOperationState::SettingUp(
                 setup.clone()
             )
         );
@@ -3817,10 +3817,10 @@ mod tests {
 
         assert_eq!(
             engine.iso_path_state(),
-            &super::super::iso_path::IsoPathOperationState::SetupComplete {
+            &crate::hci_host::iso_path::IsoPathOperationState::SetupComplete {
                 connection_handle: 0x0900,
                 direction:
-                    super::super::iso_path::IsoDataPathDirection::Input,
+                    crate::hci_host::iso_path::IsoDataPathDirection::Input,
             }
         );
         assert_eq!(
@@ -3835,7 +3835,7 @@ mod tests {
         );
         assert_eq!(
             engine.iso_path_state(),
-            &super::super::iso_path::IsoPathOperationState::Removing {
+            &crate::hci_host::iso_path::IsoPathOperationState::Removing {
                 connection_handle: 0x0900,
                 directions: 0x01,
             }
@@ -3852,14 +3852,14 @@ mod tests {
 
         assert_eq!(
             engine.iso_path_state(),
-            &super::super::iso_path::IsoPathOperationState::RemoveComplete {
+            &crate::hci_host::iso_path::IsoPathOperationState::RemoveComplete {
                 connection_handle: 0x0900,
                 directions: 0x01,
             }
         );
         assert!(engine.device().iso_data_path(0x0900, 0).is_none());
 
-        let cis = super::super::iso::CisRef {
+        let cis = crate::hci_host::iso::CisRef {
             cig_id: 1,
             cis_id: 1,
         };
@@ -3886,11 +3886,11 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                super::super::iso_path::SemanticIsoPathState::
+                crate::hci_host::iso_path::SemanticIsoPathState::
                     SettingUp {
                         cis,
                         direction:
-                            super::super::iso_path::
+                            crate::hci_host::iso_path::
                                 IsoDataPathDirection::Input,
                     },
             )
@@ -3907,11 +3907,11 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                super::super::iso_path::SemanticIsoPathState::
+                crate::hci_host::iso_path::SemanticIsoPathState::
                     SetupComplete {
                         cis,
                         direction:
-                            super::super::iso_path::
+                            crate::hci_host::iso_path::
                                 IsoDataPathDirection::Input,
                     },
             )
@@ -3940,7 +3940,7 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                super::super::iso_path::SemanticIsoPathState::
+                crate::hci_host::iso_path::SemanticIsoPathState::
                     Removing {
                         cis,
                         directions: 0x01,
@@ -3959,7 +3959,7 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                super::super::iso_path::SemanticIsoPathState::
+                crate::hci_host::iso_path::SemanticIsoPathState::
                     RemoveComplete {
                         cis,
                         directions: 0x01,
@@ -3978,7 +3978,7 @@ mod tests {
         );
         assert_eq!(
             disconnect.last().copied(),
-            Some(super::super::iso_lifecycle::
+            Some(crate::hci_host::iso_lifecycle::
                 CIS_DISCONNECT_REASON_REMOTE_USER_TERMINATED)
         );
 
@@ -3988,7 +3988,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_disconnect_state(),
-            &super::super::iso_lifecycle::CisDisconnectState::AwaitingEvent {
+            &crate::hci_host::iso_lifecycle::CisDisconnectState::AwaitingEvent {
                 connection_handle: 0x0900,
             }
         );
@@ -4001,7 +4001,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_disconnect_state(),
-            &super::super::iso_lifecycle::CisDisconnectState::Disconnected {
+            &crate::hci_host::iso_lifecycle::CisDisconnectState::Disconnected {
                 connection_handle: 0x0900,
                 event_reason: 0x16,
             }
@@ -4023,13 +4023,13 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cig_remove_state(),
-            &super::super::iso_lifecycle::CigRemoveState::Removed {
+            &crate::hci_host::iso_lifecycle::CigRemoveState::Removed {
                 cig_id: 1,
             }
         );
         assert_eq!(
             engine.cig_configure_state(),
-            &super::super::iso::CigConfigureState::Idle
+            &crate::hci_host::iso::CigConfigureState::Idle
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }
@@ -4041,14 +4041,14 @@ mod tests {
 
         engine
             .begin_controller_privacy(ResolvingListConfig {
-                peers: vec![super::super::privacy::ResolvingPeer {
+                peers: vec![crate::plane::l1_hci::acl::privacy::ResolvingPeer {
                     identity_address_le: [0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8],
                     identity_address_type: 0,
                     peer_irk: [0x11; 16],
                 }],
                 local_irk: [0x22; 16],
                 rpa_timeout_seconds:
-                    super::super::privacy::DEFAULT_RPA_TIMEOUT_SECONDS,
+                    crate::plane::l1_hci::acl::privacy::DEFAULT_RPA_TIMEOUT_SECONDS,
             })
             .unwrap();
 
@@ -4149,15 +4149,15 @@ mod tests {
 
         engine
             .begin_fal_connection(
-                super::super::connection::FalConnectRequest {
-                    peer: super::super::connection::LePeerIdentity {
+                crate::plane::l1_hci::acl::connection::FalConnectRequest {
+                    peer: crate::plane::l1_hci::acl::connection::LePeerIdentity {
                         address_le: [
                             0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
                         ],
                         address_type: 0,
                     },
                     parameters:
-                        super::super::connection::LeInitiationParameters::default(),
+                        crate::plane::l1_hci::acl::connection::LeInitiationParameters::default(),
                 },
             )
             .unwrap();
@@ -4324,9 +4324,9 @@ mod tests {
 
         engine
             .begin_stored_encryption(
-                super::super::security::StoredEncryptionRequest {
+                crate::plane::l1_hci::acl::security::StoredEncryptionRequest {
                     connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
-                    key: super::super::security::StoredLeKeyMaterial::
+                    key: crate::plane::l1_hci::acl::security::StoredLeKeyMaterial::
                         secure_connections([0x5a; 16]),
                 },
             )
@@ -4377,9 +4377,9 @@ mod tests {
         // no second LE Enable Encryption command.
         engine
             .begin_stored_encryption(
-                super::super::security::StoredEncryptionRequest {
+                crate::plane::l1_hci::acl::security::StoredEncryptionRequest {
                     connection: ConnectionToken { connection_handle: 0x0800, generation: 1 },
-                    key: super::super::security::StoredLeKeyMaterial::
+                    key: crate::plane::l1_hci::acl::security::StoredLeKeyMaterial::
                         secure_connections([0x5a; 16]),
                 },
             )
@@ -4563,9 +4563,9 @@ mod tests {
 
         assert_eq!(
             engine.begin_stored_encryption(
-                super::super::security::StoredEncryptionRequest {
+                crate::plane::l1_hci::acl::security::StoredEncryptionRequest {
                     connection: first,
-                    key: super::super::security::StoredLeKeyMaterial::
+                    key: crate::plane::l1_hci::acl::security::StoredLeKeyMaterial::
                         secure_connections([0x44; 16]),
                 },
             ),
@@ -4585,15 +4585,15 @@ mod tests {
 
         engine
             .begin_fal_connection(
-                super::super::connection::FalConnectRequest {
-                    peer: super::super::connection::LePeerIdentity {
+                crate::plane::l1_hci::acl::connection::FalConnectRequest {
+                    peer: crate::plane::l1_hci::acl::connection::LePeerIdentity {
                         address_le: [
                             0x23, 0x2f, 0xef, 0x13, 0xc9, 0xe8,
                         ],
                         address_type: 0,
                     },
                     parameters:
-                        super::super::connection::LeInitiationParameters::default(),
+                        crate::plane::l1_hci::acl::connection::LeInitiationParameters::default(),
                 },
             )
             .unwrap();
@@ -4665,7 +4665,7 @@ mod tests {
             FalConnectionState::Failed(failure) => {
                 assert_eq!(
                     failure.kind,
-                    super::super::connection::FalConnectFailureKind::Cancelled {
+                    crate::plane::l1_hci::acl::connection::FalConnectFailureKind::Cancelled {
                         connection_status: 0x02,
                     }
                 );
@@ -5062,21 +5062,21 @@ mod tests {
         let token = engine.connection_set_snapshot().connections[0].token();
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 100,
                 connection: token,
                 operation:
-                    super::super::gatt::GattOperation::DiscoverServices,
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::DiscoverServices,
             })
             .unwrap();
 
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Failed(
-                super::super::gatt::GattFailure {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                crate::plane::l1_hci::gatt::transaction::GattFailure {
                     request_id: 100,
-                    kind: super::super::gatt::GattFailureKind::NotEncrypted,
+                    kind: crate::plane::l1_hci::gatt::transaction::GattFailureKind::NotEncrypted,
                     ..
                 }
             )]
@@ -5090,11 +5090,11 @@ mod tests {
         let token = establish_encrypted_test_acl(&mut engine, 0x0800, 1);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 101,
                 connection: token,
                 operation:
-                    super::super::gatt::GattOperation::ExchangeMtu {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ExchangeMtu {
                         client_rx_mtu: 247,
                     },
             })
@@ -5117,10 +5117,10 @@ mod tests {
         assert_eq!(engine.gatt_mtu(token), Some(185));
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 101,
                 connection,
-                result: super::super::gatt::GattResult::Mtu { mtu: 185 },
+                result: crate::plane::l1_hci::gatt::transaction::GattResult::Mtu { mtu: 185 },
             }] if *connection == token
         ));
     }
@@ -5132,11 +5132,11 @@ mod tests {
         let token = establish_encrypted_test_acl(&mut engine, 0x0800, 1);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 150,
                 connection: token,
                 operation:
-                    super::super::gatt::GattOperation::ExchangeMtu {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ExchangeMtu {
                         client_rx_mtu: 247,
                     },
             })
@@ -5165,9 +5165,9 @@ mod tests {
         assert_eq!(engine.gatt_mtu(token), Some(185));
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 150,
-                result: super::super::gatt::GattResult::Mtu { mtu: 185 },
+                result: crate::plane::l1_hci::gatt::transaction::GattResult::Mtu { mtu: 185 },
                 ..
             }]
         ));
@@ -5187,11 +5187,11 @@ mod tests {
             (202, second, 0x0050),
         ] {
             engine
-                .begin_gatt_request(super::super::gatt::GattRequest {
+                .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                     request_id: id,
                     connection: token,
                     operation:
-                        super::super::gatt::GattOperation::ReadValue {
+                        crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                             attribute_handle,
                         },
                 })
@@ -5215,10 +5215,10 @@ mod tests {
         let reports = engine.take_gatt_reports();
         assert!(matches!(
             reports.as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 202,
                 connection,
-                result: super::super::gatt::GattResult::Value {
+                result: crate::plane::l1_hci::gatt::transaction::GattResult::Value {
                     attribute_handle: 0x0050,
                     value,
                 },
@@ -5238,10 +5238,10 @@ mod tests {
 
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 201,
                 connection,
-                result: super::super::gatt::GattResult::Value {
+                result: crate::plane::l1_hci::gatt::transaction::GattResult::Value {
                     attribute_handle: 0x0040,
                     value,
                 },
@@ -5271,8 +5271,8 @@ mod tests {
 
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Value(
-                super::super::gatt::GattValueEvent::Notification {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Value(
+                crate::plane::l1_hci::gatt::transaction::GattValueEvent::Notification {
                     connection,
                     attribute_handle: 0x0046,
                     value,
@@ -5294,8 +5294,8 @@ mod tests {
         expect_outbound_att(rx.try_recv().unwrap(), 0x0801, 0x1e);
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Value(
-                super::super::gatt::GattValueEvent::Indication {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Value(
+                crate::plane::l1_hci::gatt::transaction::GattValueEvent::Indication {
                     connection,
                     attribute_handle: 0x0056,
                     value,
@@ -5312,11 +5312,11 @@ mod tests {
             establish_encrypted_test_acl(&mut engine, 0x0800, 1);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 301,
                 connection: first,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0040,
                     },
             })
@@ -5328,15 +5328,15 @@ mod tests {
         assert!(matches!(
             cancel_reports.as_slice(),
             [
-                super::super::gatt::GattReport::Failed(
-                    super::super::gatt::GattFailure {
+                crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                    crate::plane::l1_hci::gatt::transaction::GattFailure {
                         request_id: 301,
                         kind:
-                            super::super::gatt::GattFailureKind::Cancelled,
+                            crate::plane::l1_hci::gatt::transaction::GattFailureKind::Cancelled,
                         ..
                     }
                 ),
-                super::super::gatt::GattReport::BearerPoisoned {
+                crate::plane::l1_hci::gatt::transaction::GattReport::BearerPoisoned {
                     request_id: 301,
                     ..
                 }
@@ -5344,22 +5344,22 @@ mod tests {
         ));
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 302,
                 connection: first,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0041,
                     },
             })
             .unwrap();
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Failed(
-                super::super::gatt::GattFailure {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                crate::plane::l1_hci::gatt::transaction::GattFailure {
                     request_id: 302,
                     kind:
-                        super::super::gatt::GattFailureKind::BearerPoisoned {
+                        crate::plane::l1_hci::gatt::transaction::GattFailureKind::BearerPoisoned {
                             previous_request_id: 301,
                         },
                     ..
@@ -5379,7 +5379,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::LateResponseDropped {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::LateResponseDropped {
                 request_id: 301,
                 ..
             }]
@@ -5398,11 +5398,11 @@ mod tests {
         assert_ne!(second.generation, first.generation);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 303,
                 connection: second,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0042,
                     },
             })
@@ -5421,11 +5421,11 @@ mod tests {
 
         for (id, token) in [(401, first), (402, second)] {
             engine
-                .begin_gatt_request(super::super::gatt::GattRequest {
+                .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                     request_id: id,
                     connection: token,
                     operation:
-                        super::super::gatt::GattOperation::ReadValue {
+                        crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                             attribute_handle: 0x0040,
                         },
                 })
@@ -5442,12 +5442,12 @@ mod tests {
 
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Failed(
-                super::super::gatt::GattFailure {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                crate::plane::l1_hci::gatt::transaction::GattFailure {
                     request_id: 401,
                     connection,
                     kind:
-                        super::super::gatt::GattFailureKind::Disconnected {
+                        crate::plane::l1_hci::gatt::transaction::GattFailureKind::Disconnected {
                             reason: 0x08,
                         },
                 }
@@ -5466,7 +5466,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 402,
                 connection,
                 ..
@@ -5483,11 +5483,11 @@ mod tests {
             establish_encrypted_test_acl(&mut engine, 0x0800, 1);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 501,
                 connection: token,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0042,
                     },
             })
@@ -5529,9 +5529,9 @@ mod tests {
 
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Complete {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Complete {
                 request_id: 501,
-                result: super::super::gatt::GattResult::Value {
+                result: crate::plane::l1_hci::gatt::transaction::GattResult::Value {
                     attribute_handle: 0x0042,
                     value,
                 },
@@ -5550,11 +5550,11 @@ mod tests {
             establish_encrypted_test_acl(&mut engine, 0x0801, 7);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 601,
                 connection: first,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0040,
                     },
             })
@@ -5562,43 +5562,43 @@ mod tests {
         expect_outbound_att(rx.try_recv().unwrap(), 0x0800, 0x0a);
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 602,
                 connection: first,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0041,
                     },
             })
             .unwrap();
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Failed(
-                super::super::gatt::GattFailure {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                crate::plane::l1_hci::gatt::transaction::GattFailure {
                     request_id: 602,
-                    kind: super::super::gatt::GattFailureKind::Busy,
+                    kind: crate::plane::l1_hci::gatt::transaction::GattFailureKind::Busy,
                     ..
                 }
             )]
         ));
 
         engine
-            .begin_gatt_request(super::super::gatt::GattRequest {
+            .begin_gatt_request(crate::plane::l1_hci::gatt::transaction::GattRequest {
                 request_id: 601,
                 connection: second,
                 operation:
-                    super::super::gatt::GattOperation::ReadValue {
+                    crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                         attribute_handle: 0x0050,
                     },
             })
             .unwrap();
         assert!(matches!(
             engine.take_gatt_reports().as_slice(),
-            [super::super::gatt::GattReport::Failed(
-                super::super::gatt::GattFailure {
+            [crate::plane::l1_hci::gatt::transaction::GattReport::Failed(
+                crate::plane::l1_hci::gatt::transaction::GattFailure {
                     request_id: 601,
                     kind:
-                        super::super::gatt::GattFailureKind::DuplicateRequestId,
+                        crate::plane::l1_hci::gatt::transaction::GattFailureKind::DuplicateRequestId,
                     ..
                 }
             )]
