@@ -4,23 +4,32 @@ use crossbeam_channel::{
 
 use crate::{
     architecture::types::{SessionId, StreamId},
-    runtime::mailbox::{RecvError, SendError},
-    plane::l2_transport::{
-        packet::ControllerPacket,
-        sink::{ControllerPacketSink, PacketSinkError},
+    plane::{
+        l1_hci::{
+            acl::{
+                connection::{
+                    ConnectionToken, DisconnectState, FalConnectRequest,
+                    FalConnectionState, LeConnectionSetSnapshot,
+                },
+                privacy::{ControllerPrivacyState, ResolvingListConfig},
+                scan::ScanSummary,
+                security::{StoredEncryptionRequest, StoredEncryptionState},
+            },
+            gatt::transaction::{GattReport, GattRequest, GattRequestId},
+        },
+        l2_transport::{
+            packet::ControllerPacket,
+            sink::{ControllerPacketSink, PacketSinkError},
+        },
     },
+    runtime::mailbox::{RecvError, SendError},
 };
 
 use super::{
-    connection::{
-        ConnectionToken, DisconnectState, FalConnectRequest,
-        FalConnectionState, LeConnectionSetSnapshot,
-    },
     engine::{
         ControllerCapabilities, ControllerIdentity,
         ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
     },
-    gatt::{GattReport, GattRequest, GattRequestId},
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
         CisRef, SemanticCisCreateState,
@@ -39,9 +48,6 @@ use super::{
         IsoDataGroupRequest, IsoDrainRequest, IsoDrainState,
         IsoSduGroupRequest, LogicalIsoSduGroupRequest,
     },
-    privacy::{ControllerPrivacyState, ResolvingListConfig},
-    scan::ScanSummary,
-    security::{StoredEncryptionRequest, StoredEncryptionState},
     stream_route::{
         StereoStreamRouteBinding, StreamRouteState,
     },

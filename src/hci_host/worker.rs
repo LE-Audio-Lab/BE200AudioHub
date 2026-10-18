@@ -5,7 +5,16 @@ use std::{
 
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
-use crate::plane::l2_transport::worker::TransportTx;
+use crate::plane::{
+    l1_hci::acl::{
+        connection::{
+            DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
+        },
+        privacy::ControllerPrivacyState,
+        security::StoredEncryptionState,
+    },
+    l2_transport::worker::TransportTx,
+};
 
 #[cfg(test)]
 use crate::plane::l2_transport::packet::ControllerPacket;
@@ -13,9 +22,6 @@ use crate::plane::l2_transport::packet::ControllerPacket;
 use super::{
     engine::{
         EngineFault, HciEngine, OperationalAttachState, PassiveScanState,
-    },
-    connection::{
-        DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
     },
     iso::{CigConfigureState, CisCreateState},
     iso_host_feature::CisHostFeatureState,
@@ -26,8 +32,6 @@ use super::{
         IsoDrainRequest, IsoDrainState, IsoSubmitOutcome,
     },
     mailbox::{HciCommand, HciReport, HciWorkerPorts},
-    privacy::ControllerPrivacyState,
-    security::StoredEncryptionState,
     stream_route::{
         StreamRouteFailure, StreamRouteFailureKind,
         StreamRouteState,

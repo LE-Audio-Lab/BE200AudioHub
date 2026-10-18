@@ -18,73 +18,73 @@ use bumble_host::{
 
 use crate::{
     architecture::types::{AudioSide, SessionId, StreamId},
-    plane::l2_transport::{
-        packet::ControllerPacket,
-        worker::TransportTx,
+    hci_host::{
+        iso::{
+            CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
+            CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
+            CisCreateRequest, CisCreateState, CisCreateTransaction, CisRef,
+        },
+        iso_credit::{IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot},
+        iso_host_feature::{
+            CisHostFeatureAction, CisHostFeatureFailure,
+            CisHostFeatureState, CisHostFeatureTransaction,
+        },
+        iso_lifecycle::{
+            CigRemoveAction, CigRemoveState, CigRemoveTransaction,
+            CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
+            CisDisconnectTransaction, SemanticCisDisconnectState,
+        },
+        iso_path::{
+            semantic_iso_path_failure, IsoDataPathConfig,
+            IsoDataPathDirection, IsoPathConfigError, IsoPathOperationState,
+            IsoPathRemoveAction, IsoPathRemoveTransaction, IsoPathSetupAction,
+            IsoPathSetupTransaction, SemanticIsoPathState,
+        },
+        iso_tx::{
+            iso_group_fits, iso_packet_count, IsoDrainConfigError,
+            IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
+            IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
+            LogicalIsoSduGroupRequest,
+        },
+        stream_route::{
+            StereoStreamRouteBinding, StreamRouteConfigError, StreamRouteTable,
+        },
     },
-};
-
-use super::{
-    acl_credit::{AclCreditAudit, AclCreditFault},
-    connection::{
-        ConnectionEvent, ConnectionToken, DisconnectAction, DisconnectConfigError,
-        DisconnectEvent, DisconnectState, DisconnectTransaction,
-        FalConnectAction, FalConnectConfigError, FalConnectRequest,
-        FalConnectTransaction, FalConnectionState,
-        LeConnectionSetSnapshot, LeConnectionSnapshot,
-    },
-    gatt::{
-        GattAction, GattFailure, GattFailureKind, GattReport, GattRequest,
-        GattRequestId, GattResult, GattTransaction, GattValueEvent,
-        ATT_DEFAULT_MTU,
-    },
-    iso::{
-        CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
-        CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
-        CisCreateRequest, CisCreateState, CisCreateTransaction,
-        CisRef,
-    },
-    iso_credit::{
-        IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot,
-    },
-    iso_host_feature::{
-        CisHostFeatureAction, CisHostFeatureFailure,
-        CisHostFeatureState, CisHostFeatureTransaction,
-    },
-    iso_lifecycle::{
-        CigRemoveAction, CigRemoveState, CigRemoveTransaction,
-        CisDisconnectAction, CisDisconnectEvent,
-        CisDisconnectState, CisDisconnectTransaction,
-        SemanticCisDisconnectState,
-    },
-    iso_path::{
-        semantic_iso_path_failure, IsoDataPathConfig,
-        IsoDataPathDirection, IsoPathConfigError,
-        IsoPathOperationState, IsoPathRemoveAction,
-        IsoPathRemoveTransaction, IsoPathSetupAction,
-        IsoPathSetupTransaction, SemanticIsoPathState,
-    },
-    iso_tx::{
-        iso_group_fits, iso_packet_count, IsoDrainConfigError,
-        IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
-        IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
-        LogicalIsoSduGroupRequest,
-    },
-    link::{HciObservation, LinkFault, QueueHostTransport},
-    privacy::{
-        ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
-        PrivacyClearTransaction, PrivacyConfigError, PrivacyTransaction,
-        ResolvingListConfig,
-    },
-    scan::{ScanAccumulator, ScanSummary},
-    security::{
-        EncryptionEvent, StoredEncryptionAction,
-        StoredEncryptionConfigError, StoredEncryptionRequest,
-        StoredEncryptionState, StoredEncryptionTransaction,
-    },
-    stream_route::{
-        StereoStreamRouteBinding, StreamRouteConfigError,
-        StreamRouteTable,
+    plane::{
+        l1_hci::{
+            acl::{
+                connection::{
+                    ConnectionEvent, ConnectionToken, DisconnectAction,
+                    DisconnectConfigError, DisconnectEvent, DisconnectState,
+                    DisconnectTransaction, FalConnectAction,
+                    FalConnectConfigError, FalConnectRequest,
+                    FalConnectTransaction, FalConnectionState,
+                    LeConnectionSetSnapshot, LeConnectionSnapshot,
+                },
+                credit::{AclCreditAudit, AclCreditFault},
+                privacy::{
+                    ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
+                    PrivacyClearTransaction, PrivacyConfigError,
+                    PrivacyTransaction, ResolvingListConfig,
+                },
+                scan::{ScanAccumulator, ScanSummary},
+                security::{
+                    EncryptionEvent, StoredEncryptionAction,
+                    StoredEncryptionConfigError, StoredEncryptionRequest,
+                    StoredEncryptionState, StoredEncryptionTransaction,
+                },
+            },
+            gatt::transaction::{
+                GattAction, GattFailure, GattFailureKind, GattReport,
+                GattRequest, GattRequestId, GattResult, GattTransaction,
+                GattValueEvent, ATT_DEFAULT_MTU,
+            },
+            host::link::{HciObservation, LinkFault, QueueHostTransport},
+        },
+        l2_transport::{
+            packet::ControllerPacket,
+            worker::TransportTx,
+        },
     },
 };
 

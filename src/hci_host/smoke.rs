@@ -3,12 +3,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::runtime::mailbox::RecvError;
+use crate::{
+    plane::l1_hci::acl::scan::ScanSummary,
+    runtime::mailbox::RecvError,
+};
 
 use super::{
     engine::{OperationalAttachState, PassiveScanState},
     mailbox::{HciReport, HciReportInbox},
-    scan::ScanSummary,
     stack::{spawn_be200_hci_stack, HciStackConfig, HciStackExit},
 };
 

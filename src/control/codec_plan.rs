@@ -16,7 +16,7 @@ use crate::{
         control::LeAudioFormat,
         types::AudioSide,
     },
-    hci_host::connection::ConnectionToken,
+    plane::l1_hci::acl::connection::ConnectionToken,
 };
 
 use super::audio_snapshot::{

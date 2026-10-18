@@ -4,7 +4,7 @@ use bumble_profiles::{
     pacs::{AudioContexts, PacRecord},
 };
 
-use crate::hci_host::connection::ConnectionToken;
+use crate::plane::l1_hci::acl::connection::ConnectionToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GattServiceRange {

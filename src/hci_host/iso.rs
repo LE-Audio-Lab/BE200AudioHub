@@ -9,7 +9,7 @@ use bumble_hci::{
     Command,
 };
 
-use super::connection::ConnectionToken;
+use crate::plane::l1_hci::acl::connection::ConnectionToken;
 
 const MAX_U24: u32 = 0x00ff_ffff;
 const MAX_CONNECTION_HANDLE: u16 = 0x0eff;

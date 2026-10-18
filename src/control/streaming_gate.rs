@@ -4,12 +4,12 @@ use bumble_profiles::{
     le_audio::MetadataTag,
 };
 
-use crate::hci_host::{
-    gatt::{
+use crate::{
+    hci_host::iso::CisRef,
+    plane::l1_hci::gatt::transaction::{
         GattFailure, GattOperation, GattReport, GattRequest,
         GattRequestId, GattResult, GattValueEvent,
     },
-    iso::CisRef,
 };
 
 use super::{

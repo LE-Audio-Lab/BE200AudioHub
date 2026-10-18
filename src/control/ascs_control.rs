@@ -4,11 +4,10 @@ use bumble_profiles::ascs::{
     AseStatus,
 };
 
-use crate::hci_host::{
-    gatt::{
+use crate::plane::l1_hci::gatt::transaction::{
         GattFailure, GattOperation, GattReport, GattRequest,
         GattRequestId, GattResult, GattValueEvent,
-    },
+
 };
 
 use super::{

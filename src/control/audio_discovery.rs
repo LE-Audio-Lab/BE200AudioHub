@@ -14,9 +14,9 @@ use bumble_profiles::{
     },
 };
 
-use crate::hci_host::{
-    connection::ConnectionToken,
-    gatt::{
+use crate::plane::l1_hci::{
+    acl::connection::ConnectionToken,
+    gatt::transaction::{
         GattCharacteristic, GattFailure, GattOperation, GattReport,
         GattRequest, GattRequestId, GattResult, GattService,
     },

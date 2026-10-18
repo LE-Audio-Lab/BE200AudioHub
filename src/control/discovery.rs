@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bumble::{Address, AddressType};
 use bumble_smp::privacy::verify_resolvable_private_address;
 
-use crate::hci_host::scan::{
+use crate::plane::l1_hci::acl::scan::{
     ScanObservation, ScanSummary,
 };
 

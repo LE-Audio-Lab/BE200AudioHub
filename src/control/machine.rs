@@ -10,11 +10,6 @@ use crate::{
         types::{AudioSide, SessionId, StreamId},
     },
     hci_host::{
-    connection::{
-        ConnectionToken, DisconnectFailure, DisconnectState,
-        FalConnectFailure, FalConnectRequest, FalConnectionState,
-        LeConnectionSetSnapshot,
-    },
     engine::{
         ControllerIdentityFailure, OperationalAttachFailure,
         OperationalAttachState, PassiveScanState,
@@ -35,19 +30,28 @@ use crate::{
         IsoDataPathDirection, SemanticIsoPathFailure,
         SemanticIsoPathState,
     },
-    gatt::{GattReport, GattRequest, GattRequestId},
     mailbox::HciReport,
-    privacy::{
-        ControllerPrivacyState, PrivacyFailure, ResolvingListConfig,
-    },
-    security::{
-        StoredEncryptionFailure, StoredEncryptionRequest,
-        StoredEncryptionState,
-    },
     stream_route::{
         StereoStreamRouteBinding, StreamRouteFailure,
         StreamRouteState,
     },
+    },
+    plane::l1_hci::{
+        acl::{
+            connection::{
+                ConnectionToken, DisconnectFailure, DisconnectState,
+                FalConnectFailure, FalConnectRequest, FalConnectionState,
+                LeConnectionSetSnapshot,
+            },
+            privacy::{
+                ControllerPrivacyState, PrivacyFailure, ResolvingListConfig,
+            },
+            security::{
+                StoredEncryptionFailure, StoredEncryptionRequest,
+                StoredEncryptionState,
+            },
+        },
+        gatt::transaction::{GattReport, GattRequest, GattRequestId},
     },
 };
 
