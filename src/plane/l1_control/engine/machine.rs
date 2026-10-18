@@ -80,6 +80,7 @@ use crate::plane::l1_control::{
         confirmed_status::ConfirmedStatus,
         set_plan::{ControlPlanError, ControlSetPlan},
     },
+    operation::rollback::RollbackOperation,
     planning::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
         enable::{plan_first_enable, EnablePlanError, StereoEnablePlan},
@@ -372,10 +373,8 @@ pub enum ControlEvent {
 pub struct ControlMachine {
     plan: ControlSetPlan,
     confirmed: ConfirmedStatus,
+    rollback: RollbackOperation,
     phase: ControlPhase,
-    rollback_queue: Vec<ConnectionToken>,
-    rollback_current: Option<ConnectionToken>,
-    cleanup_failures: Vec<ControlCleanupFailure>,
     next_gatt_request_id: GattRequestId,
     audio_discovery: Option<AudioDiscoveryMachine>,
     audio_members: Vec<AudioMemberSnapshot>,
@@ -386,19 +385,9 @@ pub struct ControlMachine {
     qos_plan: Option<StereoQosPlan>,
     enable_plan: Option<StereoEnablePlan>,
     cig_may_exist: bool,
-    rollback_cig_pending: bool,
     iso_paths_may_exist: BTreeSet<CisRef>,
     streaming_gate: Option<StreamingGateMachine>,
     pending_stream_binding: Option<StreamBinding>,
-    rollback_stream_route: Option<(SessionId, StreamId)>,
-    rollback_stream_route_unbind_pending: bool,
-    rollback_iso_path_queue: Vec<CisRef>,
-    rollback_iso_path_current: Option<CisRef>,
-    rollback_cis_queue: Vec<CisRef>,
-    rollback_cis_current: Option<CisRef>,
-    rollback_ase_queue: Vec<AudioSide>,
-    rollback_ase_current: Option<AudioSide>,
-    rollback_ase_operation: Option<AseOperationMachine>,
     failure: Option<ControlFailure>,
 }
 
@@ -408,10 +397,8 @@ impl ControlMachine {
         Ok(Self {
             plan,
             confirmed: ConfirmedStatus::new(),
+            rollback: RollbackOperation::new(),
             phase: ControlPhase::Idle,
-            rollback_queue: Vec::new(),
-            rollback_current: None,
-            cleanup_failures: Vec::new(),
             next_gatt_request_id: 1,
             audio_discovery: None,
             audio_members: Vec::new(),
@@ -422,19 +409,9 @@ impl ControlMachine {
             qos_plan: None,
             enable_plan: None,
             cig_may_exist: false,
-            rollback_cig_pending: false,
             iso_paths_may_exist: BTreeSet::new(),
             streaming_gate: None,
             pending_stream_binding: None,
-            rollback_stream_route: None,
-            rollback_stream_route_unbind_pending: false,
-            rollback_iso_path_queue: Vec::new(),
-            rollback_iso_path_current: None,
-            rollback_cis_queue: Vec::new(),
-            rollback_cis_current: None,
-            rollback_ase_queue: Vec::new(),
-            rollback_ase_current: None,
-            rollback_ase_operation: None,
             failure: None,
         })
     }
@@ -649,8 +626,8 @@ impl ControlMachine {
         self.confirmed.streaming_statuses = [None, None];
         self.pending_stream_binding = None;
         self.confirmed.active_stream_binding = None;
-        self.rollback_stream_route = None;
-        self.rollback_stream_route_unbind_pending = false;
+        self.rollback.stream_route = None;
+        self.rollback.stream_route_unbind_pending = false;
         self.start_streaming_gate(AudioSide::Left)
     }
 
@@ -829,7 +806,7 @@ impl ControlMachine {
         self.enable_plan = None;
         self.confirmed.enable_statuses = [None, None];
         self.cig_may_exist = false;
-        self.rollback_cig_pending = false;
+        self.rollback.cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
         self.confirmed.prepared_ases = [None, None];
@@ -849,7 +826,7 @@ impl ControlMachine {
         self.codec_plan = None;
         self.iso_plan = None;
         self.cig_may_exist = false;
-        self.rollback_cig_pending = false;
+        self.rollback.cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
         self.confirmed.prepared_ases = [None, None];
@@ -924,7 +901,7 @@ impl ControlMachine {
             ) if self.phase
                 == ControlPhase::CancellingConnection { member_index } =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CancelConnect { member_index },
                     ),
@@ -1307,11 +1284,11 @@ impl ControlMachine {
                     stream_id,
                 },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_stream_route
+                && self.rollback.stream_route
                     == Some((session_id, stream_id))
-                && self.rollback_stream_route_unbind_pending =>
+                && self.rollback.stream_route_unbind_pending =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupStreamRoute {
                             session_id,
@@ -1319,8 +1296,8 @@ impl ControlMachine {
                         },
                     ),
                 );
-                self.rollback_stream_route = None;
-                self.rollback_stream_route_unbind_pending = false;
+                self.rollback.stream_route = None;
+                self.rollback.stream_route_unbind_pending = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupStreamRoute {
                         session_id,
@@ -1333,9 +1310,9 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupIsoPath { cis },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_iso_path_current == Some(cis) =>
+                && self.rollback.iso_path_current == Some(cis) =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupIsoPath { cis },
                     ),
@@ -1346,9 +1323,9 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupCis { cis },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_cis_current == Some(cis) =>
+                && self.rollback.cis_current == Some(cis) =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupCis { cis },
                     ),
@@ -1359,19 +1336,18 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupAse { side },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_ase_current == Some(side) =>
+                && self.rollback.ase_current == Some(side) =>
             {
-                let pending = self
-                    .rollback_ase_operation
+                let pending = self.rollback.ase_operation
                     .as_ref()
                     .and_then(|machine| machine.pending_request_id());
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupAse { side },
                     ),
                 );
-                self.rollback_ase_operation = None;
-                self.rollback_ase_current = None;
+                self.rollback.ase_operation = None;
+                self.rollback.ase_current = None;
 
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupAse { side },
@@ -1396,14 +1372,14 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupCig { cig_id },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_cig_pending =>
+                && self.rollback.cig_pending =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupCig { cig_id },
                     ),
                 );
-                self.rollback_cig_pending = false;
+                self.rollback.cig_pending = false;
                 self.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig { cig_id },
@@ -1417,13 +1393,11 @@ impl ControlMachine {
                     request_id,
                 },
             ) if self.phase == ControlPhase::RollingBack
-                && self
-                    .rollback_ase_operation
+                && self.rollback.ase_operation
                     .as_ref()
                     .and_then(|machine| machine.pending_request_id())
                     == Some(request_id)
-                && self
-                    .rollback_ase_current
+                && self.rollback.ase_current
                     .and_then(|side| {
                         self.planned_sink(side)
                             .ok()
@@ -1431,10 +1405,9 @@ impl ControlMachine {
                     })
                     == Some(member_index) =>
             {
-                let side = self
-                    .rollback_ase_current
+                let side = self.rollback.ase_current
                     .expect("rollback GATT timer requires ASE side");
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::Gatt {
                             member_index,
@@ -1442,8 +1415,8 @@ impl ControlMachine {
                         },
                     ),
                 );
-                self.rollback_ase_operation = None;
-                self.rollback_ase_current = None;
+                self.rollback.ase_operation = None;
+                self.rollback.ase_current = None;
                 let mut actions = vec![
                     ControlAction::CancelGatt {
                         connection: self.planned_sink(side)?.connection,
@@ -1465,9 +1438,9 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupDisconnect(connection),
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback_current == Some(connection) =>
+                && self.rollback.acl_current == Some(connection) =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupDisconnect(connection),
                     ),
@@ -1477,7 +1450,7 @@ impl ControlMachine {
             ControlEvent::TimerExpired(ControlTimer::CleanupPrivacy)
                 if self.phase == ControlPhase::RollingBack =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Timeout(
                         ControlTimer::CleanupPrivacy,
                     ),
@@ -2085,12 +2058,12 @@ impl ControlMachine {
                         ..
                     },
                 ),
-            ) if self.rollback_stream_route
+            ) if self.rollback.stream_route
                 == Some((*session_id, *stream_id))
-                && self.rollback_stream_route_unbind_pending =>
+                && self.rollback.stream_route_unbind_pending =>
             {
-                self.rollback_stream_route = None;
-                self.rollback_stream_route_unbind_pending = false;
+                self.rollback.stream_route = None;
+                self.rollback.stream_route_unbind_pending = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupStreamRoute {
                         session_id: *session_id,
@@ -2108,10 +2081,10 @@ impl ControlMachine {
                         directions: 0x01,
                     },
                 ),
-            ) if self.rollback_iso_path_current == Some(*cis) => {
+            ) if self.rollback.iso_path_current == Some(*cis) => {
                 self.confirmed.iso_paths_ready.remove(cis);
                 self.iso_paths_may_exist.remove(cis);
-                self.rollback_iso_path_current = None;
+                self.rollback.iso_path_current = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupIsoPath { cis: *cis },
                 )];
@@ -2123,9 +2096,9 @@ impl ControlMachine {
                 HciReport::SemanticIsoPathState(
                     SemanticIsoPathState::Failed(failure),
                 ),
-            ) if self.rollback_iso_path_current == Some(failure.cis) =>
+            ) if self.rollback.iso_path_current == Some(failure.cis) =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::IsoPathRemove(
                         failure.clone(),
                     ),
@@ -2141,9 +2114,9 @@ impl ControlMachine {
                         ..
                     },
                 ),
-            ) if self.rollback_cis_current == Some(*cis) => {
+            ) if self.rollback.cis_current == Some(*cis) => {
                 self.confirmed.live_cis.remove(cis);
-                self.rollback_cis_current = None;
+                self.rollback.cis_current = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCis { cis: *cis },
                 )];
@@ -2158,8 +2131,8 @@ impl ControlMachine {
                         kind,
                     },
                 ),
-            ) if self.rollback_cis_current == Some(*cis) => {
-                self.cleanup_failures.push(
+            ) if self.rollback.cis_current == Some(*cis) => {
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::CisDisconnect {
                         cis: *cis,
                         kind: kind.clone(),
@@ -2173,14 +2146,14 @@ impl ControlMachine {
                 HciReport::CigRemoveState(
                     CigRemoveState::Removed { cig_id },
                 ),
-            ) if self.rollback_cig_pending
+            ) if self.rollback.cig_pending
                 && self
                     .iso_plan
                     .as_ref()
                     .map(|plan| plan.cig_id)
                     == Some(*cig_id) =>
             {
-                self.rollback_cig_pending = false;
+                self.rollback.cig_pending = false;
                 self.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig { cig_id: *cig_id },
@@ -2193,14 +2166,14 @@ impl ControlMachine {
                 HciReport::CigRemoveState(
                     CigRemoveState::Failed(failure),
                 ),
-            ) if self.rollback_cig_pending =>
+            ) if self.rollback.cig_pending =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::CigRemove(
                         failure.clone(),
                     ),
                 );
-                self.rollback_cig_pending = false;
+                self.rollback.cig_pending = false;
                 self.cig_may_exist = false;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig {
@@ -2219,9 +2192,9 @@ impl ControlMachine {
                         ..
                     },
                 ),
-            ) if self.rollback_current == Some(*connection) => {
+            ) if self.rollback.acl_current == Some(*connection) => {
                 self.remove_known_connection(*connection);
-                self.rollback_current = None;
+                self.rollback.acl_current = None;
                 let mut actions = vec![
                     ControlAction::DisarmTimer(
                         ControlTimer::CleanupDisconnect(*connection),
@@ -2235,14 +2208,14 @@ impl ControlMachine {
                 HciReport::DisconnectState(
                     DisconnectState::Failed(failure),
                 ),
-            ) if self.rollback_current == Some(failure.connection) => {
-                self.cleanup_failures.push(
+            ) if self.rollback.acl_current == Some(failure.connection) => {
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Disconnect(
                         failure.clone(),
                     ),
                 );
-                self.rollback_current = None;
-                self.rollback_queue.clear();
+                self.rollback.acl_current = None;
+                self.rollback.acl_queue.clear();
                 let mut actions = vec![
                     ControlAction::DisarmTimer(
                         ControlTimer::CleanupDisconnect(
@@ -2265,8 +2238,8 @@ impl ControlMachine {
                 HciReport::ControllerPrivacyState(
                     ControllerPrivacyState::Idle,
                 ),
-            ) if self.rollback_current.is_none()
-                && self.rollback_queue.is_empty()
+            ) if self.rollback.acl_current.is_none()
+                && self.rollback.acl_queue.is_empty()
                 && self.confirmed.privacy_active =>
             {
                 self.confirmed.privacy_active = false;
@@ -2277,10 +2250,10 @@ impl ControlMachine {
                 HciReport::ControllerPrivacyState(
                     ControllerPrivacyState::Failed(failure),
                 ),
-            ) if self.rollback_current.is_none()
-                && self.rollback_queue.is_empty() =>
+            ) if self.rollback.acl_current.is_none()
+                && self.rollback.acl_queue.is_empty() =>
             {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::Privacy(failure.clone()),
                 );
                 self.confirmed.privacy_active = false;
@@ -2294,7 +2267,7 @@ impl ControlMachine {
             (
                 ControlPhase::RollingBack,
                 HciReport::Gatt(report),
-            ) if self.rollback_ase_operation.is_some() => {
+            ) if self.rollback.ase_operation.is_some() => {
                 self.on_rollback_ase_gatt_report(report)
             }
             (
@@ -3325,7 +3298,7 @@ impl ControlMachine {
         let action = match machine.start() {
             Ok(action) => action,
             Err(failure) => {
-                self.cleanup_failures.push(
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::AseRelease {
                         side,
                         failure,
@@ -3335,8 +3308,8 @@ impl ControlMachine {
             }
         };
         self.next_gatt_request_id = machine.next_request_id();
-        self.rollback_ase_current = Some(side);
-        self.rollback_ase_operation = Some(machine);
+        self.rollback.ase_current = Some(side);
+        self.rollback.ase_operation = Some(machine);
 
         let mut actions = vec![ControlAction::ArmTimer(
             ControlTimer::CleanupAse { side },
@@ -3351,11 +3324,9 @@ impl ControlMachine {
         &mut self,
         report: &GattReport,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let side = self
-            .rollback_ase_current
+        let side = self.rollback.ase_current
             .expect("rollback ASE report requires current side");
-        let mut machine = self
-            .rollback_ase_operation
+        let mut machine = self.rollback.ase_operation
             .take()
             .expect("rollback ASE report requires operation");
         let pending_before = machine.pending_request_id();
@@ -3372,15 +3343,15 @@ impl ControlMachine {
 
         match outcome {
             Ok(AseOperationAction::Ignored) => {
-                self.rollback_ase_operation = Some(machine);
+                self.rollback.ase_operation = Some(machine);
                 Ok(Vec::new())
             }
             Ok(AseOperationAction::Await) => {
-                self.rollback_ase_operation = Some(machine);
+                self.rollback.ase_operation = Some(machine);
                 self.disarm_gatt_request(side, completed_request)
             }
             Ok(action @ AseOperationAction::BeginGatt(_)) => {
-                self.rollback_ase_operation = Some(machine);
+                self.rollback.ase_operation = Some(machine);
                 self.translate_rollback_ase_action(
                     side,
                     completed_request,
@@ -3388,7 +3359,7 @@ impl ControlMachine {
                 )
             }
             Ok(action @ AseOperationAction::Complete(_)) => {
-                self.rollback_ase_operation = None;
+                self.rollback.ase_operation = None;
                 self.translate_rollback_ase_action(
                     side,
                     completed_request,
@@ -3396,9 +3367,9 @@ impl ControlMachine {
                 )
             }
             Err(failure) => {
-                self.rollback_ase_operation = None;
-                self.rollback_ase_current = None;
-                self.cleanup_failures.push(
+                self.rollback.ase_operation = None;
+                self.rollback.ase_current = None;
+                self.rollback.cleanup_failures.push(
                     ControlCleanupFailure::AseRelease {
                         side,
                         failure,
@@ -3451,7 +3422,7 @@ impl ControlMachine {
             | AseOperationAction::Ignored => Ok(actions),
             AseOperationAction::Complete(status) => {
                 if status.state != AseState::IDLE {
-                    self.cleanup_failures.push(
+                    self.rollback.cleanup_failures.push(
                         ControlCleanupFailure::AseRelease {
                             side,
                             failure:
@@ -3463,7 +3434,7 @@ impl ControlMachine {
                         },
                     );
                 }
-                self.rollback_ase_current = None;
+                self.rollback.ase_current = None;
                 actions.push(ControlAction::DisarmTimer(
                     ControlTimer::CleanupAse { side },
                 ));
@@ -3498,9 +3469,9 @@ impl ControlMachine {
     fn prepare_stream_route_rollback(&mut self) {
         let binding = self.confirmed.active_stream_binding
             .or(self.pending_stream_binding);
-        self.rollback_stream_route =
+        self.rollback.stream_route =
             binding.map(|value| (value.session_id, value.stream_id));
-        self.rollback_stream_route_unbind_pending = false;
+        self.rollback.stream_route_unbind_pending = false;
         self.pending_stream_binding = None;
         self.confirmed.active_stream_binding = None;
     }
@@ -3511,20 +3482,20 @@ impl ControlMachine {
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
         self.prepare_stream_route_rollback();
-        self.rollback_queue = self.confirmed.connections
+        self.rollback.acl_queue = self.confirmed.connections
             .iter()
             .flatten()
             .copied()
             .collect();
-        self.rollback_current = None;
-        self.rollback_iso_path_queue.clear();
-        self.rollback_iso_path_current = None;
-        self.rollback_cis_queue.clear();
-        self.rollback_cis_current = None;
-        self.rollback_ase_queue.clear();
-        self.rollback_ase_current = None;
-        self.rollback_ase_operation = None;
-        self.cleanup_failures.clear();
+        self.rollback.acl_current = None;
+        self.rollback.iso_path_queue.clear();
+        self.rollback.iso_path_current = None;
+        self.rollback.cis_queue.clear();
+        self.rollback.cis_current = None;
+        self.rollback.ase_queue.clear();
+        self.rollback.ase_current = None;
+        self.rollback.ase_operation = None;
+        self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
         self.continue_rollback()
     }
@@ -3535,31 +3506,31 @@ impl ControlMachine {
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
         self.prepare_stream_route_rollback();
-        self.rollback_queue = self.confirmed.connections
+        self.rollback.acl_queue = self.confirmed.connections
             .iter()
             .flatten()
             .copied()
             .collect();
-        self.rollback_current = None;
+        self.rollback.acl_current = None;
 
-        self.rollback_iso_path_queue =
+        self.rollback.iso_path_queue =
             self.iso_paths_may_exist.iter().copied().collect();
-        self.rollback_iso_path_current = None;
+        self.rollback.iso_path_current = None;
 
-        self.rollback_cis_queue =
+        self.rollback.cis_queue =
             self.confirmed.live_cis.iter().copied().collect();
-        self.rollback_cis_current = None;
+        self.rollback.cis_current = None;
 
-        self.rollback_ase_queue.clear();
+        self.rollback.ase_queue.clear();
         for side in [AudioSide::Left, AudioSide::Right] {
             if self.confirmed.prepared_ases[side_index(side)].is_some() {
-                self.rollback_ase_queue.push(side);
+                self.rollback.ase_queue.push(side);
             }
         }
-        self.rollback_ase_current = None;
-        self.rollback_ase_operation = None;
+        self.rollback.ase_current = None;
+        self.rollback.ase_operation = None;
 
-        self.cleanup_failures.clear();
+        self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
         self.continue_rollback()
     }
@@ -3570,10 +3541,10 @@ impl ControlMachine {
         self.phase = ControlPhase::RollingBack;
 
         if let Some((session_id, stream_id)) =
-            self.rollback_stream_route
+            self.rollback.stream_route
         {
-            if !self.rollback_stream_route_unbind_pending {
-                self.rollback_stream_route_unbind_pending = true;
+            if !self.rollback.stream_route_unbind_pending {
+                self.rollback.stream_route_unbind_pending = true;
                 return Ok(vec![
                     ControlAction::UnbindStreamRoute {
                         session_id,
@@ -3590,9 +3561,9 @@ impl ControlMachine {
             return Ok(Vec::new());
         }
 
-        if self.rollback_iso_path_current.is_none() {
-            if let Some(cis) = self.rollback_iso_path_queue.pop() {
-                self.rollback_iso_path_current = Some(cis);
+        if self.rollback.iso_path_current.is_none() {
+            if let Some(cis) = self.rollback.iso_path_queue.pop() {
+                self.rollback.iso_path_current = Some(cis);
                 return Ok(vec![
                     ControlAction::RemoveIsoPathByRef {
                         cis,
@@ -3604,13 +3575,13 @@ impl ControlMachine {
                 ]);
             }
         }
-        if self.rollback_iso_path_current.is_some() {
+        if self.rollback.iso_path_current.is_some() {
             return Ok(Vec::new());
         }
 
-        if self.rollback_cis_current.is_none() {
-            if let Some(cis) = self.rollback_cis_queue.pop() {
-                self.rollback_cis_current = Some(cis);
+        if self.rollback.cis_current.is_none() {
+            if let Some(cis) = self.rollback.cis_queue.pop() {
+                self.rollback.cis_current = Some(cis);
                 return Ok(vec![
                     ControlAction::DisconnectCisByRef { cis },
                     ControlAction::ArmTimer(
@@ -3619,21 +3590,21 @@ impl ControlMachine {
                 ]);
             }
         }
-        if self.rollback_cis_current.is_some() {
+        if self.rollback.cis_current.is_some() {
             return Ok(Vec::new());
         }
 
-        if self.rollback_ase_current.is_none() {
-            if let Some(side) = self.rollback_ase_queue.pop() {
+        if self.rollback.ase_current.is_none() {
+            if let Some(side) = self.rollback.ase_queue.pop() {
                 return self.start_rollback_ase_release(side);
             }
         }
-        if self.rollback_ase_current.is_some() {
+        if self.rollback.ase_current.is_some() {
             return Ok(Vec::new());
         }
 
         if self.cig_may_exist {
-            if self.rollback_cig_pending {
+            if self.rollback.cig_pending {
                 return Ok(Vec::new());
             }
             let cig_id = self
@@ -3641,7 +3612,7 @@ impl ControlMachine {
                 .as_ref()
                 .expect("CIG cleanup requires ISO plan")
                 .cig_id;
-            self.rollback_cig_pending = true;
+            self.rollback.cig_pending = true;
             return Ok(vec![
                 ControlAction::RemoveCig { cig_id },
                 ControlAction::ArmTimer(
@@ -3650,9 +3621,9 @@ impl ControlMachine {
             ]);
         }
 
-        if self.rollback_current.is_none() {
-            if let Some(connection) = self.rollback_queue.pop() {
-                self.rollback_current = Some(connection);
+        if self.rollback.acl_current.is_none() {
+            if let Some(connection) = self.rollback.acl_queue.pop() {
+                self.rollback.acl_current = Some(connection);
                 return Ok(vec![
                     ControlAction::DisconnectAcl { connection },
                     ControlAction::ArmTimer(
@@ -3662,7 +3633,7 @@ impl ControlMachine {
             }
         }
 
-        if self.rollback_current.is_some() {
+        if self.rollback.acl_current.is_some() {
             return Ok(Vec::new());
         }
 
@@ -3685,13 +3656,13 @@ impl ControlMachine {
         let primary = self.failure.take().unwrap_or(
             ControlFailure::ConnectionSetMismatch,
         );
-        let final_failure = if self.cleanup_failures.is_empty() {
+        let final_failure = if self.rollback.cleanup_failures.is_empty() {
             primary
         } else {
             ControlFailure::RollbackFailed {
                 primary: Box::new(primary),
                 cleanup: std::mem::take(
-                    &mut self.cleanup_failures,
+                    &mut self.rollback.cleanup_failures,
                 ),
             }
         };
@@ -5973,7 +5944,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(machine.phase(), ControlPhase::RollingBack);
-        assert!(machine.cleanup_failures.contains(
+        assert!(machine.rollback.cleanup_failures.contains(
             &ControlCleanupFailure::Timeout(cleanup_timer)
         ));
         assert_eq!(
