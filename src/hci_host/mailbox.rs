@@ -35,7 +35,10 @@ use super::{
         IsoDataPathConfig, IsoPathOperationState,
         SemanticIsoPathState,
     },
-    iso_tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest},
+    iso_tx::{
+        IsoDataGroupRequest, IsoDrainRequest, IsoDrainState,
+        IsoSduGroupRequest, LogicalIsoSduGroupRequest,
+    },
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
@@ -120,12 +123,17 @@ pub enum HciReport {
 pub struct HciControl {
     tx: Sender<HciCommand>,
     stop_tx: Sender<()>,
-    iso_tx: Sender<IsoSduGroupRequest>,
+    iso_tx: Sender<IsoDataGroupRequest>,
 }
 
 #[derive(Clone)]
 pub struct HciIsoTx {
-    tx: Sender<IsoSduGroupRequest>,
+    tx: Sender<IsoDataGroupRequest>,
+}
+
+#[derive(Clone)]
+pub struct HciLogicalIsoTx {
+    tx: Sender<IsoDataGroupRequest>,
 }
 
 #[derive(Clone)]
@@ -141,7 +149,7 @@ pub(crate) struct HciWorkerPorts {
     pub control_rx: Receiver<HciCommand>,
     pub stop_rx: Receiver<()>,
     pub controller_rx: Receiver<ControllerPacket>,
-    pub iso_rx: Receiver<IsoSduGroupRequest>,
+    pub iso_rx: Receiver<IsoDataGroupRequest>,
     pub report_tx: Sender<HciReport>,
 }
 
@@ -208,6 +216,12 @@ pub(crate) fn hci_mailbox_with_iso(
 impl HciControl {
     pub fn iso_tx(&self) -> HciIsoTx {
         HciIsoTx {
+            tx: self.iso_tx.clone(),
+        }
+    }
+
+    pub fn logical_iso_tx(&self) -> HciLogicalIsoTx {
+        HciLogicalIsoTx {
             tx: self.iso_tx.clone(),
         }
     }
@@ -465,7 +479,20 @@ impl HciIsoTx {
         &self,
         request: IsoSduGroupRequest,
     ) -> Result<(), SendError> {
-        self.tx.try_send(request).map_err(map_send_error)
+        self.tx
+            .try_send(IsoDataGroupRequest::Raw(request))
+            .map_err(map_send_error)
+    }
+}
+
+impl HciLogicalIsoTx {
+    pub fn try_submit_group(
+        &self,
+        request: LogicalIsoSduGroupRequest,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(IsoDataGroupRequest::Logical(request))
+            .map_err(map_send_error)
     }
 }
 
@@ -861,11 +888,49 @@ mod tests {
         control.try_begin_operational_attach().unwrap();
         assert_eq!(
             ports.iso_rx.try_recv().unwrap(),
-            group
+            IsoDataGroupRequest::Raw(group)
         );
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::BeginOperationalAttach
+        );
+    }
+
+    #[test]
+    fn raw_and_logical_iso_handles_share_one_bounded_data_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 1, 1, 1);
+        let raw = control.iso_tx();
+        let logical = control.logical_iso_tx();
+
+        raw.try_submit_group(IsoSduGroupRequest {
+            sdus: vec![super::super::iso_tx::IsoSduRequest {
+                connection_handle: 0x0900,
+                payload: vec![0x11; 100],
+            }],
+        })
+        .unwrap();
+
+        let logical_group = LogicalIsoSduGroupRequest {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            left: vec![0x22; 100],
+            right: vec![0x33; 100],
+        };
+        assert_eq!(
+            logical.try_submit_group(logical_group.clone()),
+            Err(SendError::Full)
+        );
+
+        assert!(matches!(
+            ports.iso_rx.try_recv().unwrap(),
+            IsoDataGroupRequest::Raw(_)
+        ));
+
+        logical.try_submit_group(logical_group.clone()).unwrap();
+        assert_eq!(
+            ports.iso_rx.try_recv().unwrap(),
+            IsoDataGroupRequest::Logical(logical_group)
         );
     }
 
