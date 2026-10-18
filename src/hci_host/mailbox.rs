@@ -30,27 +30,23 @@ use crate::plane::l1_hci::host::engine::{
     ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
 };
 
-use super::{
-    iso::{
+use crate::plane::l1_hci::iso::{
+    cig_cis::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
         CisRef, SemanticCisCreateState,
     },
-    iso_credit::IsoCreditSnapshot,
-    iso_host_feature::CisHostFeatureState,
-    iso_lifecycle::{
-        CigRemoveState, CisDisconnectState,
-        SemanticCisDisconnectState,
+    credit::IsoCreditSnapshot,
+    feature::CisHostFeatureState,
+    lifecycle::{
+        CigRemoveState, CisDisconnectState, SemanticCisDisconnectState,
     },
-    iso_path::{
-        IsoDataPathConfig, IsoPathOperationState,
-        SemanticIsoPathState,
+    path::{
+        IsoDataPathConfig, IsoPathOperationState, SemanticIsoPathState,
     },
-    iso_tx::{
+    route::{StereoStreamRouteBinding, StreamRouteState},
+    tx::{
         IsoDataGroupRequest, IsoDrainRequest, IsoDrainState,
         IsoSduGroupRequest, LogicalIsoSduGroupRequest,
-    },
-    stream_route::{
-        StereoStreamRouteBinding, StreamRouteState,
     },
 };
 
@@ -576,7 +572,7 @@ mod tests {
     }
 
     fn cig_config() -> CigConfig {
-        let cis = |cis_id| super::super::iso::CisConfig {
+        let cis = |cis_id| crate::plane::l1_hci::iso::cig_cis::CisConfig {
             cis_id,
             max_sdu_c_to_p: 100,
             max_sdu_p_to_c: 0,
@@ -649,7 +645,7 @@ mod tests {
 
         let request = CisCreateRequest {
             cig_id: 1,
-            bindings: vec![super::super::iso::CisAclBinding {
+            bindings: vec![crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                 cis_id: 1,
                 acl: ConnectionToken {
                     connection_handle: 0x0800,
@@ -880,7 +876,7 @@ mod tests {
             hci_mailbox_with_iso(1, 1, 1, 1);
         let iso = control.iso_tx();
         let group = IsoSduGroupRequest {
-            sdus: vec![super::super::iso_tx::IsoSduRequest {
+            sdus: vec![crate::plane::l1_hci::iso::tx::IsoSduRequest {
                 connection_handle: 0x0900,
                 payload: vec![1, 2, 3],
             }],
@@ -911,7 +907,7 @@ mod tests {
         let logical = control.logical_iso_tx();
 
         raw.try_submit_group(IsoSduGroupRequest {
-            sdus: vec![super::super::iso_tx::IsoSduRequest {
+            sdus: vec![crate::plane::l1_hci::iso::tx::IsoSduRequest {
                 connection_handle: 0x0900,
                 payload: vec![0x11; 100],
             }],

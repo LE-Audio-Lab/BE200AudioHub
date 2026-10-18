@@ -18,40 +18,40 @@ use bumble_host::{
 
 use crate::{
     architecture::types::{AudioSide, SessionId, StreamId},
-    hci_host::{
-        iso::{
-            CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
-            CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
-            CisCreateRequest, CisCreateState, CisCreateTransaction, CisRef,
-        },
-        iso_credit::{IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot},
-        iso_host_feature::{
-            CisHostFeatureAction, CisHostFeatureFailure,
-            CisHostFeatureState, CisHostFeatureTransaction,
-        },
-        iso_lifecycle::{
-            CigRemoveAction, CigRemoveState, CigRemoveTransaction,
-            CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
-            CisDisconnectTransaction, SemanticCisDisconnectState,
-        },
-        iso_path::{
-            semantic_iso_path_failure, IsoDataPathConfig,
-            IsoDataPathDirection, IsoPathConfigError, IsoPathOperationState,
-            IsoPathRemoveAction, IsoPathRemoveTransaction, IsoPathSetupAction,
-            IsoPathSetupTransaction, SemanticIsoPathState,
-        },
-        iso_tx::{
-            iso_group_fits, iso_packet_count, IsoDrainConfigError,
-            IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
-            IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
-            LogicalIsoSduGroupRequest,
-        },
-        stream_route::{
-            StereoStreamRouteBinding, StreamRouteConfigError, StreamRouteTable,
-        },
-    },
     plane::{
         l1_hci::{
+            iso::{
+                cig_cis::{
+                    CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
+                    CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
+                    CisCreateRequest, CisCreateState, CisCreateTransaction, CisRef,
+                },
+                credit::{IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot},
+                feature::{
+                    CisHostFeatureAction, CisHostFeatureFailure,
+                    CisHostFeatureState, CisHostFeatureTransaction,
+                },
+                lifecycle::{
+                    CigRemoveAction, CigRemoveState, CigRemoveTransaction,
+                    CisDisconnectAction, CisDisconnectEvent, CisDisconnectState,
+                    CisDisconnectTransaction, SemanticCisDisconnectState,
+                },
+                path::{
+                    semantic_iso_path_failure, IsoDataPathConfig,
+                    IsoDataPathDirection, IsoPathConfigError, IsoPathOperationState,
+                    IsoPathRemoveAction, IsoPathRemoveTransaction, IsoPathSetupAction,
+                    IsoPathSetupTransaction, SemanticIsoPathState,
+                },
+                route::{
+                    StereoStreamRouteBinding, StreamRouteConfigError, StreamRouteTable,
+                },
+                tx::{
+                    iso_group_fits, iso_packet_count, IsoDrainConfigError,
+                    IsoDrainRequest, IsoSduGroupConfigError, IsoSduGroupRequest,
+                    IsoSubmitOutcome, LogicalIsoSduGroupConfigError,
+                    LogicalIsoSduGroupRequest,
+                },
+            },
             acl::{
                 connection::{
                     ConnectionEvent, ConnectionToken, DisconnectAction,
@@ -3213,8 +3213,8 @@ mod tests {
         ])
     }
 
-    fn cig_config() -> crate::hci_host::iso::CigConfig {
-        let cis = |cis_id| crate::hci_host::iso::CisConfig {
+    fn cig_config() -> crate::plane::l1_hci::iso::cig_cis::CigConfig {
+        let cis = |cis_id| crate::plane::l1_hci::iso::cig_cis::CisConfig {
             cis_id,
             max_sdu_c_to_p: 100,
             max_sdu_p_to_c: 0,
@@ -3223,7 +3223,7 @@ mod tests {
             rtn_c_to_p: 13,
             rtn_p_to_c: 0,
         };
-        crate::hci_host::iso::CigConfig {
+        crate::plane::l1_hci::iso::cig_cis::CigConfig {
             cig_id: 1,
             sdu_interval_c_to_p: 10_000,
             sdu_interval_p_to_c: 10_000,
@@ -3236,7 +3236,7 @@ mod tests {
         }
     }
 
-    fn single_cig_config() -> crate::hci_host::iso::CigConfig {
+    fn single_cig_config() -> crate::plane::l1_hci::iso::cig_cis::CigConfig {
         let mut config = cig_config();
         config.cis.truncate(1);
         config
@@ -3251,7 +3251,7 @@ mod tests {
         assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
         assert_eq!(
             engine.cig_configure_state(),
-            &crate::hci_host::iso::CigConfigureState::Configuring
+            &crate::plane::l1_hci::iso::cig_cis::CigConfigureState::Configuring
         );
 
         engine
@@ -3265,15 +3265,15 @@ mod tests {
 
         assert_eq!(
             engine.cig_configure_state(),
-            &crate::hci_host::iso::CigConfigureState::Ready(
-                crate::hci_host::iso::CigAllocation {
+            &crate::plane::l1_hci::iso::cig_cis::CigConfigureState::Ready(
+                crate::plane::l1_hci::iso::cig_cis::CigAllocation {
                     cig_id: 1,
                     cis: vec![
-                        crate::hci_host::iso::CisAllocation {
+                        crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                             cis_id: 1,
                             connection_handle: 0x0040,
                         },
-                        crate::hci_host::iso::CisAllocation {
+                        crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                             cis_id: 2,
                             connection_handle: 0x0041,
                         },
@@ -3304,7 +3304,7 @@ mod tests {
         assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2065);
         assert_eq!(
             engine.cig_remove_state(),
-            &crate::hci_host::iso_lifecycle::CigRemoveState::Removing {
+            &crate::plane::l1_hci::iso::lifecycle::CigRemoveState::Removing {
                 cig_id: 1,
             }
         );
@@ -3314,17 +3314,17 @@ mod tests {
 
         assert_eq!(
             engine.cig_remove_state(),
-            &crate::hci_host::iso_lifecycle::CigRemoveState::Removed {
+            &crate::plane::l1_hci::iso::lifecycle::CigRemoveState::Removed {
                 cig_id: 1,
             }
         );
         assert_eq!(
             engine.cig_configure_state(),
-            &crate::hci_host::iso::CigConfigureState::Idle
+            &crate::plane::l1_hci::iso::cig_cis::CigConfigureState::Idle
         );
         assert_eq!(
             engine.cis_create_state(),
-            &crate::hci_host::iso::CisCreateState::Idle
+            &crate::plane::l1_hci::iso::cig_cis::CisCreateState::Idle
         );
     }
 
@@ -3371,14 +3371,14 @@ mod tests {
 
         engine
             .begin_cis_creation(
-                crate::hci_host::iso::CisCreateRequest {
+                crate::plane::l1_hci::iso::cig_cis::CisCreateRequest {
                     cig_id: 1,
                     bindings: vec![
-                        crate::hci_host::iso::CisAclBinding {
+                        crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                             cis_id: 1,
                             acl: first,
                         },
-                        crate::hci_host::iso::CisAclBinding {
+                        crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                             cis_id: 2,
                             acl: second,
                         },
@@ -3394,14 +3394,14 @@ mod tests {
         );
         assert_eq!(
             engine.cis_create_state(),
-            &crate::hci_host::iso::CisCreateState::Submitting { cig_id: 1 }
+            &crate::plane::l1_hci::iso::cig_cis::CisCreateState::Submitting { cig_id: 1 }
         );
 
         engine.ingest(command_status(create_opcode, 0)).unwrap();
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_create_state(),
-            &crate::hci_host::iso::CisCreateState::AwaitingEstablished {
+            &crate::plane::l1_hci::iso::cig_cis::CisCreateState::AwaitingEstablished {
                 cig_id: 1,
                 established: vec![],
             }
@@ -3411,7 +3411,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.cis_create_state(),
-            crate::hci_host::iso::CisCreateState::AwaitingEstablished {
+            crate::plane::l1_hci::iso::cig_cis::CisCreateState::AwaitingEstablished {
                 cig_id: 1,
                 established,
             } if established.len() == 1
@@ -3421,7 +3421,7 @@ mod tests {
         engine.ingest(cis_established(0x0900, 0)).unwrap();
         engine.poll_until_quiescent().unwrap();
 
-        let crate::hci_host::iso::CisCreateState::Ready {
+        let crate::plane::l1_hci::iso::cig_cis::CisCreateState::Ready {
             cig_id,
             established,
         } = engine.cis_create_state()
@@ -3450,7 +3450,7 @@ mod tests {
         assert!(engine.device().cis_link(0x0900).is_some());
         assert!(matches!(
             engine.cis_create_state(),
-            crate::hci_host::iso::CisCreateState::Ready {
+            crate::plane::l1_hci::iso::cig_cis::CisCreateState::Ready {
                 cig_id: 1,
                 established,
             } if established.len() == 1
@@ -3470,7 +3470,7 @@ mod tests {
         assert!(engine.device().cis_link(0x0900).is_none());
         assert_eq!(
             engine.cis_create_state(),
-            &crate::hci_host::iso::CisCreateState::Idle
+            &crate::plane::l1_hci::iso::cig_cis::CisCreateState::Idle
         );
 
         engine.begin_cig_removal(1).unwrap();
@@ -3516,14 +3516,14 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
 
         engine
-            .begin_cis_creation(crate::hci_host::iso::CisCreateRequest {
+            .begin_cis_creation(crate::plane::l1_hci::iso::cig_cis::CisCreateRequest {
                 cig_id: 1,
                 bindings: vec![
-                    crate::hci_host::iso::CisAclBinding {
+                    crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                         cis_id: 1,
                         acl,
                     },
-                    crate::hci_host::iso::CisAclBinding {
+                    crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                         cis_id: 2,
                         acl,
                     },
@@ -3538,16 +3538,16 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
 
         let route =
-            crate::hci_host::stream_route::StereoStreamRouteBinding {
+            crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
                 session_id:
                     crate::architecture::types::SessionId(7),
                 stream_id:
                     crate::architecture::types::StreamId(11),
-                left: crate::hci_host::iso::CisRef {
+                left: crate::plane::l1_hci::iso::cig_cis::CisRef {
                     cig_id: 1,
                     cis_id: 1,
                 },
-                right: crate::hci_host::iso::CisRef {
+                right: crate::plane::l1_hci::iso::cig_cis::CisRef {
                     cig_id: 1,
                     cis_id: 2,
                 },
@@ -3563,7 +3563,7 @@ mod tests {
         for handle in [0x0900, 0x0901] {
             engine
                 .begin_iso_path_setup(
-                    crate::hci_host::iso_path::IsoDataPathConfig::hci_input(
+                    crate::plane::l1_hci::iso::path::IsoDataPathConfig::hci_input(
                         handle,
                     ),
                 )
@@ -3609,7 +3609,7 @@ mod tests {
         );
 
         let logical_group =
-            crate::hci_host::iso_tx::LogicalIsoSduGroupRequest {
+            crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest {
                 session_id: route.session_id,
                 stream_id: route.stream_id,
                 left: vec![0x11; 100],
@@ -3622,13 +3622,13 @@ mod tests {
             Some([0x0900, 0x0901]),
         );
 
-        let group = crate::hci_host::iso_tx::IsoSduGroupRequest {
+        let group = crate::plane::l1_hci::iso::tx::IsoSduGroupRequest {
             sdus: vec![
-                crate::hci_host::iso_tx::IsoSduRequest {
+                crate::plane::l1_hci::iso::tx::IsoSduRequest {
                     connection_handle: 0x0900,
                     payload: vec![0x11; 100],
                 },
-                crate::hci_host::iso_tx::IsoSduRequest {
+                crate::plane::l1_hci::iso::tx::IsoSduRequest {
                     connection_handle: 0x0901,
                     payload: vec![0x22; 100],
                 },
@@ -3638,7 +3638,7 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(
                 engine.submit_iso_group(&group).unwrap(),
-                crate::hci_host::iso_tx::IsoSubmitOutcome::Accepted
+                crate::plane::l1_hci::iso::tx::IsoSubmitOutcome::Accepted
             );
             engine.poll_until_quiescent().unwrap();
         }
@@ -3647,7 +3647,7 @@ mod tests {
 
         assert_eq!(
             engine.submit_iso_group(&group).unwrap(),
-            crate::hci_host::iso_tx::IsoSubmitOutcome::Backpressured
+            crate::plane::l1_hci::iso::tx::IsoSubmitOutcome::Backpressured
         );
         assert_eq!(engine.device().iso_packets_pending(), Some(8));
 
@@ -3671,7 +3671,7 @@ mod tests {
             engine
                 .submit_logical_iso_group(&logical_group)
                 .unwrap(),
-            Some(crate::hci_host::iso_tx::IsoSubmitOutcome::Accepted)
+            Some(crate::plane::l1_hci::iso::tx::IsoSubmitOutcome::Accepted)
         );
         engine.poll_until_quiescent().unwrap();
         assert_eq!(engine.iso_credit_audit.in_flight(), 2);
@@ -3767,9 +3767,9 @@ mod tests {
 
         engine
             .begin_cis_creation(
-                crate::hci_host::iso::CisCreateRequest {
+                crate::plane::l1_hci::iso::cig_cis::CisCreateRequest {
                     cig_id: 1,
-                    bindings: vec![crate::hci_host::iso::CisAclBinding {
+                    bindings: vec![crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
                         cis_id: 1,
                         acl,
                     }],
@@ -3787,13 +3787,13 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert!(matches!(
             engine.cis_create_state(),
-            crate::hci_host::iso::CisCreateState::Ready { established, .. }
+            crate::plane::l1_hci::iso::cig_cis::CisCreateState::Ready { established, .. }
                 if established.len() == 1
                     && established[0].link.connection_handle == 0x0900
         ));
 
         let setup =
-            crate::hci_host::iso_path::IsoDataPathConfig::hci_input(0x0900);
+            crate::plane::l1_hci::iso::path::IsoDataPathConfig::hci_input(0x0900);
         engine.begin_iso_path_setup(setup.clone()).unwrap();
         assert_eq!(
             command_opcode(rx.try_recv().unwrap()),
@@ -3801,7 +3801,7 @@ mod tests {
         );
         assert_eq!(
             engine.iso_path_state(),
-            &crate::hci_host::iso_path::IsoPathOperationState::SettingUp(
+            &crate::plane::l1_hci::iso::path::IsoPathOperationState::SettingUp(
                 setup.clone()
             )
         );
@@ -3817,10 +3817,10 @@ mod tests {
 
         assert_eq!(
             engine.iso_path_state(),
-            &crate::hci_host::iso_path::IsoPathOperationState::SetupComplete {
+            &crate::plane::l1_hci::iso::path::IsoPathOperationState::SetupComplete {
                 connection_handle: 0x0900,
                 direction:
-                    crate::hci_host::iso_path::IsoDataPathDirection::Input,
+                    crate::plane::l1_hci::iso::path::IsoDataPathDirection::Input,
             }
         );
         assert_eq!(
@@ -3835,7 +3835,7 @@ mod tests {
         );
         assert_eq!(
             engine.iso_path_state(),
-            &crate::hci_host::iso_path::IsoPathOperationState::Removing {
+            &crate::plane::l1_hci::iso::path::IsoPathOperationState::Removing {
                 connection_handle: 0x0900,
                 directions: 0x01,
             }
@@ -3852,14 +3852,14 @@ mod tests {
 
         assert_eq!(
             engine.iso_path_state(),
-            &crate::hci_host::iso_path::IsoPathOperationState::RemoveComplete {
+            &crate::plane::l1_hci::iso::path::IsoPathOperationState::RemoveComplete {
                 connection_handle: 0x0900,
                 directions: 0x01,
             }
         );
         assert!(engine.device().iso_data_path(0x0900, 0).is_none());
 
-        let cis = crate::hci_host::iso::CisRef {
+        let cis = crate::plane::l1_hci::iso::cig_cis::CisRef {
             cig_id: 1,
             cis_id: 1,
         };
@@ -3886,11 +3886,11 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                crate::hci_host::iso_path::SemanticIsoPathState::
+                crate::plane::l1_hci::iso::path::SemanticIsoPathState::
                     SettingUp {
                         cis,
                         direction:
-                            crate::hci_host::iso_path::
+                            crate::plane::l1_hci::iso::path::
                                 IsoDataPathDirection::Input,
                     },
             )
@@ -3907,11 +3907,11 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                crate::hci_host::iso_path::SemanticIsoPathState::
+                crate::plane::l1_hci::iso::path::SemanticIsoPathState::
                     SetupComplete {
                         cis,
                         direction:
-                            crate::hci_host::iso_path::
+                            crate::plane::l1_hci::iso::path::
                                 IsoDataPathDirection::Input,
                     },
             )
@@ -3940,7 +3940,7 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                crate::hci_host::iso_path::SemanticIsoPathState::
+                crate::plane::l1_hci::iso::path::SemanticIsoPathState::
                     Removing {
                         cis,
                         directions: 0x01,
@@ -3959,7 +3959,7 @@ mod tests {
         assert_eq!(
             engine.semantic_iso_path_state(),
             Some(
-                crate::hci_host::iso_path::SemanticIsoPathState::
+                crate::plane::l1_hci::iso::path::SemanticIsoPathState::
                     RemoveComplete {
                         cis,
                         directions: 0x01,
@@ -3978,7 +3978,7 @@ mod tests {
         );
         assert_eq!(
             disconnect.last().copied(),
-            Some(crate::hci_host::iso_lifecycle::
+            Some(crate::plane::l1_hci::iso::lifecycle::
                 CIS_DISCONNECT_REASON_REMOTE_USER_TERMINATED)
         );
 
@@ -3988,7 +3988,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_disconnect_state(),
-            &crate::hci_host::iso_lifecycle::CisDisconnectState::AwaitingEvent {
+            &crate::plane::l1_hci::iso::lifecycle::CisDisconnectState::AwaitingEvent {
                 connection_handle: 0x0900,
             }
         );
@@ -4001,7 +4001,7 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cis_disconnect_state(),
-            &crate::hci_host::iso_lifecycle::CisDisconnectState::Disconnected {
+            &crate::plane::l1_hci::iso::lifecycle::CisDisconnectState::Disconnected {
                 connection_handle: 0x0900,
                 event_reason: 0x16,
             }
@@ -4023,13 +4023,13 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(
             engine.cig_remove_state(),
-            &crate::hci_host::iso_lifecycle::CigRemoveState::Removed {
+            &crate::plane::l1_hci::iso::lifecycle::CigRemoveState::Removed {
                 cig_id: 1,
             }
         );
         assert_eq!(
             engine.cig_configure_state(),
-            &crate::hci_host::iso::CigConfigureState::Idle
+            &crate::plane::l1_hci::iso::cig_cis::CigConfigureState::Idle
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
     }

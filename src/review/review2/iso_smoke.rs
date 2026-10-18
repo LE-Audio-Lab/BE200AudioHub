@@ -34,27 +34,21 @@ use crate::{
         lc3::{encode_lc3_silence, prepare_synthetic_lc3},
         synthetic::SyntheticToneConfig,
     },
-    hci_host::{
-        iso::{
-            CigAllocation, CigConfig, CigConfigureState, CisAclBinding,
-            CisConfig, CisCreateRequest, CisCreateState, CisRef,
-            EstablishedCis,
-        },
-        iso_credit::IsoCreditSnapshot,
-        iso_lifecycle::{CigRemoveState, CisDisconnectState},
-        iso_path::{
-            IsoDataPathConfig, IsoDataPathDirection,
-            IsoPathOperationState,
-        },
-        iso_tx::{
-            IsoDrainRequest, IsoDrainState, IsoSduGroupRequest,
-            IsoSduRequest,
-        },
-        mailbox::HciReport,
-
-        stream_route::{StereoStreamRouteBinding, StreamRouteState},
-    },
+    hci_host::mailbox::HciReport,
     plane::l1_hci::{
+        iso::{
+            cig_cis::{
+                CigAllocation, CigConfig, CigConfigureState, CisAclBinding,
+                CisConfig, CisCreateRequest, CisCreateState, CisRef, EstablishedCis,
+            },
+            credit::IsoCreditSnapshot,
+            lifecycle::{CigRemoveState, CisDisconnectState},
+            path::{
+                IsoDataPathConfig, IsoDataPathDirection, IsoPathOperationState,
+            },
+            route::{StereoStreamRouteBinding, StreamRouteState},
+            tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest, IsoSduRequest},
+        },
         host::stack::HciStack,
         acl::connection::ConnectionToken,
         gatt::transaction::{

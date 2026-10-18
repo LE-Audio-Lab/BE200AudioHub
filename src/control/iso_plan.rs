@@ -1,9 +1,9 @@
 use crate::{
     architecture::types::AudioSide,
-    hci_host::iso::{
-        CigConfig, CisAclBinding, CisConfig, CisCreateRequest,
+    plane::l1_hci::{
+        acl::connection::ConnectionToken,
+        iso::cig_cis::{CigConfig, CisAclBinding, CisConfig, CisCreateRequest},
     },
-    plane::l1_hci::acl::connection::ConnectionToken,
 };
 
 use super::codec_plan::StereoCodecPlan;

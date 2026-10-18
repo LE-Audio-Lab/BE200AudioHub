@@ -8,11 +8,9 @@ use std::{
 };
 
 use crate::{
-    hci_host::{
-        iso_host_feature::CisHostFeatureState,
-        mailbox::{HciReport, HciReportInbox},
-    },
+    hci_host::mailbox::{HciReport, HciReportInbox},
     plane::l1_hci::{
+        iso::feature::CisHostFeatureState,
         host::{
             engine::{
                 ControllerIdentity, ControllerIdentityFailure,

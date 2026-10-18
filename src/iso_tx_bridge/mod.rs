@@ -12,7 +12,7 @@ use crate::{
         media::EncodedStereoFrame,
         types::{AudioSide, FrameId},
     },
-    hci_host::iso_tx::LogicalIsoSduGroupRequest,
+    plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest,
     stream_clock::{LocalStreamClock, StreamClockError},
 };
 

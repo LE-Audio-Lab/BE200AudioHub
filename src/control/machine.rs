@@ -9,30 +9,27 @@ use crate::{
         control::{ControlSnapshot, ControlState, StreamBinding, StreamTopology},
         types::{AudioSide, SessionId, StreamId},
     },
-    hci_host::{
-    iso::{
-        CigAllocation, CigConfig, CigConfigureFailure,
-        CigConfigureState, CisCreateRequest, CisRef,
-        SemanticCisCreateFailure, SemanticCisCreateState,
-    },
-    iso_host_feature::{
-        CisHostFeatureFailure, CisHostFeatureState,
-    },
-    iso_lifecycle::{
-        CigRemoveFailure, CigRemoveState,
-        CisDisconnectFailureKind, SemanticCisDisconnectState,
-    },
-    iso_path::{
-        IsoDataPathDirection, SemanticIsoPathFailure,
-        SemanticIsoPathState,
-    },
-    mailbox::HciReport,
-    stream_route::{
-        StereoStreamRouteBinding, StreamRouteFailure,
-        StreamRouteState,
-    },
-    },
+    hci_host::mailbox::HciReport,
     plane::l1_hci::{
+        iso::{
+            cig_cis::{
+                CigAllocation, CigConfig, CigConfigureFailure,
+                CigConfigureState, CisCreateRequest, CisRef,
+                SemanticCisCreateFailure, SemanticCisCreateState,
+            },
+            feature::{CisHostFeatureFailure, CisHostFeatureState},
+            lifecycle::{
+                CigRemoveFailure, CigRemoveState,
+                CisDisconnectFailureKind, SemanticCisDisconnectState,
+            },
+            path::{
+                IsoDataPathDirection, SemanticIsoPathFailure,
+                SemanticIsoPathState,
+            },
+            route::{
+                StereoStreamRouteBinding, StreamRouteFailure, StreamRouteState,
+            },
+        },
         host::engine::{
             ControllerIdentityFailure, OperationalAttachFailure,
             OperationalAttachState, PassiveScanState,
@@ -4875,11 +4872,11 @@ mod tests {
                 CigConfigureState::Ready(CigAllocation {
                     cig_id: 1,
                     cis: vec![
-                        crate::hci_host::iso::CisAllocation {
+                        crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                             cis_id: 1,
                             connection_handle: 0x0900,
                         },
-                        crate::hci_host::iso::CisAllocation {
+                        crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                             cis_id: 2,
                             connection_handle: 0x0901,
                         },
@@ -5540,7 +5537,7 @@ mod tests {
 
     #[test]
     fn uncertain_right_path_failure_removes_paths_before_any_cis() {
-        use crate::hci_host::iso_path::{
+        use crate::plane::l1_hci::iso::path::{
             SemanticIsoPathFailureKind,
         };
 
@@ -6194,7 +6191,7 @@ mod tests {
 
     #[test]
     fn partial_cis_failure_disconnects_cis_releases_ases_then_removes_cig() {
-        use crate::hci_host::iso::{
+        use crate::plane::l1_hci::iso::cig_cis::{
             SemanticCisCreateFailureKind,
             SemanticCisEstablishedFailure,
         };
@@ -6377,11 +6374,11 @@ mod tests {
         let allocation = CigAllocation {
             cig_id: 1,
             cis: vec![
-                crate::hci_host::iso::CisAllocation {
+                crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                     cis_id: 1,
                     connection_handle: 0x0900,
                 },
-                crate::hci_host::iso::CisAllocation {
+                crate::plane::l1_hci::iso::cig_cis::CisAllocation {
                     cis_id: 2,
                     connection_handle: 0x0901,
                 },
@@ -6416,7 +6413,7 @@ mod tests {
         let failure = CigConfigureFailure {
             cig_id: 1,
             may_have_allocated: true,
-            kind: crate::hci_host::iso::CigConfigureFailureKind::
+            kind: crate::plane::l1_hci::iso::cig_cis::CigConfigureFailureKind::
                 MalformedResponse,
         };
         let actions = machine

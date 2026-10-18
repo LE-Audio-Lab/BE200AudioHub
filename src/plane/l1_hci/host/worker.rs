@@ -6,27 +6,29 @@ use std::{
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
 use crate::{
-    hci_host::{
-        iso::{CigConfigureState, CisCreateState},
-        iso_host_feature::CisHostFeatureState,
-        iso_lifecycle::{CigRemoveState, CisDisconnectState},
-        iso_path::IsoPathOperationState,
-        iso_tx::{
-            iso_group_touches_handles, IsoDataGroupRequest,
-            IsoDrainRequest, IsoDrainState, IsoSubmitOutcome,
-        },
-        mailbox::{HciCommand, HciReport, HciWorkerPorts},
-        stream_route::{
-            StreamRouteFailure, StreamRouteFailureKind, StreamRouteState,
-        },
-    },
+    hci_host::mailbox::{HciCommand, HciReport, HciWorkerPorts},
     plane::{
-        l1_hci::acl::{
+        l1_hci::{
+            acl::{
             connection::{
                 DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
             },
             privacy::ControllerPrivacyState,
             security::StoredEncryptionState,
+            },
+            iso::{
+                cig_cis::{CigConfigureState, CisCreateState},
+                feature::CisHostFeatureState,
+                lifecycle::{CigRemoveState, CisDisconnectState},
+                path::IsoPathOperationState,
+                route::{
+                    StreamRouteFailure, StreamRouteFailureKind, StreamRouteState,
+                },
+                tx::{
+                    iso_group_touches_handles, IsoDataGroupRequest,
+                    IsoDrainRequest, IsoDrainState, IsoSubmitOutcome,
+                },
+            },
         },
         l2_transport::worker::TransportTx,
     },
@@ -523,7 +525,7 @@ fn maybe_publish_iso_audit(
 }
 
 fn stream_route_bind_ack(
-    binding: crate::hci_host::stream_route::StereoStreamRouteBinding,
+    binding: crate::plane::l1_hci::iso::route::StereoStreamRouteBinding,
     result: Result<(), EngineFault>,
 ) -> Result<StreamRouteState, EngineFault> {
     match result {
@@ -1078,15 +1080,15 @@ mod tests {
         }
     }
 
-    fn route_binding() -> crate::hci_host::stream_route::StereoStreamRouteBinding {
-        crate::hci_host::stream_route::StereoStreamRouteBinding {
+    fn route_binding() -> crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
+        crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
             session_id: crate::architecture::types::SessionId(7),
             stream_id: crate::architecture::types::StreamId(11),
-            left: crate::hci_host::iso::CisRef {
+            left: crate::plane::l1_hci::iso::cig_cis::CisRef {
                 cig_id: 1,
                 cis_id: 1,
             },
-            right: crate::hci_host::iso::CisRef {
+            right: crate::plane::l1_hci::iso::cig_cis::CisRef {
                 cig_id: 1,
                 cis_id: 2,
             },
@@ -1099,7 +1101,7 @@ mod tests {
             TransportTx::test_channel(4);
         let engine = HciEngine::new(transport_tx);
         let request = IsoDataGroupRequest::Logical(
-            crate::hci_host::iso_tx::LogicalIsoSduGroupRequest {
+            crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest {
                 session_id:
                     crate::architecture::types::SessionId(7),
                 stream_id:
@@ -1126,11 +1128,11 @@ mod tests {
         let request = IsoDataGroupRequest::Raw(
             IsoSduGroupRequest {
                 sdus: vec![
-                    crate::hci_host::iso_tx::IsoSduRequest {
+                    crate::plane::l1_hci::iso::tx::IsoSduRequest {
                         connection_handle: 0x0900,
                         payload: vec![0x11; 100],
                     },
-                    crate::hci_host::iso_tx::IsoSduRequest {
+                    crate::plane::l1_hci::iso::tx::IsoSduRequest {
                         connection_handle: 0x0901,
                         payload: vec![0x22; 100],
                     },
@@ -1160,12 +1162,12 @@ mod tests {
             TransportTx::test_channel(4);
         let engine = HciEngine::new(transport_tx);
         let request = IsoDataGroupRequest::Logical(
-            crate::hci_host::iso_tx::LogicalIsoSduGroupRequest {
+            crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest {
                 session_id: crate::architecture::types::SessionId(7),
                 stream_id: crate::architecture::types::StreamId(11),
                 left: vec![
                     0;
-                    crate::hci_host::iso_tx::MAX_ISO_SDU_LENGTH + 1
+                    crate::plane::l1_hci::iso::tx::MAX_ISO_SDU_LENGTH + 1
                 ],
                 right: vec![0; 100],
             },
@@ -1194,7 +1196,7 @@ mod tests {
         );
 
         let config =
-            crate::hci_host::stream_route::StreamRouteConfigError::
+            crate::plane::l1_hci::iso::route::StreamRouteConfigError::
                 DuplicateCis(binding.left);
         assert_eq!(
             stream_route_bind_ack(
@@ -1877,7 +1879,7 @@ mod tests {
 
     fn iso_test_group() -> IsoSduGroupRequest {
         IsoSduGroupRequest {
-            sdus: vec![crate::hci_host::iso_tx::IsoSduRequest {
+            sdus: vec![crate::plane::l1_hci::iso::tx::IsoSduRequest {
                 connection_handle: 0x0900,
                 payload: vec![0x55; 100],
             }],

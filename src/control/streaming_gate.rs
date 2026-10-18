@@ -5,10 +5,12 @@ use bumble_profiles::{
 };
 
 use crate::{
-    hci_host::iso::CisRef,
-    plane::l1_hci::gatt::transaction::{
+    plane::l1_hci::{
+        gatt::transaction::{
         GattFailure, GattOperation, GattReport, GattRequest,
         GattRequestId, GattResult, GattValueEvent,
+        },
+        iso::cig_cis::CisRef,
     },
 };
 
