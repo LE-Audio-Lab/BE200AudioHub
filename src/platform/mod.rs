@@ -1,7 +1,9 @@
+//! L3 Platform / Device Backend.
+//!
+//! Owns OS/hardware-specific raw I/O, USB primitives, Intel firmware bootstrap,
+//! and deterministic backend implementations. Bluetooth semantics stay above L3.
+
 pub mod backend;
-pub mod be200_firmware;
-pub mod be200_firmware_loader;
-pub mod be200_firmware_port;
-pub mod libusb_async;
-pub mod test_backend;
-pub mod windows_be200;
+pub mod firmware;
+pub mod usb;
+pub mod windows;

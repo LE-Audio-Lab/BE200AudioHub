@@ -119,14 +119,14 @@ where
 #[cfg(windows)]
 pub fn spawn_be200_hci_stack(config: HciStackConfig) -> HciStack {
     spawn_hci_stack_with_backend(
-        crate::platform::windows_be200::open_backend,
+        crate::platform::windows::be200::open_backend,
         config,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::test_backend::TestBackend;
+    use crate::platform::backend::test::TestBackend;
 
     use super::*;
 

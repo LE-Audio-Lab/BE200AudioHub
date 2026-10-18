@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     hci_host::smoke::{parse_smoke_args, SmokeConfig, SmokeError, SmokeResult},
-    platform::be200_firmware_loader::{FirmwareLoadError, FirmwareLoadOutcome},
+    platform::firmware::loader::{FirmwareLoadError, FirmwareLoadOutcome},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub enum HciSmokeError {
 
 #[cfg(windows)]
 pub fn execute_hci_smoke(config: HciSmokeConfig) -> Result<HciSmokeResult, HciSmokeError> {
-    let firmware = crate::platform::be200_firmware_port::ensure_operational(
+    let firmware = crate::platform::firmware::port::ensure_operational(
         &config.sfi,
         &config.ddc,
     )

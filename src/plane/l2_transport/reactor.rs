@@ -173,7 +173,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 mod tests {
     use super::*;
     use crate::{
-        platform::test_backend::TestBackend,
+        platform::backend::test::TestBackend,
         runtime::mailbox,
         plane::l2_transport::packet::ControllerPacket,
     };

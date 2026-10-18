@@ -192,7 +192,7 @@ pub fn spawn_be200_transport(
     TransportWorkerJoin,
 ) {
     spawn_transport_worker(
-        crate::platform::windows_be200::open_backend,
+        crate::platform::windows::be200::open_backend,
         tx_capacity,
         hci_rx_capacity,
     )

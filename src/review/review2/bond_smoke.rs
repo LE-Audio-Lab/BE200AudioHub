@@ -34,8 +34,7 @@ use crate::{
         },
     },
     platform::{
-        be200_firmware_loader::FirmwareLoadOutcome,
-        be200_firmware_port,
+        firmware::{loader::FirmwareLoadOutcome, port as be200_firmware_port},
     },
     review::review2::bond::{
         fingerprint_bond_store, load_verified_bond_set, BondStoreFingerprint,

@@ -1,3 +1,7 @@
+//! Platform backend contract and deterministic backend implementations.
+
+pub mod test;
+
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
