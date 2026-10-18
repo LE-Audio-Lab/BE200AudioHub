@@ -578,8 +578,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::StreamBoundReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        Ok(self
-            .active_stream_binding
+        Ok(self.confirmed.active_stream_binding
             .expect("StreamBoundReady requires active binding"))
     }
 
@@ -818,8 +817,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::AudioSetDiscovered {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let set = self
-            .audio_set
+        let set = self.confirmed.audio_set
             .as_ref()
             .expect("AudioSetDiscovered requires snapshot");
         let plan = plan_first_stream(set)
@@ -3498,8 +3496,7 @@ impl ControlMachine {
     }
 
     fn prepare_stream_route_rollback(&mut self) {
-        let binding = self
-            .active_stream_binding
+        let binding = self.confirmed.active_stream_binding
             .or(self.pending_stream_binding);
         self.rollback_stream_route =
             binding.map(|value| (value.session_id, value.stream_id));
@@ -3514,8 +3511,7 @@ impl ControlMachine {
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
         self.prepare_stream_route_rollback();
-        self.rollback_queue = self
-            .connections
+        self.rollback_queue = self.confirmed.connections
             .iter()
             .flatten()
             .copied()
@@ -3539,8 +3535,7 @@ impl ControlMachine {
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
         self.prepare_stream_route_rollback();
-        self.rollback_queue = self
-            .connections
+        self.rollback_queue = self.confirmed.connections
             .iter()
             .flatten()
             .copied()
@@ -4377,8 +4372,8 @@ mod tests {
     fn machine_at_set_connected() -> ControlMachine {
         let mut machine = ControlMachine::new(plan()).unwrap();
         machine.phase = ControlPhase::SetConnected;
-        machine.privacy_active = true;
-        machine.connections = [
+        machine.confirmed.privacy_active = true;
+        machine.confirmed.connections = [
             Some(ConnectionToken {
                 connection_handle: 0x0800,
                 generation: 1,
@@ -6575,7 +6570,7 @@ mod tests {
 
         let mut machine = machine_at_set_connected();
         machine.phase = ControlPhase::AudioSetDiscovered;
-        machine.audio_set = Some(AudioSetSnapshot {
+        machine.confirmed.audio_set = Some(AudioSetSnapshot {
             members: vec![
                 member(0, AudioLocation::FRONT_RIGHT),
                 member(1, AudioLocation::FRONT_LEFT),

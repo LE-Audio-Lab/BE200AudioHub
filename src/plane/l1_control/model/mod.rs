@@ -1,4 +1,4 @@
-pub mod confirmed_status;
-//! Durable Control planning/configuration model inputs.
+//! Durable Control-owned model state and configuration inputs.
 
+pub mod confirmed_status;
 pub mod set_plan;
