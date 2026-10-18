@@ -1,7 +1,7 @@
 //! L0/Core -> L1-Control semantic command vocabulary.
 
 use crate::{
-    architecture::types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
     plane::l1_control::engine::machine::ControlTimer,
 };
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    architecture::types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
     plane::l1_control::interface::stream::AudioSide,
 };
 

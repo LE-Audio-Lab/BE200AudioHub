@@ -199,7 +199,7 @@ mod tests {
     use bumble_codecs::lc3::Lc3Decoder;
 
     use crate::{
-        architecture::types::{SessionId, StreamId},
+        core::lifecycle::{SessionId, StreamId},
         plane::l1_control::interface::stream::{
             StreamBinding, StreamTopology,
         },

@@ -17,7 +17,7 @@ use bumble_host::{
 };
 
 use crate::{
-    architecture::types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
     plane::l1_control::interface::stream::AudioSide,
     plane::{
         l1_hci::{
@@ -3581,9 +3581,9 @@ mod tests {
         let route =
             crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
                 session_id:
-                    crate::architecture::types::SessionId(7),
+                    crate::core::lifecycle::SessionId(7),
                 stream_id:
-                    crate::architecture::types::StreamId(11),
+                    crate::core::lifecycle::StreamId(11),
                 left: crate::plane::l1_hci::iso::cig_cis::CisRef {
                     cig_id: 1,
                     cis_id: 1,

@@ -3,7 +3,7 @@
 //! SessionId/StreamId are supplied by L0 orchestration. No ASE/CIG/CIS/raw HCI
 //! identity or controller-capacity state is allowed in this boundary.
 
-use crate::architecture::types::{SessionId, StreamId};
+use crate::core::lifecycle::{SessionId, StreamId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AudioSide {

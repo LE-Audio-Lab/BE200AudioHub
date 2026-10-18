@@ -22,7 +22,7 @@ use bumble_profiles::{
 };
 
 use crate::{
-    architecture::types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
     plane::l1_control::interface::stream::{
         AudioSide, LeAudioFormat, StreamBinding, StreamTopology,
     },

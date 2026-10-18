@@ -1067,8 +1067,8 @@ mod tests {
 
     fn route_binding() -> crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
         crate::plane::l1_hci::iso::route::StereoStreamRouteBinding {
-            session_id: crate::architecture::types::SessionId(7),
-            stream_id: crate::architecture::types::StreamId(11),
+            session_id: crate::core::lifecycle::SessionId(7),
+            stream_id: crate::core::lifecycle::StreamId(11),
             left: crate::plane::l1_hci::iso::cig_cis::CisRef {
                 cig_id: 1,
                 cis_id: 1,
@@ -1088,9 +1088,9 @@ mod tests {
         let request = IsoDataGroupRequest::Logical(
             crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest {
                 session_id:
-                    crate::architecture::types::SessionId(7),
+                    crate::core::lifecycle::SessionId(7),
                 stream_id:
-                    crate::architecture::types::StreamId(11),
+                    crate::core::lifecycle::StreamId(11),
                 left: vec![0x11; 100],
                 right: vec![0x22; 100],
             },
@@ -1148,8 +1148,8 @@ mod tests {
         let engine = HciEngine::new(transport_tx);
         let request = IsoDataGroupRequest::Logical(
             crate::plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest {
-                session_id: crate::architecture::types::SessionId(7),
-                stream_id: crate::architecture::types::StreamId(11),
+                session_id: crate::core::lifecycle::SessionId(7),
+                stream_id: crate::core::lifecycle::StreamId(11),
                 left: vec![
                     0;
                     crate::plane::l1_hci::iso::tx::MAX_ISO_SDU_LENGTH + 1

@@ -1,7 +1,7 @@
 use crossbeam_channel::{Sender, TrySendError};
 
 use crate::{
-    architecture::types::{SessionId, StreamId},
+    core::lifecycle::{SessionId, StreamId},
     plane::l1_hci::{
         acl::{
             connection::{ConnectionToken, FalConnectRequest},
