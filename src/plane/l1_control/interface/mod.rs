@@ -1,4 +1,5 @@
 //! Control Plane public/cross-owner interfaces.
 
-pub mod boundary;
+pub mod command;
 pub mod dispatch;
+pub mod report;

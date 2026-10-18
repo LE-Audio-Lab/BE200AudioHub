@@ -1,0 +1,17 @@
+//! L0/Core -> L1-Control semantic command vocabulary.
+
+use crate::{
+    architecture::types::{SessionId, StreamId},
+    plane::l1_control::engine::machine::ControlTimer,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlIntent {
+    Start,
+    BeginStreamHandoff {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
+    DiscoveryWindowElapsed,
+    TimerExpired(ControlTimer),
+}

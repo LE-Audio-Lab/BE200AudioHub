@@ -6,8 +6,10 @@
 
 use crate::plane::l1_control::{
     engine::machine::{ControlFailure, ControlMachine},
-    interface::boundary::{
-        ControlIntent, ControlLowerReport, ControlStep,
+    engine::step::ControlStep,
+    interface::{
+        command::ControlIntent,
+        report::ControlLowerReport,
     },
     model::set_plan::{ControlPlanError, ControlSetPlan},
 };
