@@ -6,7 +6,7 @@ use bumble_profiles::ascs::{
 
 use crate::{
     architecture::{
-        control::{StreamBinding, StreamTopology},
+        control::{ControlSnapshot, ControlState, StreamBinding, StreamTopology},
         types::{AudioSide, SessionId, StreamId},
     },
     hci_host::{
@@ -464,6 +464,60 @@ impl ControlMachine {
 
     pub fn phase(&self) -> ControlPhase {
         self.phase
+    }
+
+    /// Stable observation projection for Core/RuntimeState readers.
+    ///
+    /// Fine-grained ControlPhase remains private implementation detail. The
+    /// exported ControlState intentionally changes much less often.
+    pub fn snapshot(&self) -> ControlSnapshot {
+        let state = match self.phase {
+            ControlPhase::Idle => ControlState::Idle,
+            ControlPhase::Attaching
+            | ControlPhase::ReadingControllerIdentity
+            | ControlPhase::EnsuringCisHostFeature
+            | ControlPhase::StartingDiscovery
+            | ControlPhase::DiscoveringMembers
+            | ControlPhase::StoppingDiscovery => ControlState::Resolving,
+            ControlPhase::ConfiguringPrivacy
+            | ControlPhase::ConnectingMember { .. }
+            | ControlPhase::CancellingConnection { .. }
+            | ControlPhase::AwaitingSetConnected
+            | ControlPhase::SetConnected => ControlState::Connecting,
+            ControlPhase::SecuringMember { .. } => ControlState::Securing,
+            ControlPhase::DiscoveringAudioMember { .. }
+            | ControlPhase::AudioSetDiscovered => ControlState::Discovering,
+            ControlPhase::CodecPlanned
+            | ControlPhase::PreparingCodecAse { .. }
+            | ControlPhase::ConfiguringCodec { .. }
+            | ControlPhase::CodecConfigured
+            | ControlPhase::IsoPlanned
+            | ControlPhase::ConfiguringCig
+            | ControlPhase::CigConfigured
+            | ControlPhase::QosPlanned
+            | ControlPhase::ConfiguringQos { .. }
+            | ControlPhase::QosConfigured
+            | ControlPhase::EnablePlanned
+            | ControlPhase::Enabling { .. }
+            | ControlPhase::Enabled
+            | ControlPhase::CreatingCis
+            | ControlPhase::CisEstablished
+            | ControlPhase::SettingUpIsoPath { .. }
+            | ControlPhase::IsoPathsReady
+            | ControlPhase::AwaitingStreaming { .. } => ControlState::Configuring,
+            ControlPhase::StreamingReady
+            | ControlPhase::BindingStreamRoute { .. }
+            | ControlPhase::StreamBoundReady => ControlState::StreamReady,
+            ControlPhase::RollingBack => ControlState::TearingDown,
+            ControlPhase::Faulted => ControlState::Faulted,
+        };
+
+        let binding = self.active_stream_binding.or(self.pending_stream_binding);
+        ControlSnapshot {
+            state,
+            stream_id: binding.map(|binding| binding.stream_id),
+            format: binding.map(|binding| binding.format),
+        }
     }
 
     pub fn resolved_members(&self) -> &[ResolvedMemberPresence] {
