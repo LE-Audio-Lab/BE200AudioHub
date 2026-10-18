@@ -16,9 +16,12 @@ use bumble_host::{
     HostTransport, IsoControlEvent,
 };
 
-use crate::transport::{
-    packet::ControllerPacket,
-    worker::TransportTx,
+use crate::{
+    architecture::types::{AudioSide, SessionId, StreamId},
+    transport::{
+        packet::ControllerPacket,
+        worker::TransportTx,
+    },
 };
 
 use super::{
@@ -78,6 +81,10 @@ use super::{
         StoredEncryptionConfigError, StoredEncryptionRequest,
         StoredEncryptionState, StoredEncryptionTransaction,
     },
+    stream_route::{
+        StereoStreamRouteBinding, StreamRouteConfigError,
+        StreamRouteTable,
+    },
 };
 
 const DEFAULT_POLL_BUDGET: usize = 64;
@@ -108,6 +115,8 @@ pub enum EngineFault {
         connection_handle: u16,
         direction: u8,
     },
+    StreamRouteConfig(StreamRouteConfigError),
+    StreamRouteCisNotReady(CisRef),
     StaleConnection {
         connection_handle: u16,
         requested_generation: u64,
@@ -222,6 +231,7 @@ pub struct HciEngine {
     iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
     iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
     semantic_iso_path_target: Option<CisRef>,
+    stream_routes: StreamRouteTable,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
 
@@ -269,6 +279,7 @@ impl HciEngine {
             iso_path_setup_transaction: None,
             iso_path_remove_transaction: None,
             semantic_iso_path_target: None,
+            stream_routes: StreamRouteTable::default(),
             deferred_device_events: VecDeque::new(),
         }
     }
@@ -778,6 +789,71 @@ impl HciEngine {
                 ))
             }
         }
+    }
+
+    pub fn bind_stream_route(
+        &mut self,
+        binding: StereoStreamRouteBinding,
+    ) -> Result<(), EngineFault> {
+        binding
+            .validate()
+            .map_err(EngineFault::StreamRouteConfig)?;
+
+        for cis in [binding.left, binding.right] {
+            let handle = self
+                .resolve_established_cis_handle(cis)
+                .ok_or(EngineFault::StreamRouteCisNotReady(cis))?;
+            if self
+                .device
+                .iso_data_path(
+                    handle,
+                    IsoDataPathDirection::Input as u8,
+                )
+                .is_none()
+            {
+                return Err(EngineFault::StreamRouteCisNotReady(cis));
+            }
+        }
+
+        self.stream_routes
+            .bind(binding)
+            .map_err(EngineFault::StreamRouteConfig)
+    }
+
+    pub fn unbind_stream_route(
+        &mut self,
+        session_id: SessionId,
+        stream_id: StreamId,
+    ) -> bool {
+        self.stream_routes.unbind(session_id, stream_id)
+    }
+
+    pub fn resolve_stream_cis(
+        &self,
+        session_id: SessionId,
+        stream_id: StreamId,
+        side: AudioSide,
+    ) -> Option<CisRef> {
+        let cis =
+            self.stream_routes.resolve(session_id, stream_id, side)?;
+        let handle = self.resolve_established_cis_handle(cis)?;
+        self.device
+            .iso_data_path(
+                handle,
+                IsoDataPathDirection::Input as u8,
+            )
+            .map(|_| cis)
+    }
+
+    pub fn resolve_stream_handle(
+        &self,
+        session_id: SessionId,
+        stream_id: StreamId,
+        side: AudioSide,
+    ) -> Option<u16> {
+        let cis =
+            self.resolve_stream_cis(session_id, stream_id, side)?;
+        self.resolve_established_cis_handle(cis)
     }
 
     pub fn validate_iso_drain(
@@ -2496,6 +2572,37 @@ impl HciEngine {
         Ok(true)
     }
 
+    fn cis_ref_for_handle(
+        &self,
+        connection_handle: u16,
+    ) -> Option<CisRef> {
+        match &self.cis_create_state {
+            CisCreateState::Ready {
+                cig_id,
+                established,
+            } => established
+                .iter()
+                .find(|cis| {
+                    cis.link.connection_handle == connection_handle
+                })
+                .map(|cis| CisRef {
+                    cig_id: *cig_id,
+                    cis_id: cis.cis_id,
+                }),
+            CisCreateState::Failed(failure) => failure
+                .established
+                .iter()
+                .find(|cis| {
+                    cis.link.connection_handle == connection_handle
+                })
+                .map(|cis| CisRef {
+                    cig_id: failure.cig_id,
+                    cis_id: cis.cis_id,
+                }),
+            _ => None,
+        }
+    }
+
     fn cis_state_contains_established_handle(
         &self,
         connection_handle: u16,
@@ -2513,6 +2620,7 @@ impl HciEngine {
     }
 
     fn retire_established_cis(&mut self, connection_handle: u16) -> bool {
+        let retired_cis = self.cis_ref_for_handle(connection_handle);
         let mut become_idle = false;
         let known = match &mut self.cis_create_state {
             CisCreateState::Ready { established, .. } => {
@@ -2536,6 +2644,11 @@ impl HciEngine {
 
         if become_idle {
             self.cis_create_state = CisCreateState::Idle;
+        }
+        if known {
+            if let Some(cis) = retired_cis {
+                self.stream_routes.remove_cis(cis);
+            }
         }
         known
     }
