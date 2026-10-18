@@ -81,7 +81,7 @@ use crate::plane::l1_control::{
             resolve_connectable_members, ControlDiscoveryError,
             ResolvedMemberPresence,
         },
-        snapshot::{AudioMemberSnapshot, AudioSetSnapshot},
+        snapshot::AudioSetSnapshot,
     },
     model::{
         cleanup_knowledge::CleanupKnowledge,
