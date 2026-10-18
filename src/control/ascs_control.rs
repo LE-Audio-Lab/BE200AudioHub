@@ -461,12 +461,14 @@ impl AseOperationMachine {
                 self.phase,
             ));
         }
-        let value = self
-            .operation
-            .to_bytes()
-            .map_err(|error| {
-                AseOperationFailure::Encode(error.to_string())
-            })?;
+        let value = match self.operation.to_bytes() {
+            Ok(value) => value,
+            Err(error) => {
+                return self.fail(AseOperationFailure::Encode(
+                    error.to_string(),
+                ))
+            }
+        };
         self.issue(
             AseOperationPhase::WaitingGates,
             GattOperation::WriteRequest {
@@ -558,12 +560,16 @@ impl AseOperationMachine {
                     return self.unexpected(result);
                 }
 
-                let status = parse_ase_status_compat(&value)
-                    .map_err(|error| {
-                        AseOperationFailure::AseStatusParse(
-                            format!("{error:?}"),
+                let status = match parse_ase_status_compat(&value) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        return self.fail(
+                            AseOperationFailure::AseStatusParse(
+                                format!("{error:?}"),
+                            ),
                         )
-                    })?;
+                    }
+                };
                 self.verify_status_identity(&status)?;
                 if status.state != self.expected_state {
                     return self.fail(
@@ -602,12 +608,16 @@ impl AseOperationMachine {
         if attribute_handle
             == self.prepared.sink.ascs_control_point.value_handle
         {
-            let response = AseControlResponse::from_bytes(value)
-                .map_err(|error| {
-                    AseOperationFailure::ControlPointParse(
-                        error.to_string(),
+            let response = match AseControlResponse::from_bytes(value) {
+                Ok(response) => response,
+                Err(error) => {
+                    return self.fail(
+                        AseOperationFailure::ControlPointParse(
+                            error.to_string(),
+                        ),
                     )
-                })?;
+                }
+            };
             if response.opcode != self.operation.opcode() {
                 return Ok(AseOperationAction::Ignored);
             }
@@ -645,12 +655,16 @@ impl AseOperationMachine {
         }
 
         if attribute_handle == self.prepared.sink.ase_value_handle {
-            let status = parse_ase_status_compat(value)
-                .map_err(|error| {
-                    AseOperationFailure::AseStatusParse(
-                        format!("{error:?}"),
+            let status = match parse_ase_status_compat(value) {
+                Ok(status) => status,
+                Err(error) => {
+                    return self.fail(
+                        AseOperationFailure::AseStatusParse(
+                            format!("{error:?}"),
+                        ),
                     )
-                })?;
+                }
+            };
             self.verify_status_identity(&status)?;
             if status.state == self.expected_state {
                 self.notified_status = Some(status);
@@ -704,10 +718,14 @@ impl AseOperationMachine {
         operation: GattOperation,
     ) -> Result<AseOperationAction, AseOperationFailure> {
         let request_id = self.next_request_id;
-        self.next_request_id = self
-            .next_request_id
-            .checked_add(1)
-            .ok_or(AseOperationFailure::RequestIdOverflow)?;
+        self.next_request_id = match self.next_request_id.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return self.fail(
+                    AseOperationFailure::RequestIdOverflow,
+                )
+            }
+        };
         self.phase = phase;
         self.pending_request_id = Some(request_id);
         Ok(AseOperationAction::BeginGatt(GattRequest {
@@ -757,9 +775,16 @@ fn value_event_parts(
 #[cfg(test)]
 mod tests {
     use bumble_hci::CodingFormat;
-    use bumble_profiles::bap::{
-        AudioLocation, CodecSpecificConfiguration, FrameDuration,
-        SamplingFrequency,
+    use bumble_profiles::{
+        ascs::{
+            AseControlResponse, AseEndpoint, AseOpcode, AseOperation,
+            AseReasonCode, AseResponse, AseResponseCode, AseState,
+            AudioRole,
+        },
+        bap::{
+            AudioLocation, CodecSpecificConfiguration, FrameDuration,
+            SamplingFrequency,
+        },
     };
 
     use crate::{
@@ -767,7 +792,9 @@ mod tests {
         control::audio_snapshot::GattCharacteristicRange,
         hci_host::{
             connection::ConnectionToken,
-            gatt::{GattDescriptor, GattResult},
+            gatt::{
+                GattDescriptor, GattResult, GattValueEvent,
+            },
         },
     };
 
@@ -915,6 +942,189 @@ mod tests {
         assert_eq!(prepared.control_point_cccd_handle, 0x0045);
         assert_eq!(prepared.sink.ase_id, 1);
         assert_eq!(machine.next_request_id(), 44);
+    }
+
+    fn prepared() -> PreparedAseControl {
+        PreparedAseControl {
+            sink: sink(),
+            ase_cccd_handle: 0x0048,
+            control_point_cccd_handle: 0x0045,
+        }
+    }
+
+    fn operation_request(action: AseOperationAction) -> GattRequest {
+        let AseOperationAction::BeginGatt(request) = action else {
+            panic!("expected ASCS BeginGatt");
+        };
+        request
+    }
+
+    fn codec_status_bytes() -> Vec<u8> {
+        let planned = sink();
+        let mut endpoint = AseEndpoint::new(1, AudioRole::Sink);
+        endpoint.state = AseState::CODEC_CONFIGURED;
+        endpoint.codec_id = CodingFormat::LC3;
+        endpoint.codec_specific_configuration =
+            planned.codec_specific_configuration.to_bytes();
+        endpoint.value().unwrap()
+    }
+
+    fn cp_response_bytes(
+        code: AseResponseCode,
+        reason: AseReasonCode,
+    ) -> Vec<u8> {
+        AseControlResponse {
+            opcode: AseOpcode::ConfigCodec,
+            responses: vec![AseResponse {
+                ase_id: 1,
+                code,
+                reason,
+            }],
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    #[test]
+    fn ascs_operation_requires_write_cp_and_ase_notification_before_readback() {
+        let prepared = prepared();
+        let operation = AseOperation::ConfigCodec(vec![
+            prepared.sink.config_codec_parameters(),
+        ]);
+        let mut machine = AseOperationMachine::new(
+            prepared.clone(),
+            operation,
+            AseState::CODEC_CONFIGURED,
+            100,
+        );
+
+        let write = operation_request(machine.start().unwrap());
+        assert_eq!(write.request_id, 100);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        // CP and ASE notifications may race ahead of ATT Write Response.
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: prepared.sink.connection,
+                        attribute_handle: 0x0043,
+                        value: cp_response_bytes(
+                            AseResponseCode::SUCCESS,
+                            AseReasonCode::NONE,
+                        ),
+                    },
+                ))
+                .unwrap(),
+            AseOperationAction::Await
+        );
+        assert_eq!(
+            machine
+                .on_gatt_report(&GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: prepared.sink.connection,
+                        attribute_handle: 0x0046,
+                        value: codec_status_bytes(),
+                    },
+                ))
+                .unwrap(),
+            AseOperationAction::Await
+        );
+
+        let readback = operation_request(
+            machine
+                .on_gatt_report(&GattReport::Complete {
+                    request_id: write.request_id,
+                    connection: write.connection,
+                    result: GattResult::WriteComplete {
+                        attribute_handle: 0x0043,
+                        with_response: true,
+                    },
+                })
+                .unwrap(),
+        );
+        assert_eq!(readback.request_id, 101);
+        assert_eq!(
+            readback.operation,
+            GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        );
+        assert_eq!(
+            machine.phase(),
+            AseOperationPhase::ReadingBack
+        );
+
+        let status = codec_status_bytes();
+        let action = machine
+            .on_gatt_report(&GattReport::Complete {
+                request_id: readback.request_id,
+                connection: readback.connection,
+                result: GattResult::Value {
+                    attribute_handle: 0x0046,
+                    value: status,
+                },
+            })
+            .unwrap();
+
+        let AseOperationAction::Complete(status) = action else {
+            panic!("expected completed ASCS operation");
+        };
+        assert_eq!(status.ase_id, 1);
+        assert_eq!(status.state, AseState::CODEC_CONFIGURED);
+        assert_eq!(machine.phase(), AseOperationPhase::Complete);
+        assert_eq!(machine.next_request_id(), 102);
+    }
+
+    #[test]
+    fn ascs_operation_cp_rejection_is_terminal_before_readback() {
+        let prepared = prepared();
+        let operation = AseOperation::ConfigCodec(vec![
+            prepared.sink.config_codec_parameters(),
+        ]);
+        let mut machine = AseOperationMachine::new(
+            prepared.clone(),
+            operation,
+            AseState::CODEC_CONFIGURED,
+            1,
+        );
+        let _write = operation_request(machine.start().unwrap());
+
+        let error = machine
+            .on_gatt_report(&GattReport::Value(
+                GattValueEvent::Notification {
+                    connection: prepared.sink.connection,
+                    attribute_handle: 0x0043,
+                    value: cp_response_bytes(
+                        AseResponseCode::
+                            REJECTED_CONFIGURATION_PARAMETER_VALUE,
+                        AseReasonCode::
+                            CODEC_SPECIFIC_CONFIGURATION,
+                    ),
+                },
+            ))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            AseOperationFailure::ControlPointRejected {
+                ase_id: 1,
+                code: AseResponseCode::
+                    REJECTED_CONFIGURATION_PARAMETER_VALUE
+                    .0,
+                reason: AseReasonCode::
+                    CODEC_SPECIFIC_CONFIGURATION
+                    .0,
+            }
+        );
+        assert_eq!(machine.phase(), AseOperationPhase::Failed);
+        assert_eq!(machine.pending_request_id(), None);
     }
 
     #[test]
