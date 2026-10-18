@@ -704,7 +704,7 @@ fn required_characteristic(
     Ok(first.clone())
 }
 
-fn parse_ase_status_compat(
+pub(crate) fn parse_ase_status_compat(
     value: &[u8],
 ) -> Result<AseStatus, AudioDiscoveryFailure> {
     if value.len() >= 2 && value[1] == AseState::IDLE.0 {
