@@ -267,24 +267,16 @@ fn run_loop(
                 },
             };
 
-            match iso_data_group_should_drop(
+            if iso_data_group_should_drop(
                 &engine,
                 &request,
                 &blocked_iso_handles,
             ) {
-                Ok(true) => {
-                    // Realtime data superseded by route teardown or a reliable
-                    // drain gate is stale. Drop the complete stereo group,
-                    // never one ear.
-                    did_work = true;
-                    continue;
-                }
-                Ok(false) => {}
-                Err(fault) => {
-                    return HciWorkerExit::Faulted(
-                        HciWorkerFault::Engine(fault),
-                    )
-                }
+                // Realtime data superseded by route teardown or a reliable
+                // drain gate is stale. Drop the complete stereo group,
+                // never one ear.
+                did_work = true;
+                continue;
             }
 
             match submit_iso_data_group(&mut engine, &request) {
@@ -467,21 +459,32 @@ fn iso_data_group_should_drop(
     engine: &HciEngine,
     request: &IsoDataGroupRequest,
     blocked_iso_handles: &BTreeSet<u16>,
-) -> Result<bool, EngineFault> {
+) -> bool {
     match request {
-        IsoDataGroupRequest::Raw(group) => Ok(
-            iso_group_touches_handles(group, blocked_iso_handles),
-        ),
+        IsoDataGroupRequest::Raw(group) => {
+            iso_group_touches_handles(group, blocked_iso_handles)
+        }
         IsoDataGroupRequest::Logical(group) => {
-            let Some(handles) =
-                engine.resolve_logical_iso_handles(group)?
-            else {
-                // Route invalidation makes queued realtime data stale.
-                return Ok(true);
-            };
-            Ok(handles
-                .iter()
-                .any(|handle| blocked_iso_handles.contains(handle)))
+            let left = engine.resolve_stream_handle(
+                group.session_id,
+                group.stream_id,
+                crate::architecture::types::AudioSide::Left,
+            );
+            let right = engine.resolve_stream_handle(
+                group.session_id,
+                group.stream_id,
+                crate::architecture::types::AudioSide::Right,
+            );
+            match (left, right) {
+                (Some(left), Some(right)) => {
+                    blocked_iso_handles.contains(&left)
+                        || blocked_iso_handles.contains(&right)
+                }
+                // Route/path invalidation makes queued realtime data stale.
+                // Deliberately do not validate payload here: reliable teardown
+                // must be able to supersede malformed/stale data backlog.
+                _ => true,
+            }
         }
     }
 }
@@ -720,14 +723,15 @@ fn begin_iso_drain(
     blocked_iso_handles.extend(
         request.connection_handles.iter().copied(),
     );
-    let drop_pending = match pending_iso_group.as_ref() {
-        Some(group) => iso_data_group_should_drop(
-            engine,
-            group,
-            blocked_iso_handles,
-        )?,
-        None => false,
-    };
+    let drop_pending = pending_iso_group
+        .as_ref()
+        .is_some_and(|group| {
+            iso_data_group_should_drop(
+                engine,
+                group,
+                blocked_iso_handles,
+            )
+        });
     if drop_pending {
         *pending_iso_group = None;
     }
@@ -1140,6 +1144,33 @@ mod tests {
                 &BTreeSet::from([0x0902]),
             ),
             Ok(false),
+        );
+    }
+
+    #[test]
+    fn stale_logical_data_drop_does_not_validate_payload() {
+        let (transport_tx, _transport_rx) =
+            TransportTx::test_channel(4);
+        let engine = HciEngine::new(transport_tx);
+        let request = IsoDataGroupRequest::Logical(
+            super::super::iso_tx::LogicalIsoSduGroupRequest {
+                session_id: crate::architecture::types::SessionId(7),
+                stream_id: crate::architecture::types::StreamId(11),
+                left: vec![
+                    0;
+                    super::super::iso_tx::MAX_ISO_SDU_LENGTH + 1
+                ],
+                right: vec![0; 100],
+            },
+        );
+
+        assert!(
+            iso_data_group_should_drop(
+                &engine,
+                &request,
+                &BTreeSet::new(),
+            ),
+            "missing route must make malformed realtime data stale without blocking teardown",
         );
     }
 
