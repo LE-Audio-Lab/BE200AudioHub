@@ -8,4 +8,5 @@ pub mod discovery;
 pub mod engine;
 pub mod interface;
 pub mod model;
+pub mod operation;
 pub mod planning;
