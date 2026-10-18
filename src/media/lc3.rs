@@ -123,6 +123,19 @@ impl Lc3StereoEncoder {
     }
 }
 
+pub fn encode_lc3_silence(
+    format: LeAudioFormat,
+) -> Result<(Vec<u8>, Vec<u8>), MediaLc3Error> {
+    let encoder = Lc3StereoEncoder::new(format)?;
+    let silence = PcmStereoFrame {
+        frame_id: crate::architecture::types::FrameId(0),
+        left: [0; SAMPLES_PER_FRAME],
+        right: [0; SAMPLES_PER_FRAME],
+    };
+    let encoded = encoder.encode(&silence)?;
+    Ok((encoded.left, encoded.right))
+}
+
 pub fn prepare_synthetic_lc3(
     binding: StreamBinding,
     config: SyntheticToneConfig,
@@ -279,6 +292,32 @@ mod tests {
         assert!(
             right_600 / right_400 > 4.0,
             "right LC3 roundtrip lost 600 Hz identity"
+        );
+    }
+
+    #[test]
+    fn silence_fallback_is_valid_lc3_and_decodes_near_zero() {
+        let binding = binding();
+        let (left_silence, right_silence) =
+            encode_lc3_silence(binding.format).unwrap();
+        assert_eq!(left_silence.len(), 100);
+        assert_eq!(right_silence.len(), 100);
+
+        let config = stream_config(binding.format).unwrap();
+        let left = Lc3Decoder::new(config).unwrap();
+        let right = Lc3Decoder::new(config).unwrap();
+        let decoded_left = left.decode_sdu(&left_silence).unwrap();
+        let decoded_right = right.decode_sdu(&right_silence).unwrap();
+
+        let peak = decoded_left
+            .iter()
+            .chain(decoded_right.iter())
+            .map(|sample| i32::from(*sample).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            peak <= 1,
+            "encoded zero-PCM fallback decoded peak was {peak}"
         );
     }
 
