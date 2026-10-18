@@ -237,3 +237,162 @@ impl<P: Clone> IntervalGroupScheduler<P> {
         }))
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::architecture::{
+        control::{
+            LeAudioFormat, StreamBinding, StreamTopology,
+        },
+        media::EncodedStereoFrame,
+        types::{FrameId, SessionId, StreamId},
+    };
+
+    use super::*;
+
+    const EPOCH_US: u64 = 1_000_000;
+
+    fn binding() -> StreamBinding {
+        StreamBinding {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            format: LeAudioFormat {
+                sample_rate_hz: 48_000,
+                frame_duration_us: 10_000,
+                octets_per_sdu: 100,
+            },
+            presentation_delay_us: 40_000,
+            topology: StreamTopology::StereoSplit,
+        }
+    }
+
+    fn frame(id: u64, left: u8, right: u8) -> EncodedStereoFrame<Vec<u8>> {
+        EncodedStereoFrame {
+            frame_id: FrameId(id),
+            left: vec![left; 100],
+            right: vec![right; 100],
+        }
+    }
+
+    fn scheduler(capacity: usize) -> IntervalGroupScheduler<Vec<u8>> {
+        IntervalGroupScheduler::new(
+            binding(),
+            EPOCH_US,
+            capacity,
+            StereoFallback {
+                left: vec![0xFA; 100],
+                right: vec![0xFB; 100],
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scheduler_uses_absolute_grid_and_exact_frame_ids() {
+        let mut scheduler = scheduler(4);
+        assert_eq!(
+            scheduler.push_encoded(frame(0, 0x10, 0x20)),
+            FrameInsertOutcome::Accepted
+        );
+        assert_eq!(
+            scheduler.on_wake(EPOCH_US - 321).unwrap(),
+            SchedulerStep::Wait {
+                frame_id: FrameId(0),
+                deadline_us: EPOCH_US,
+            }
+        );
+
+        let SchedulerStep::Submit(group) =
+            scheduler.on_wake(EPOCH_US + 777).unwrap()
+        else {
+            panic!("frame 0 must submit in its absolute interval");
+        };
+        assert_eq!(group.frame_id, FrameId(0));
+        assert_eq!(group.target_time_us, EPOCH_US);
+        assert_eq!(group.left, vec![0x10; 100]);
+        assert_eq!(group.right, vec![0x20; 100]);
+        assert_eq!(group.source, IntervalGroupSource::Encoded);
+        assert_eq!(group.skipped_intervals, 0);
+        assert_eq!(scheduler.next_frame(), FrameId(1));
+
+        // Callback jitter does not move frame 1's absolute deadline.
+        assert_eq!(
+            scheduler.next_deadline_us().unwrap(),
+            EPOCH_US + 10_000
+        );
+    }
+
+    #[test]
+    fn missing_frame_uses_complete_stereo_fallback_group() {
+        let mut scheduler = scheduler(2);
+
+        let SchedulerStep::Submit(group) =
+            scheduler.on_wake(EPOCH_US).unwrap()
+        else {
+            panic!("missing frame must still submit fallback");
+        };
+        assert_eq!(group.frame_id, FrameId(0));
+        assert_eq!(group.left, vec![0xFA; 100]);
+        assert_eq!(group.right, vec![0xFB; 100]);
+        assert_eq!(group.source, IntervalGroupSource::Fallback);
+    }
+
+    #[test]
+    fn late_wake_drops_stale_buffer_and_jumps_to_current_grid_frame() {
+        let mut scheduler = scheduler(5);
+        for id in 0..=3 {
+            assert_eq!(
+                scheduler.push_encoded(frame(
+                    id,
+                    0x10 + id as u8,
+                    0x20 + id as u8,
+                )),
+                FrameInsertOutcome::Accepted
+            );
+        }
+
+        let SchedulerStep::Submit(group) =
+            scheduler.on_wake(EPOCH_US + 30_123).unwrap()
+        else {
+            panic!("late wake must submit current frame");
+        };
+
+        assert_eq!(group.frame_id, FrameId(3));
+        assert_eq!(group.target_time_us, EPOCH_US + 30_000);
+        assert_eq!(group.skipped_intervals, 3);
+        assert_eq!(group.stale_frames_dropped, 3);
+        assert_eq!(group.source, IntervalGroupSource::Encoded);
+        assert_eq!(group.left, vec![0x13; 100]);
+        assert_eq!(scheduler.stored_len(), 0);
+        assert_eq!(scheduler.next_frame(), FrameId(4));
+    }
+
+    #[test]
+    fn encoded_store_is_bounded_duplicate_safe_and_rejects_old_frames() {
+        let mut scheduler = scheduler(2);
+
+        assert_eq!(
+            scheduler.push_encoded(frame(0, 1, 2)),
+            FrameInsertOutcome::Accepted
+        );
+        assert_eq!(
+            scheduler.push_encoded(frame(0, 3, 4)),
+            FrameInsertOutcome::Duplicate
+        );
+        assert_eq!(
+            scheduler.push_encoded(frame(1, 5, 6)),
+            FrameInsertOutcome::Accepted
+        );
+        assert_eq!(
+            scheduler.push_encoded(frame(2, 7, 8)),
+            FrameInsertOutcome::Full
+        );
+
+        let _ = scheduler.on_wake(EPOCH_US).unwrap();
+        assert_eq!(
+            scheduler.push_encoded(frame(0, 9, 10)),
+            FrameInsertOutcome::DroppedStale
+        );
+    }
+}
