@@ -11,10 +11,6 @@
 use crate::{
     architecture::{
         control::{ControlSnapshot, StreamBinding},
-        hci_host::HciHostSnapshot,
-        lifecycle::LifecycleSnapshot,
-        media::MediaSnapshot,
-        transport::TransportSnapshot,
         types::{SessionId, StreamId},
     },
     hci_host::mailbox::HciReport,
@@ -44,19 +40,6 @@ pub enum ControlIntent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlLowerReport {
     Hci(HciReport),
-}
-
-/// Observation reports consumed by the single-writer RuntimeState reducer.
-///
-/// These are projections/snapshots of plane-owned state. They are not handles
-/// to the mutable objects that implement those planes.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RuntimeObservation {
-    Lifecycle(LifecycleSnapshot),
-    Control(ControlSnapshot),
-    Media(MediaSnapshot),
-    Hci(HciHostSnapshot),
-    Transport(TransportSnapshot),
 }
 
 /// One semantic Control transition exposed to the future Core composition.
