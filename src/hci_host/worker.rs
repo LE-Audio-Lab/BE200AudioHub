@@ -711,6 +711,11 @@ fn publish_state_transitions(
                 cis_create_state.clone(),
             ))
             .map_err(map_report_error)?;
+        report_tx
+            .try_send(HciReport::SemanticCisCreateState(
+                cis_create_state.semantic(),
+            ))
+            .map_err(map_report_error)?;
         *last_cis_create_state = cis_create_state;
     }
 
