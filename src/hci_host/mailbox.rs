@@ -22,7 +22,7 @@ use super::{
     gatt::{GattReport, GattRequest, GattRequestId},
     iso::{
         CigConfig, CigConfigureState, CisCreateRequest, CisCreateState,
-        CisRef,
+        CisRef, SemanticCisCreateState,
     },
     iso_credit::IsoCreditSnapshot,
     iso_host_feature::CisHostFeatureState,
@@ -87,6 +87,7 @@ pub enum HciReport {
     IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
+    SemanticCisCreateState(SemanticCisCreateState),
     CisDisconnectState(CisDisconnectState),
     SemanticCisDisconnectState(SemanticCisDisconnectState),
     CigRemoveState(CigRemoveState),
