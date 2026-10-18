@@ -7,7 +7,7 @@
 //! It does not know CIS handles, HCI credits, USB endpoints or controller
 //! packet framing.
 
-use super::types::FrameId;
+use crate::plane::l1_media::clock::frame::FrameId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaState {
@@ -26,10 +26,4 @@ pub struct MediaSnapshot {
     pub source_ring_fill_frames: u32,
     pub encoded_ring_fill_frames: u32,
     pub asrc_ratio: f64,
-}
-
-pub struct EncodedStereoFrame<P> {
-    pub frame_id: FrameId,
-    pub left: P,
-    pub right: P,
 }

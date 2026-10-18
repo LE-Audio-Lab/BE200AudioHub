@@ -9,11 +9,18 @@ pub mod runtime;
 use crate::{
     architecture::{
         control::StreamBinding,
-        media::EncodedStereoFrame,
-        types::{AudioSide, FrameId},
+        types::AudioSide,
     },
-    plane::l1_hci::iso::tx::LogicalIsoSduGroupRequest,
-    stream_clock::{LocalStreamClock, StreamClockError},
+    plane::{
+        l1_hci::iso::tx::LogicalIsoSduGroupRequest,
+        l1_media::{
+            clock::{
+                frame::FrameId,
+                local::{LocalStreamClock, StreamClockError},
+            },
+            interface::frame::EncodedStereoFrame,
+        },
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

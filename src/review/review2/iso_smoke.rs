@@ -30,9 +30,9 @@ use crate::{
         runtime::{BridgeTxStep, LogicalIsoTxBridge},
         FrameInsertOutcome, StereoFallback,
     },
-    media::{
-        lc3::{encode_lc3_silence, prepare_synthetic_lc3},
-        synthetic::SyntheticToneConfig,
+    plane::l1_media::{
+        codec::lc3::{encode_lc3_silence, prepare_synthetic_lc3},
+        source::synthetic::SyntheticToneConfig,
     },
     plane::l1_hci::interface::report::HciReport,
     plane::l1_hci::{

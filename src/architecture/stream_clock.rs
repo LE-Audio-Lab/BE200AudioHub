@@ -8,7 +8,7 @@
 //! monotonic time; a later implementation may lock the same abstraction to the
 //! controller ISO transmit grid.
 
-use super::types::FrameId;
+use crate::plane::l1_media::clock::frame::FrameId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockLock {

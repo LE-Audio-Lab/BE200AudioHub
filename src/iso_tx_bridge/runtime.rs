@@ -7,10 +7,14 @@
 use crate::{
     architecture::{
         control::StreamBinding,
-        media::EncodedStereoFrame,
-        types::FrameId,
     },
-    plane::l1_hci::interface::iso_tx::HciLogicalIsoTx,
+    plane::{
+        l1_hci::interface::iso_tx::HciLogicalIsoTx,
+        l1_media::{
+            clock::frame::FrameId,
+            interface::frame::EncodedStereoFrame,
+        },
+    },
     runtime::mailbox::SendError,
 };
 

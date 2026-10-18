@@ -2,8 +2,6 @@ mod architecture;
 mod runtime;
 mod platform;
 mod plane;
-mod media;
-mod stream_clock;
 mod iso_tx_bridge;
 mod control;
 

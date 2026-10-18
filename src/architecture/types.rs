@@ -11,9 +11,6 @@ pub struct SessionId(pub u64);
 pub struct StreamId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FrameId(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AudioSide {
     Left,
     Right,
