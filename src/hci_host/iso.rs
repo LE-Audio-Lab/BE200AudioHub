@@ -226,6 +226,137 @@ pub struct EstablishedCis {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticCisCreateFailureKind {
+    CommandStatus {
+        status: u8,
+    },
+    DuplicateCommandStatus,
+    EstablishedBeforeCommandStatus,
+    UnexpectedEstablishedHandle,
+    CisEstablishmentFailed,
+    DuplicateEstablishedHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticCisEstablishedFailure {
+    pub cis_id: u8,
+    pub status: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticCisCreateFailure {
+    pub cig_id: u8,
+    pub established_cis_ids: Vec<u8>,
+    pub failed: Vec<SemanticCisEstablishedFailure>,
+    pub kind: SemanticCisCreateFailureKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticCisCreateState {
+    Idle,
+    Submitting {
+        cig_id: u8,
+    },
+    AwaitingEstablished {
+        cig_id: u8,
+        established_cis_ids: Vec<u8>,
+    },
+    Ready {
+        cig_id: u8,
+        established_cis_ids: Vec<u8>,
+    },
+    Failed(SemanticCisCreateFailure),
+}
+
+impl CisCreateState {
+    pub fn semantic(&self) -> SemanticCisCreateState {
+        match self {
+            Self::Idle => SemanticCisCreateState::Idle,
+            Self::Submitting { cig_id } => {
+                SemanticCisCreateState::Submitting {
+                    cig_id: *cig_id,
+                }
+            }
+            Self::AwaitingEstablished {
+                cig_id,
+                established,
+            } => SemanticCisCreateState::AwaitingEstablished {
+                cig_id: *cig_id,
+                established_cis_ids: established
+                    .iter()
+                    .map(|cis| cis.cis_id)
+                    .collect(),
+            },
+            Self::Ready {
+                cig_id,
+                established,
+            } => SemanticCisCreateState::Ready {
+                cig_id: *cig_id,
+                established_cis_ids: established
+                    .iter()
+                    .map(|cis| cis.cis_id)
+                    .collect(),
+            },
+            Self::Failed(failure) => {
+                SemanticCisCreateState::Failed(
+                    SemanticCisCreateFailure {
+                        cig_id: failure.cig_id,
+                        established_cis_ids: failure
+                            .established
+                            .iter()
+                            .map(|cis| cis.cis_id)
+                            .collect(),
+                        failed: failure
+                            .failed
+                            .iter()
+                            .map(|failed| {
+                                SemanticCisEstablishedFailure {
+                                    cis_id: failed.cis_id,
+                                    status: failed.status,
+                                }
+                            })
+                            .collect(),
+                        kind: match failure.kind {
+                            CisCreateFailureKind::CommandStatus {
+                                status,
+                            } => SemanticCisCreateFailureKind::
+                                CommandStatus { status },
+                            CisCreateFailureKind::
+                                DuplicateCommandStatus => {
+                                SemanticCisCreateFailureKind::
+                                    DuplicateCommandStatus
+                            }
+                            CisCreateFailureKind::
+                                EstablishedBeforeCommandStatus {
+                                    ..
+                                } => {
+                                SemanticCisCreateFailureKind::
+                                    EstablishedBeforeCommandStatus
+                            }
+                            CisCreateFailureKind::
+                                UnexpectedEstablishedHandle(_) => {
+                                SemanticCisCreateFailureKind::
+                                    UnexpectedEstablishedHandle
+                            }
+                            CisCreateFailureKind::
+                                CisEstablishmentFailed => {
+                                SemanticCisCreateFailureKind::
+                                    CisEstablishmentFailed
+                            }
+                            CisCreateFailureKind::
+                                DuplicateEstablishedHandle(_) => {
+                                SemanticCisCreateFailureKind::
+                                    DuplicateEstablishedHandle
+                            }
+                        },
+                    },
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CisCreateAction {
     AwaitingEstablished,
     Progress(Vec<EstablishedCis>),
