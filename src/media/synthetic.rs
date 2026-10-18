@@ -97,10 +97,6 @@ impl SyntheticToneSource {
         })
     }
 
-    pub fn config(&self) -> SyntheticToneConfig {
-        self.config
-    }
-
     pub fn remaining_frames(&self) -> u64 {
         self.config.frame_count.saturating_sub(self.next_frame)
     }
