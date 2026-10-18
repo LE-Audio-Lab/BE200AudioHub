@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use bumble_profiles::ascs::{
     AseOperation, AseState, AseStatus, AseStatusDetails,
 };
@@ -16,13 +18,15 @@ use crate::{
     },
     iso::{
         CigAllocation, CigConfig, CigConfigureFailure,
-        CigConfigureState,
+        CigConfigureState, CisCreateRequest, CisRef,
+        SemanticCisCreateFailure, SemanticCisCreateState,
     },
     iso_host_feature::{
         CisHostFeatureFailure, CisHostFeatureState,
     },
     iso_lifecycle::{
         CigRemoveFailure, CigRemoveState,
+        CisDisconnectFailureKind, SemanticCisDisconnectState,
     },
     gatt::{GattReport, GattRequest, GattRequestId},
     mailbox::HciReport,
@@ -97,6 +101,8 @@ pub enum ControlPhase {
     EnablePlanned,
     Enabling { side: AudioSide },
     Enabled,
+    CreatingCis,
+    CisEstablished,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -121,6 +127,9 @@ pub enum ControlTimer {
     },
     AseOperation { side: AudioSide },
     CigConfig,
+    CisCreate,
+    CleanupCis { cis: CisRef },
+    CleanupAse { side: AudioSide },
     CleanupCig { cig_id: u8 },
     CleanupDisconnect(ConnectionToken),
     CleanupPrivacy,
@@ -148,6 +157,8 @@ pub enum ControlAction {
     },
     ClearControllerPrivacy,
     ConfigureCig(CigConfig),
+    CreateCis(CisCreateRequest),
+    DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     BeginGatt(GattRequest),
     CancelGatt {
@@ -160,6 +171,14 @@ pub enum ControlAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlCleanupFailure {
+    CisDisconnect {
+        cis: CisRef,
+        kind: CisDisconnectFailureKind,
+    },
+    AseRelease {
+        side: AudioSide,
+        failure: AseOperationFailure,
+    },
     CigRemove(CigRemoveFailure),
     Disconnect(DisconnectFailure),
     Privacy(PrivacyFailure),
@@ -247,6 +266,16 @@ pub enum ControlFailure {
         side: AudioSide,
         detail: String,
     },
+    CisCreate(SemanticCisCreateFailure),
+    CisCreateMismatch {
+        expected_cig_id: u8,
+        actual_cig_id: u8,
+        expected_cis_ids: Vec<u8>,
+        actual_cis_ids: Vec<u8>,
+    },
+    CisCreateTimeout {
+        cig_id: u8,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -286,6 +315,12 @@ pub struct ControlMachine {
     enable_statuses: [Option<AseStatus>; 2],
     cig_may_exist: bool,
     rollback_cig_pending: bool,
+    live_cis: BTreeSet<CisRef>,
+    rollback_cis_queue: Vec<CisRef>,
+    rollback_cis_current: Option<CisRef>,
+    rollback_ase_queue: Vec<AudioSide>,
+    rollback_ase_current: Option<AudioSide>,
+    rollback_ase_operation: Option<AseOperationMachine>,
     failure: Option<ControlFailure>,
 }
 
@@ -318,6 +353,12 @@ impl ControlMachine {
             enable_statuses: [None, None],
             cig_may_exist: false,
             rollback_cig_pending: false,
+            live_cis: BTreeSet::new(),
+            rollback_cis_queue: Vec::new(),
+            rollback_cis_current: None,
+            rollback_ase_queue: Vec::new(),
+            rollback_ase_current: None,
+            rollback_ase_operation: None,
             failure: None,
         })
     }
@@ -386,6 +427,29 @@ impl ControlMachine {
         self.enable_statuses[side_index(side)].as_ref()
     }
 
+    pub fn live_cis(&self) -> &BTreeSet<CisRef> {
+        &self.live_cis
+    }
+
+    pub fn begin_cis_creation(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::Enabled {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let request = self
+            .iso_plan
+            .as_ref()
+            .expect("Enabled requires ISO plan")
+            .cis_create_request();
+        self.live_cis.clear();
+        self.phase = ControlPhase::CreatingCis;
+        Ok(vec![
+            ControlAction::CreateCis(request),
+            ControlAction::ArmTimer(ControlTimer::CisCreate),
+        ])
+    }
+
     pub fn plan_enable(
         &mut self,
     ) -> Result<(), ControlFailure> {
@@ -408,6 +472,7 @@ impl ControlMachine {
             .map_err(ControlFailure::EnablePlan)?;
         self.enable_plan = Some(plan);
         self.enable_statuses = [None, None];
+        self.live_cis.clear();
         self.phase = ControlPhase::EnablePlanned;
         Ok(())
     }
@@ -441,6 +506,7 @@ impl ControlMachine {
         self.qos_statuses = [None, None];
         self.enable_plan = None;
         self.enable_statuses = [None, None];
+        self.live_cis.clear();
         self.phase = ControlPhase::QosPlanned;
         Ok(())
     }
@@ -1197,6 +1263,62 @@ impl ControlMachine {
                     ControlFailure::CigConfigure(failure.clone()),
                 )?);
                 Ok(actions)
+            }
+            (
+                ControlPhase::CreatingCis,
+                HciReport::SemanticCisCreateState(
+                    SemanticCisCreateState::AwaitingEstablished {
+                        cig_id,
+                        established_cis_ids,
+                    },
+                ),
+            ) => {
+                self.observe_semantic_cis_set(
+                    *cig_id,
+                    established_cis_ids,
+                )?;
+                Ok(Vec::new())
+            }
+            (
+                ControlPhase::CreatingCis,
+                HciReport::SemanticCisCreateState(
+                    SemanticCisCreateState::Ready {
+                        cig_id,
+                        established_cis_ids,
+                    },
+                ),
+            ) => {
+                self.observe_semantic_cis_set(
+                    *cig_id,
+                    established_cis_ids,
+                )?;
+                if !self.semantic_cis_set_complete(
+                    *cig_id,
+                    established_cis_ids,
+                ) {
+                    let plan = self
+                        .iso_plan
+                        .as_ref()
+                        .expect("CreatingCis requires ISO plan");
+                    let mut expected =
+                        vec![plan.left.cis_id, plan.right.cis_id];
+                    expected.sort_unstable();
+                    let mut actual = established_cis_ids.clone();
+                    actual.sort_unstable();
+                    return self.fail(
+                        ControlFailure::CisCreateMismatch {
+                            expected_cig_id: plan.cig_id,
+                            actual_cig_id: *cig_id,
+                            expected_cis_ids: expected,
+                            actual_cis_ids: actual,
+                        },
+                    );
+                }
+
+                self.phase = ControlPhase::CisEstablished;
+                Ok(vec![ControlAction::DisarmTimer(
+                    ControlTimer::CisCreate,
+                )])
             }
             (
                 ControlPhase::RollingBack,
@@ -2033,6 +2155,64 @@ impl ControlMachine {
             }
             AudioDiscoveryAction::Ignored => Ok(actions),
         }
+    }
+
+    fn semantic_cis_ref(
+        &self,
+        cig_id: u8,
+        cis_id: u8,
+    ) -> Result<CisRef, ControlFailure> {
+        let plan = self
+            .iso_plan
+            .as_ref()
+            .ok_or(ControlFailure::InvalidStartState(self.phase))?;
+        if cig_id != plan.cig_id
+            || ![plan.left.cis_id, plan.right.cis_id]
+                .contains(&cis_id)
+        {
+            let mut expected =
+                vec![plan.left.cis_id, plan.right.cis_id];
+            expected.sort_unstable();
+            return Err(ControlFailure::CisCreateMismatch {
+                expected_cig_id: plan.cig_id,
+                actual_cig_id: cig_id,
+                expected_cis_ids: expected,
+                actual_cis_ids: vec![cis_id],
+            });
+        }
+        Ok(CisRef { cig_id, cis_id })
+    }
+
+    fn observe_semantic_cis_set(
+        &mut self,
+        cig_id: u8,
+        cis_ids: &[u8],
+    ) -> Result<(), ControlFailure> {
+        let mut next = BTreeSet::new();
+        for cis_id in cis_ids {
+            next.insert(self.semantic_cis_ref(cig_id, *cis_id)?);
+        }
+        self.live_cis = next;
+        Ok(())
+    }
+
+    fn semantic_cis_set_complete(
+        &self,
+        cig_id: u8,
+        cis_ids: &[u8],
+    ) -> bool {
+        let Some(plan) = self.iso_plan.as_ref() else {
+            return false;
+        };
+        if cig_id != plan.cig_id || cis_ids.len() != 2 {
+            return false;
+        }
+        let mut actual = cis_ids.to_vec();
+        actual.sort_unstable();
+        let mut expected =
+            vec![plan.left.cis_id, plan.right.cis_id];
+        expected.sort_unstable();
+        actual == expected
     }
 
     fn begin_member_connection(
