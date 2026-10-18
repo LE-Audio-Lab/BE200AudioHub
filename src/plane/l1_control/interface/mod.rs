@@ -1,3 +1,4 @@
+pub mod condition;
 //! Control Plane public/cross-owner interfaces.
 
 pub mod command;
