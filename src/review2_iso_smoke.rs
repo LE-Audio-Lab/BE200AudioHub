@@ -1867,18 +1867,6 @@ fn validate_completed_audit(
 }
 
 #[cfg(windows)]
-fn run_iso_probe(
-    session: &mut crate::review2_bond_smoke::DualEncryptedBondSession,
-    frame_count: usize,
-) -> Result<IsoProbeResult, String> {
-    run_iso_probe_with_data_plane(
-        session,
-        frame_count,
-        IsoProbeDataPlane::OpaqueReview2,
-    )
-}
-
-#[cfg(windows)]
 fn run_iso_probe_with_data_plane(
     session: &mut crate::review2_bond_smoke::DualEncryptedBondSession,
     frame_count: usize,
