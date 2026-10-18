@@ -4257,6 +4257,339 @@ mod tests {
         }
     }
 
+    fn drive_to_enabled() -> ControlMachine {
+        let mut machine = drive_to_enable_planned();
+        let actions = machine.begin_enable().unwrap();
+        let actions =
+            drive_enable(&mut machine, AudioSide::Left, actions);
+        let _actions =
+            drive_enable(&mut machine, AudioSide::Right, actions);
+        assert_eq!(machine.phase(), ControlPhase::Enabled);
+        machine
+    }
+
+    fn release_cp_success_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+        AseControlResponse {
+            opcode: AseOpcode::Release,
+            responses: vec![AseResponse {
+                ase_id: machine.planned_sink(side).unwrap().ase_id,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    fn drive_rollback_release(
+        machine: &mut ControlMachine,
+        side: AudioSide,
+        actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::hci_host::gatt::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        let _ = complete_gatt(
+            machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+
+        assert!(machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0043,
+                        value: release_cp_success_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let actions = machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0046,
+                        value: vec![
+                            machine.planned_sink(side).unwrap().ase_id,
+                            AseState::RELEASING.0,
+                        ],
+                    },
+                ),
+            ))
+            .unwrap();
+
+        let readback = only_begin_gatt(&actions);
+        assert_eq!(
+            readback.operation,
+            GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        );
+
+        complete_gatt(
+            machine,
+            &readback,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: vec![
+                    machine.planned_sink(side).unwrap().ase_id,
+                    AseState::IDLE.0,
+                ],
+            },
+        )
+    }
+
+    #[test]
+    fn create_cis_success_uses_only_semantic_cis_refs() {
+        let mut machine = drive_to_enabled();
+        let plan = machine.iso_plan().unwrap().clone();
+
+        let actions = machine.begin_cis_creation().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::CreateCis(
+                    plan.cis_create_request(),
+                ),
+                ControlAction::ArmTimer(ControlTimer::CisCreate),
+            ]
+        );
+        assert_eq!(machine.phase(), ControlPhase::CreatingCis);
+
+        assert!(machine
+            .on_hci_report(&HciReport::SemanticCisCreateState(
+                SemanticCisCreateState::AwaitingEstablished {
+                    cig_id: 1,
+                    established_cis_ids: vec![2],
+                },
+            ))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            machine.live_cis(),
+            &BTreeSet::from([CisRef {
+                cig_id: 1,
+                cis_id: 2,
+            }])
+        );
+
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticCisCreateState(
+                SemanticCisCreateState::Ready {
+                    cig_id: 1,
+                    established_cis_ids: vec![2, 1],
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::CisCreate,
+            )]
+        );
+        assert_eq!(machine.phase(), ControlPhase::CisEstablished);
+        assert_eq!(
+            machine.live_cis(),
+            &BTreeSet::from([
+                CisRef {
+                    cig_id: 1,
+                    cis_id: 1,
+                },
+                CisRef {
+                    cig_id: 1,
+                    cis_id: 2,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn partial_cis_failure_disconnects_cis_releases_ases_then_removes_cig() {
+        use crate::hci_host::iso::{
+            SemanticCisCreateFailureKind,
+            SemanticCisEstablishedFailure,
+        };
+
+        let mut machine = drive_to_enabled();
+        machine.begin_cis_creation().unwrap();
+
+        let failure = SemanticCisCreateFailure {
+            cig_id: 1,
+            established_cis_ids: vec![2],
+            failed: vec![SemanticCisEstablishedFailure {
+                cis_id: 1,
+                status: 0x3E,
+            }],
+            kind: SemanticCisCreateFailureKind::
+                CisEstablishmentFailed,
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticCisCreateState(
+                SemanticCisCreateState::Failed(failure.clone()),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(ControlTimer::CisCreate),
+                ControlAction::DisconnectCisByRef {
+                    cis: CisRef {
+                        cig_id: 1,
+                        cis_id: 2,
+                    },
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupCis {
+                        cis: CisRef {
+                            cig_id: 1,
+                            cis_id: 2,
+                        },
+                    },
+                ),
+            ]
+        );
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::CisCreate(actual))
+                if actual == &failure
+        ));
+
+        let cis = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+        let actions = machine
+            .on_hci_report(
+                &HciReport::SemanticCisDisconnectState(
+                    SemanticCisDisconnectState::Disconnected {
+                        cis,
+                        event_reason: 0x16,
+                    },
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(
+                ControlTimer::CleanupCis { cis },
+            )
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupAse {
+                    side: AudioSide::Right,
+                }
+            )
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::BeginGatt(_)
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveCig { .. }
+        )));
+
+        let actions = drive_rollback_release(
+            &mut machine,
+            AudioSide::Right,
+            actions,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupAse {
+                    side: AudioSide::Left,
+                }
+            )
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveCig { .. }
+        )));
+
+        let actions = drive_rollback_release(
+            &mut machine,
+            AudioSide::Left,
+            actions,
+        );
+        assert!(actions.iter().any(|action| {
+            *action == ControlAction::RemoveCig { cig_id: 1 }
+        }));
+        let remove_index = actions
+            .iter()
+            .position(|action| {
+                *action == ControlAction::RemoveCig { cig_id: 1 }
+            })
+            .unwrap();
+        assert!(!actions[..remove_index].iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectAcl { .. }
+        )));
+        assert!(machine.live_cis().is_empty());
+    }
+
+    #[test]
+    fn create_cis_timeout_fails_closed_without_guessing_controller_cleanup() {
+        let mut machine = drive_to_enabled();
+        machine.begin_cis_creation().unwrap();
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::CisCreate,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::CisCreate,
+            )]
+        );
+        assert_eq!(machine.phase(), ControlPhase::Faulted);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::CisCreateTimeout {
+                cig_id: 1,
+            })
+        ));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveCig { .. }
+                | ControlAction::DisconnectAcl { .. }
+        )));
+    }
+
     #[test]
     fn set_cig_success_reaches_cig_configured_without_retaining_raw_handles() {
         let mut machine = machine_at_codec_configured();
