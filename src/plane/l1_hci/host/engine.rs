@@ -80,6 +80,9 @@ use crate::{
                 GattValueEvent, ATT_DEFAULT_MTU,
             },
             host::link::{HciObservation, LinkFault, QueueHostTransport},
+            telemetry::{
+                HciIsoTelemetrySnapshot, HciIsoTraceRecord, HciTelemetry,
+            },
         },
         l2_transport::{
             packet::ControllerPacket,
@@ -214,6 +217,7 @@ pub struct HciEngine {
     next_connection_generation: u64,
     acl_credit_audit: AclCreditAudit,
     iso_credit_audit: IsoCreditAudit,
+    telemetry: HciTelemetry,
     cis_host_feature_state: CisHostFeatureState,
     cis_host_feature_transaction: Option<CisHostFeatureTransaction>,
     gatt_transactions: BTreeMap<u16, GattTransaction>,
@@ -262,6 +266,7 @@ impl HciEngine {
             next_connection_generation: 1,
             acl_credit_audit: AclCreditAudit::default(),
             iso_credit_audit: IsoCreditAudit::default(),
+            telemetry: HciTelemetry::default(),
             cis_host_feature_state: CisHostFeatureState::Idle,
             cis_host_feature_transaction: None,
             gatt_transactions: BTreeMap::new(),
@@ -746,6 +751,18 @@ impl HciEngine {
 
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
         self.iso_credit_audit.snapshot()
+    }
+
+    pub fn iso_telemetry_snapshot(&self) -> HciIsoTelemetrySnapshot {
+        self.telemetry.iso_snapshot()
+    }
+
+    pub fn iso_telemetry_trace_snapshot(&self) -> Vec<HciIsoTraceRecord> {
+        self.telemetry.iso_trace_snapshot()
+    }
+
+    pub fn take_iso_telemetry_dirty(&mut self) -> bool {
+        self.telemetry.take_iso_dirty()
     }
 
     pub fn iso_path_state(&self) -> &IsoPathOperationState {
@@ -1879,6 +1896,10 @@ impl HciEngine {
                 self.iso_credit_audit
                     .submitted(*connection_handle)
                     .map_err(EngineFault::IsoCredit)?;
+                self.telemetry.observe_iso_submitted(
+                    *connection_handle,
+                    self.iso_credit_audit.in_flight(),
+                );
             }
             HciObservation::CompletedPackets { completions } => {
                 for (connection_handle, completed) in completions {
@@ -1899,6 +1920,11 @@ impl HciEngine {
                         self.iso_credit_audit
                             .completed(*connection_handle, completed)
                             .map_err(EngineFault::IsoCredit)?;
+                        self.telemetry.observe_iso_completed(
+                            *connection_handle,
+                            completed,
+                            self.iso_credit_audit.in_flight(),
+                        );
                     } else {
                         return Err(EngineFault::AclCredit(
                             AclCreditFault::UnknownCompletion {
@@ -2584,13 +2610,23 @@ impl HciEngine {
                 if self.connection_generations.remove(&handle).is_some() {
                     self.acl_credit_audit.flush(handle);
                 } else {
-                    self.iso_credit_audit.flush(handle);
+                    let retired = self.iso_credit_audit.flush(handle);
+                    self.telemetry.observe_iso_retired(
+                        Some(handle),
+                        retired,
+                        self.iso_credit_audit.in_flight(),
+                    );
                 }
             }
 
             if is_flush {
                 self.acl_credit_audit.flush_all();
-                self.iso_credit_audit.flush_all();
+                let retired = self.iso_credit_audit.flush_all();
+                self.telemetry.observe_iso_retired(
+                    None,
+                    retired,
+                    self.iso_credit_audit.in_flight(),
+                );
             }
         }
         Ok(())
@@ -2966,6 +3002,10 @@ impl HciEngine {
                     self.iso_credit_audit
                         .configure(limit)
                         .map_err(EngineFault::IsoCredit)?;
+                    self.telemetry.observe_iso_configured(
+                        limit,
+                        self.iso_credit_audit.in_flight(),
+                    );
                 }
                 self.attach_state = OperationalAttachState::Ready;
             } else {
@@ -3644,6 +3684,11 @@ mod tests {
         }
         assert_eq!(engine.iso_credit_audit.in_flight(), 8);
         assert_eq!(engine.device().iso_packets_pending(), Some(8));
+        let telemetry = engine.iso_telemetry_snapshot();
+        assert_eq!(telemetry.submitted_packets, 8);
+        assert_eq!(telemetry.completed_packets, 0);
+        assert_eq!(telemetry.in_flight_packets, 8);
+        assert_eq!(telemetry.peak_in_flight_packets, 8);
 
         assert_eq!(
             engine.submit_iso_group(&group).unwrap(),
@@ -3666,6 +3711,11 @@ mod tests {
         engine.poll_until_quiescent().unwrap();
         assert_eq!(engine.iso_credit_audit.in_flight(), 0);
         assert_eq!(engine.device().iso_packets_pending(), Some(0));
+        let telemetry = engine.iso_telemetry_snapshot();
+        assert_eq!(telemetry.submitted_packets, 8);
+        assert_eq!(telemetry.completed_packets, 8);
+        assert_eq!(telemetry.retired_packets, 0);
+        assert_eq!(telemetry.in_flight_packets, 0);
 
         assert_eq!(
             engine
