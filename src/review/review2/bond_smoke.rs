@@ -9,25 +9,27 @@ use std::{
 
 use crate::{
     hci_host::{
-        connection::{
-            ConnectionToken, DisconnectState, FalConnectRequest,
-            FalConnectionState, LeConnectionSetSnapshot,
-            LeInitiationParameters, LePeerIdentity,
-        },
         engine::{
             ControllerIdentity, ControllerIdentityFailure,
             OperationalAttachState, PassiveScanState,
         },
         iso_host_feature::CisHostFeatureState,
         mailbox::{HciReport, HciReportInbox},
-        scan::ScanSummary,
         stack::{
             spawn_be200_hci_stack, HciStack, HciStackConfig, HciStackExit,
+        },
+    },
+    plane::l1_hci::acl::{
+        connection::{
+            ConnectionToken, DisconnectState, FalConnectRequest,
+            FalConnectionState, LeConnectionSetSnapshot,
+            LeInitiationParameters, LePeerIdentity,
         },
         privacy::{
             ControllerPrivacyState, ResolvingListConfig, ResolvingPeer,
             DEFAULT_RPA_TIMEOUT_SECONDS,
         },
+        scan::ScanSummary,
         security::{
             StoredEncryptionRequest, StoredEncryptionState,
             StoredLeKeyMaterial,
@@ -506,7 +508,7 @@ fn wait_scan_complete(
 }
 
 fn observation_matches_member(
-    observation: &crate::hci_host::scan::ScanObservation,
+    observation: &crate::plane::l1_hci::acl::scan::ScanObservation,
     member: &ReviewBondMember,
 ) -> Result<bool, String> {
     if observation.address.eq_ignore_ascii_case(
@@ -667,7 +669,7 @@ fn wait_connected(
     tracker: &mut BondSmokeTracker,
     timeout: Duration,
     member: &str,
-) -> Result<crate::hci_host::connection::LeConnectionSnapshot, BondSmokeRunError> {
+) -> Result<crate::plane::l1_hci::acl::connection::LeConnectionSnapshot, BondSmokeRunError> {
     wait_for_report(
         reports,
         tracker,

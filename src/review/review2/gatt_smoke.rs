@@ -6,13 +6,13 @@ use std::{
 use bumble::Uuid;
 
 use crate::{
-    hci_host::{
-        connection::ConnectionToken,
-        gatt::{
+    hci_host::mailbox::HciReport,
+    plane::l1_hci::{
+        acl::connection::ConnectionToken,
+        gatt::transaction::{
             GattCharacteristic, GattOperation, GattReport, GattRequest,
             GattResult, GattService,
         },
-        mailbox::HciReport,
     },
     review::review2::bond_smoke::{
         open_dual_encrypted_bond_session, BondSmokeCleanupSummary,

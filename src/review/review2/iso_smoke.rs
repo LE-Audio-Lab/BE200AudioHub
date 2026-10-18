@@ -35,11 +35,6 @@ use crate::{
         synthetic::SyntheticToneConfig,
     },
     hci_host::{
-        connection::ConnectionToken,
-        gatt::{
-            GattCharacteristic, GattOperation, GattReport, GattRequest,
-            GattResult, GattValueEvent,
-        },
         iso::{
             CigAllocation, CigConfig, CigConfigureState, CisAclBinding,
             CisConfig, CisCreateRequest, CisCreateState, CisRef,
@@ -58,6 +53,13 @@ use crate::{
         mailbox::HciReport,
         stack::HciStack,
         stream_route::{StereoStreamRouteBinding, StreamRouteState},
+    },
+    plane::l1_hci::{
+        acl::connection::ConnectionToken,
+        gatt::transaction::{
+            GattCharacteristic, GattOperation, GattReport, GattRequest,
+            GattResult, GattValueEvent,
+        },
     },
     review::review2::bond_smoke::{
         open_dual_encrypted_bond_session_for_iso,
