@@ -335,6 +335,7 @@ impl ControlMachine {
 
 #[cfg(test)]
 mod tests {
+    use bumble::Address;
     use bumble_smp::privacy::resolvable_private_address;
 
     use crate::{
@@ -344,7 +345,6 @@ mod tests {
                 ControllerCapabilities, ControllerIdentity,
                 PacketPoolSnapshot,
             },
-            privacy::ControllerPrivacyState,
             scan::{ScanObservation, ScanSummary},
             security::StoredLeKeyMaterial,
         },
@@ -612,8 +612,4 @@ mod tests {
         assert_eq!(machine.phase(), ControlPhase::Faulted);
     }
 
-    #[test]
-    fn privacy_failure_is_typed() {
-        let _ = ControllerPrivacyState::Idle;
-    }
 }
