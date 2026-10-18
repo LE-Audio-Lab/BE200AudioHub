@@ -192,7 +192,7 @@ pub fn parse_current_path_args(
     })
 }
 
-fn control_plan(material: &ReviewBondMaterial) -> ControlSetPlan {
+pub(crate) fn control_plan(material: &ReviewBondMaterial) -> ControlSetPlan {
     ControlSetPlan {
         controller_identity_le: material.controller_identity_le,
         local_irk: material.local_irk,
@@ -565,145 +565,222 @@ fn wait_media_completion(
     }
 }
 
+pub(crate) struct CurrentPathControlDriver {
+    condition: Condition,
+    control: ControlPlane,
+    scope: ConditionScope,
+    timers: TimerBook,
+    binding: Option<StreamBinding>,
+}
+
+impl CurrentPathControlDriver {
+    pub(crate) fn new(
+        plan: ControlSetPlan,
+        connect_timeout: Duration,
+    ) -> Result<Self, String> {
+        let lifecycle = LifecycleSnapshot {
+            generation: PRODUCT_GENERATION,
+            session_id: Some(PRODUCT_SESSION_ID),
+            lifecycle: LifecycleState::Running,
+            session: SessionState::Preparing,
+        };
+        let scope = ConditionScope::session(
+            PRODUCT_GENERATION,
+            PRODUCT_SESSION_ID,
+        );
+        let condition = Condition::new(lifecycle);
+        let control = ControlPlane::new(plan)
+            .map_err(|error| {
+                format!("Control plan rejected: {error:?}")
+            })?;
+
+        Ok(Self {
+            condition,
+            control,
+            scope,
+            timers: TimerBook::new(connect_timeout),
+            binding: None,
+        })
+    }
+
+    pub(crate) fn start_and_bind(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<StreamBinding, String> {
+        let start = execute_control(
+            &self.condition,
+            &mut self.control,
+            CoreCommand::StartControl,
+        )
+        .map_err(|error| format!("StartControl failed: {error:?}"))?;
+        apply_and_continue(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            start.control_step,
+        )?;
+
+        drive_until(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            DriveTarget::StreamReadyUnbound,
+        )?;
+
+        let handoff = execute_control(
+            &self.condition,
+            &mut self.control,
+            CoreCommand::BeginStreamHandoff {
+                session_id: PRODUCT_SESSION_ID,
+                stream_id: PRODUCT_STREAM_ID,
+            },
+        )
+        .map_err(|error| {
+            format!("BeginStreamHandoff failed: {error:?}")
+        })?;
+        apply_and_continue(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            handoff.control_step,
+        )?;
+        drive_until(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            DriveTarget::StreamBound,
+        )?;
+
+        let binding = self.binding.ok_or_else(|| {
+            "Control reached bound target without StreamBinding".to_string()
+        })?;
+        if binding.session_id != PRODUCT_SESSION_ID
+            || binding.stream_id != PRODUCT_STREAM_ID
+            || binding.format.sample_rate_hz != 48_000
+            || binding.format.frame_duration_us != 10_000
+            || binding.format.octets_per_sdu != 100
+            || binding.presentation_delay_us != 40_000
+        {
+            return Err(format!(
+                "Control StreamBinding does not match frozen product parameters: {binding:?}"
+            ));
+        }
+
+        Ok(binding)
+    }
+
+    pub(crate) fn iso_audit(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<IsoCreditSnapshot, String> {
+        read_iso_audit(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+        )
+    }
+
+    pub(crate) fn wait_media_completion(
+        &mut self,
+        stack: &HciStack,
+        before: &IsoCreditSnapshot,
+        frames: usize,
+    ) -> Result<IsoCreditSnapshot, String> {
+        wait_media_completion(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            before,
+            frames,
+        )
+    }
+
+    pub(crate) fn wait_iso_idle(
+        &mut self,
+        stack: &HciStack,
+        timeout: Duration,
+    ) -> Result<IsoCreditSnapshot, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let audit = self.iso_audit(stack)?;
+            if audit.in_flight == 0 {
+                return Ok(audit);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "ISO drain timeout: in_flight={}",
+                    audit.in_flight
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub(crate) fn stop(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<(), String> {
+        let stop = execute_control(
+            &self.condition,
+            &mut self.control,
+            CoreCommand::StopControl,
+        )
+        .map_err(|error| format!("StopControl failed: {error:?}"))?;
+        apply_and_continue(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            stop.control_step,
+        )?;
+        drive_until(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            DriveTarget::Idle,
+        )
+    }
+}
+
 fn run_current_path(
     stack: &HciStack,
     plan: ControlSetPlan,
     connect_timeout: Duration,
     frames: usize,
 ) -> Result<(IsoCreditSnapshot, IsoCreditSnapshot), String> {
-    let lifecycle = LifecycleSnapshot {
-        generation: PRODUCT_GENERATION,
-        session_id: Some(PRODUCT_SESSION_ID),
-        lifecycle: LifecycleState::Running,
-        session: SessionState::Preparing,
-    };
-    let scope = ConditionScope::session(
-        PRODUCT_GENERATION,
-        PRODUCT_SESSION_ID,
-    );
-    let mut condition = Condition::new(lifecycle);
-    let mut control = ControlPlane::new(plan)
-        .map_err(|error| format!("Control plan rejected: {error:?}"))?;
-    let mut timers = TimerBook::new(connect_timeout);
-    let mut binding = None;
+    let mut driver =
+        CurrentPathControlDriver::new(plan, connect_timeout)?;
+    let binding = driver.start_and_bind(stack)?;
+    let audit_before = driver.iso_audit(stack)?;
 
-    let start = execute_control(
-        &condition,
-        &mut control,
-        CoreCommand::StartControl,
-    )
-    .map_err(|error| format!("StartControl failed: {error:?}"))?;
-    apply_and_continue(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut binding,
-        start.control_step,
-    )?;
-
-    drive_until(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut binding,
-        DriveTarget::StreamReadyUnbound,
-    )?;
-
-    let handoff = execute_control(
-        &condition,
-        &mut control,
-        CoreCommand::BeginStreamHandoff {
-            session_id: PRODUCT_SESSION_ID,
-            stream_id: PRODUCT_STREAM_ID,
-        },
-    )
-    .map_err(|error| {
-        format!("BeginStreamHandoff failed: {error:?}")
-    })?;
-    apply_and_continue(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut binding,
-        handoff.control_step,
-    )?;
-    drive_until(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut binding,
-        DriveTarget::StreamBound,
-    )?;
-
-    let binding = binding
-        .ok_or_else(|| "Control reached bound target without StreamBinding".to_string())?;
-    if binding.session_id != PRODUCT_SESSION_ID
-        || binding.stream_id != PRODUCT_STREAM_ID
-        || binding.format.sample_rate_hz != 48_000
-        || binding.format.frame_duration_us != 10_000
-        || binding.format.octets_per_sdu != 100
-        || binding.presentation_delay_us != 40_000
-    {
-        return Err(format!(
-            "Control StreamBinding does not match frozen product parameters: {binding:?}"
-        ));
-    }
-
-    let audit_before = read_iso_audit(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut Some(binding),
-    )?;
-
-    let mut bound = Some(binding);
     submit_synthetic_lc3(stack, binding, frames)?;
-    let audit_after = wait_media_completion(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut bound,
-        &audit_before,
-        frames,
-    )?;
+    let audit_after =
+        driver.wait_media_completion(stack, &audit_before, frames)?;
 
-    let stop = execute_control(
-        &condition,
-        &mut control,
-        CoreCommand::StopControl,
-    )
-    .map_err(|error| format!("StopControl failed: {error:?}"))?;
-    apply_and_continue(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut bound,
-        stop.control_step,
-    )?;
-    drive_until(
-        stack,
-        &mut control,
-        &mut condition,
-        scope,
-        &mut timers,
-        &mut bound,
-        DriveTarget::Idle,
-    )?;
-
+    driver.stop(stack)?;
     Ok((audit_before, audit_after))
 }
 
