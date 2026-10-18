@@ -37,6 +37,7 @@ impl ControlPlane {
     ) -> Result<ControlStep, ControlFailure> {
         let actions = match intent {
             ControlIntent::Start => self.machine.start()?,
+            ControlIntent::Stop => self.machine.begin_teardown()?,
             ControlIntent::BeginStreamHandoff {
                 session_id,
                 stream_id,
@@ -51,6 +52,17 @@ impl ControlPlane {
                 .on_event(crate::plane::l1_control::engine::machine::ControlEvent::TimerExpired(timer))?,
         };
         Ok(self.finish_step(actions))
+    }
+
+    pub fn continue_ready_stage(
+        &mut self,
+    ) -> Result<Option<ControlStep>, ControlFailure> {
+        let actions = self.machine.continue_ready_stage()?;
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(self.finish_step(actions)))
+        }
     }
 
     pub fn handle_lower_report(

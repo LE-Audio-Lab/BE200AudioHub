@@ -28,6 +28,7 @@ pub fn execute_control(
 
     let intent = match command {
         CoreCommand::StartControl => ControlIntent::Start,
+        CoreCommand::StopControl => ControlIntent::Stop,
         CoreCommand::BeginStreamHandoff {
             session_id,
             stream_id,
