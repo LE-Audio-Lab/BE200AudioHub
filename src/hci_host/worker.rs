@@ -489,11 +489,21 @@ fn process_command(
         HciCommand::SetupIsoPath(config) => {
             engine.begin_iso_path_setup(config)
         }
+        HciCommand::SetupIsoInputPathByRef { cis } => {
+            engine.begin_iso_input_path_setup_by_ref(cis)
+        }
         HciCommand::RemoveIsoPath {
             connection_handle,
             directions,
         } => engine.begin_iso_path_remove(
             connection_handle,
+            directions,
+        ),
+        HciCommand::RemoveIsoPathByRef {
+            cis,
+            directions,
+        } => engine.begin_iso_path_remove_by_ref(
+            cis,
             directions,
         ),
         HciCommand::BeginIsoDrain(request) => {
@@ -755,6 +765,15 @@ fn publish_state_transitions(
                 iso_path_state.clone(),
             ))
             .map_err(map_report_error)?;
+        if let Some(semantic_state) =
+            engine.semantic_iso_path_state()
+        {
+            report_tx
+                .try_send(HciReport::SemanticIsoPathState(
+                    semantic_state,
+                ))
+                .map_err(map_report_error)?;
+        }
         *last_iso_path_state = iso_path_state;
     }
 
