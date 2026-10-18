@@ -12,3 +12,4 @@ pub(crate) mod discovery;
 pub(crate) mod iso_plan;
 pub(crate) mod machine;
 pub(crate) mod plan;
+pub(crate) mod qos_plan;
