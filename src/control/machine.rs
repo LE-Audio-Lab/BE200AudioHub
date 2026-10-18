@@ -159,6 +159,10 @@ pub enum ControlTimer {
         session_id: SessionId,
         stream_id: StreamId,
     },
+    CleanupStreamRoute {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
     CleanupIsoPath { cis: CisRef },
     CleanupCis { cis: CisRef },
     CleanupAse { side: AudioSide },
@@ -198,6 +202,10 @@ pub enum ControlAction {
     DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     BindStreamRoute(StereoStreamRouteBinding),
+    UnbindStreamRoute {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -393,6 +401,8 @@ pub struct ControlMachine {
     streaming_statuses: [Option<AseStatus>; 2],
     pending_stream_binding: Option<StreamBinding>,
     active_stream_binding: Option<StreamBinding>,
+    rollback_stream_route: Option<(SessionId, StreamId)>,
+    rollback_stream_route_unbind_pending: bool,
     rollback_iso_path_queue: Vec<CisRef>,
     rollback_iso_path_current: Option<CisRef>,
     rollback_cis_queue: Vec<CisRef>,
@@ -439,6 +449,8 @@ impl ControlMachine {
             streaming_statuses: [None, None],
             pending_stream_binding: None,
             active_stream_binding: None,
+            rollback_stream_route: None,
+            rollback_stream_route_unbind_pending: false,
             rollback_iso_path_queue: Vec::new(),
             rollback_iso_path_current: None,
             rollback_cis_queue: Vec::new(),
@@ -607,6 +619,8 @@ impl ControlMachine {
         self.streaming_statuses = [None, None];
         self.pending_stream_binding = None;
         self.active_stream_binding = None;
+        self.rollback_stream_route = None;
+        self.rollback_stream_route_unbind_pending = false;
         self.start_streaming_gate(AudioSide::Left)
     }
 
@@ -3402,11 +3416,23 @@ impl ControlMachine {
         ])
     }
 
+    fn prepare_stream_route_rollback(&mut self) {
+        let binding = self
+            .active_stream_binding
+            .or(self.pending_stream_binding);
+        self.rollback_stream_route =
+            binding.map(|value| (value.session_id, value.stream_id));
+        self.rollback_stream_route_unbind_pending = false;
+        self.pending_stream_binding = None;
+        self.active_stream_binding = None;
+    }
+
     fn begin_rollback(
         &mut self,
         failure: ControlFailure,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
+        self.prepare_stream_route_rollback();
         self.rollback_queue = self
             .connections
             .iter()
@@ -3431,8 +3457,7 @@ impl ControlMachine {
         failure: ControlFailure,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.failure = Some(failure);
-        self.pending_stream_binding = None;
-        self.active_stream_binding = None;
+        self.prepare_stream_route_rollback();
         self.rollback_queue = self
             .connections
             .iter()
@@ -3467,6 +3492,27 @@ impl ControlMachine {
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.phase = ControlPhase::RollingBack;
+
+        if let Some((session_id, stream_id)) =
+            self.rollback_stream_route
+        {
+            if !self.rollback_stream_route_unbind_pending {
+                self.rollback_stream_route_unbind_pending = true;
+                return Ok(vec![
+                    ControlAction::UnbindStreamRoute {
+                        session_id,
+                        stream_id,
+                    },
+                    ControlAction::ArmTimer(
+                        ControlTimer::CleanupStreamRoute {
+                            session_id,
+                            stream_id,
+                        },
+                    ),
+                ]);
+            }
+            return Ok(Vec::new());
+        }
 
         if self.rollback_iso_path_current.is_none() {
             if let Some(cis) = self.rollback_iso_path_queue.pop() {
