@@ -4,6 +4,23 @@ Status: **Frozen implementation direction / migration plan**
 
 Current landing status (2026-10-19): **V2 structural refactor landed on `refactor/v2-architecture`.**
 
+Post-Round8 Control decomposition status: **LANDED**. The earlier implementation
+term `ControlModel` is now superseded by the concrete landed ownership split:
+
+```text
+ConfirmedStatus       confirmed Control facts
+PlannedConfiguration  selected-but-not-yet-confirmed plans
+CleanupKnowledge      conservative uncertain-cleanup facts
+operation/*           temporary cross-event progress
+engine/machine/*      transition/reducer/orchestration flows
+```
+
+`ControlPhase` remains an internal Engine cursor/checkpoint for the current
+explicit stage APIs; it is not authoritative Control state and must not be
+renamed 1:1 to `current`. Explicit current/target semantics remain deferred
+until Core runtime composition. See
+`docs/design/CONTROL_DECOMPOSITION_POST_R8.md`.
+
 Verified branch state at handoff:
 
 ```text
@@ -23,7 +40,7 @@ Rounds 1–6 completed the intended source-ownership migration:
 - each Plane owns its operational truth and provider-side ConditionUpdate vocabulary;
 - HCI/Media high-rate telemetry remains producer-local and only publishes aggregate/coalesced or forced-final updates.
 
-This landing does **not** mean the final product runtime is composed. Remaining work begins with the post-structural phases: concrete Core startup/shutdown/recovery composition, timer ownership, bounded telemetry scheduling, MediaRt composition, ControlModel/operation extraction, and then full composed-runtime software/HIL acceptance.
+This landing does **not** mean the final product runtime is composed. Control ownership/operation decomposition has now landed. Remaining work begins with concrete Core startup/shutdown/recovery composition, timer ownership, bounded telemetry scheduling, MediaRt composition, and then full composed-runtime software/HIL acceptance.
 
 This document supersedes the implementation-direction portions of the earlier
 Review architecture documents where they conflict with the decisions frozen
