@@ -288,3 +288,73 @@ longevity mode:
 
 `--seconds` remains available in longevity mode. The parser validates the
 duration only after all flags are read, so flag order is irrelevant.
+
+
+### HIL-3 — 300-second longevity data plane passed, normal teardown ordering failed
+
+A five-minute longevity run reached 300/300 seconds with continuous audible
+music, then failed only during normal Stop:
+
+```text
+TeardownFailed {
+  cleanup: [
+    Timeout(CleanupAse { side: Right }),
+    Timeout(CleanupAse { side: Left })
+  ]
+}
+```
+
+This localizes the failure to graceful teardown after the longevity data window,
+not to live PCM capture, LC3, ISO scheduling, or the established CIS stream.
+
+Shared-resource source review corrected the teardown model:
+
+```text
+AOSP system/bta/le_audio/state_machine.cc
+
+SuspendStream:
+  target QoS Configured
+  -> ASCS Disable
+
+StopStream:
+  target Idle
+  -> ASCS Release
+
+Streaming -> Releasing:
+  -> Remove ISO data path
+  -> Disconnect CIS after data-path removal
+  -> remove CIG once CISes are gone
+```
+
+Bumble-rs `bumble-profiles/src/ascs.rs` independently confirms:
+
+```text
+Disable on Sink:
+  Streaming/Enabling -> QoS Configured
+
+Release:
+  any non-Idle ASE -> Releasing
+```
+
+BE200AudioHub normal Stop had inherited failure rollback ordering:
+
+```text
+route -> path -> CIS -> Release ASE -> CIG
+```
+
+That ordering is now split from failure rollback. Normal Stop becomes:
+
+```text
+route -> Release ASE -> path -> CIS -> CIG -> ACL/privacy
+```
+
+Failure rollback remains intentionally fail-closed:
+
+```text
+route -> path -> CIS -> Release ASE -> CIG -> ACL/privacy
+```
+
+AOSP also accepts Release completion into either Idle or cached Codec
+Configured. BE200AudioHub currently still targets Idle; that is recorded as a
+separate robustness gap because this HIL failed by timeout before readback, not
+by a readback-state mismatch.

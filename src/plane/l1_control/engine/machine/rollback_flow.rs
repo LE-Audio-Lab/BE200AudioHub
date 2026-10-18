@@ -1,8 +1,13 @@
 //! Rollback/teardown orchestration for ControlMachine.
 //!
-//! State is owned by operation::RollbackOperation. This module keeps the
-//! established route -> path -> CIS -> ASE -> CIG -> ACL/privacy ordering and
-//! fail-closed cleanup decisions out of the main engine file.
+//! State is owned by operation::RollbackOperation.
+//!
+//! Failure rollback keeps the established fail-closed
+//! route -> path -> CIS -> ASE Release -> CIG -> ACL/privacy ordering.
+//! Normal Stop uses a distinct graceful policy:
+//! route -> ASE Release -> path -> CIS -> CIG -> ACL/privacy.
+//! This mirrors the product stop semantics used by the AOSP LE Audio client,
+//! where a Streaming ASE is released before its ISO path/CIS is torn down.
 
 use super::*;
 
@@ -184,9 +189,11 @@ impl ControlMachine {
 
     /// Begin a normal product teardown from a route-bound stream.
     ///
-    /// This reuses the proven rollback ordering but carries no primary failure:
-    /// successful cleanup returns Control to Idle, while cleanup failures become
-    /// TeardownFailed.
+    /// Normal Stop intentionally does not reuse failure rollback ordering.
+    /// After route unbind, active ASEs are Released while the ISO path/CIS
+    /// still exist; only then are path, CIS, CIG, ACL and privacy resources
+    /// retired. Successful cleanup returns Control to Idle, while cleanup
+    /// failures become TeardownFailed.
     pub fn begin_teardown(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
@@ -310,6 +317,22 @@ impl ControlMachine {
             return Ok(Vec::new());
         }
 
+        let normal_teardown = self.failure.is_none();
+
+        // Graceful product Stop releases Streaming ASEs before disturbing the
+        // ISO path/CIS. Failure rollback deliberately does the opposite:
+        // fail-closed transport retirement comes first.
+        if normal_teardown {
+            if self.rollback.ase_current.is_none() {
+                if let Some(side) = self.rollback.ase_queue.pop() {
+                    return self.start_rollback_ase_release(side);
+                }
+            }
+            if self.rollback.ase_current.is_some() {
+                return Ok(Vec::new());
+            }
+        }
+
         if self.rollback.iso_path_current.is_none() {
             if let Some(cis) = self.rollback.iso_path_queue.pop() {
                 self.rollback.iso_path_current = Some(cis);
@@ -343,13 +366,15 @@ impl ControlMachine {
             return Ok(Vec::new());
         }
 
-        if self.rollback.ase_current.is_none() {
-            if let Some(side) = self.rollback.ase_queue.pop() {
-                return self.start_rollback_ase_release(side);
+        if !normal_teardown {
+            if self.rollback.ase_current.is_none() {
+                if let Some(side) = self.rollback.ase_queue.pop() {
+                    return self.start_rollback_ase_release(side);
+                }
             }
-        }
-        if self.rollback.ase_current.is_some() {
-            return Ok(Vec::new());
+            if self.rollback.ase_current.is_some() {
+                return Ok(Vec::new());
+            }
         }
 
         if self.cleanup_knowledge.cig_may_exist {

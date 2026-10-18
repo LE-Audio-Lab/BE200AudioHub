@@ -2996,7 +2996,89 @@
 
 
     #[test]
-    fn normal_teardown_reuses_reverse_cleanup_and_returns_idle_on_success() {
+    fn normal_teardown_releases_ases_before_iso_path_and_cis_cleanup() {
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Bound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        let actions = machine.begin_teardown().unwrap();
+        assert!(matches!(
+            actions.first(),
+            Some(ControlAction::UnbindStreamRoute { .. })
+        ));
+
+        let actions = machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Unbound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                    was_bound: true,
+                },
+            ))
+            .unwrap();
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupAse {
+                    side: AudioSide::Right,
+                }
+            )
+        )));
+        assert!(actions.iter().any(|action| {
+            matches!(action, ControlAction::BeginGatt(_))
+        }));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveIsoPathByRef { .. }
+                | ControlAction::DisconnectCisByRef { .. }
+        )));
+
+        let actions = drive_rollback_release(
+            &mut machine,
+            AudioSide::Right,
+            actions,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupAse {
+                    side: AudioSide::Left,
+                }
+            )
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveIsoPathByRef { .. }
+                | ControlAction::DisconnectCisByRef { .. }
+        )));
+
+        let actions = drive_rollback_release(
+            &mut machine,
+            AudioSide::Left,
+            actions,
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveIsoPathByRef { .. }
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectCisByRef { .. }
+        )));
+    }
+
+    #[test]
+    fn normal_teardown_returns_idle_after_graceful_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine
             .begin_stream_handoff(SessionId(7), StreamId(11))
