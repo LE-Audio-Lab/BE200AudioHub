@@ -134,9 +134,12 @@ fn run_loop(
                         matches!(&command, HciCommand::ReadIsoTxAudit);
 
                     let route_state =
-                        match process_stream_route_command(
+                        match process_worker_command(
                             &mut engine,
-                            &command,
+                            command,
+                            &mut blocked_iso_handles,
+                            &mut pending_iso_group,
+                            &mut iso_drain_state,
                         ) {
                             Ok(state) => state,
                             Err(fault) => {
@@ -145,20 +148,6 @@ fn run_loop(
                                 )
                             }
                         };
-
-                    if route_state.is_none() {
-                        if let Err(fault) = process_command(
-                            &mut engine,
-                            command,
-                            &mut blocked_iso_handles,
-                            &mut pending_iso_group,
-                            &mut iso_drain_state,
-                        ) {
-                            return HciWorkerExit::Faulted(
-                                HciWorkerFault::Engine(fault),
-                            );
-                        }
-                    }
 
                     if let Some(state) = route_state {
                         if let Err(fault) = report_tx
@@ -386,17 +375,29 @@ fn run_loop(
                     }
                 };
                 let audit_command =
-                    matches!(command, HciCommand::ReadIsoTxAudit);
-                if let Err(fault) = process_command(
+                    matches!(&command, HciCommand::ReadIsoTxAudit);
+                let route_state =
+                    match process_worker_command(
                         &mut engine,
                         command,
                         &mut blocked_iso_handles,
                         &mut pending_iso_group,
                         &mut iso_drain_state,
                     ) {
-                    return HciWorkerExit::Faulted(
-                        HciWorkerFault::Engine(fault),
-                    );
+                        Ok(state) => state,
+                        Err(fault) => {
+                            return HciWorkerExit::Faulted(
+                                HciWorkerFault::Engine(fault),
+                            )
+                        }
+                    };
+                if let Some(state) = route_state {
+                    if let Err(fault) = report_tx
+                        .try_send(HciReport::StreamRouteState(state))
+                        .map_err(map_report_error)
+                    {
+                        return HciWorkerExit::Faulted(fault);
+                    }
                 }
                 if audit_command {
                     if let Err(fault) = report_tx
@@ -486,6 +487,27 @@ fn stream_route_bind_ack(
         }
         Err(fault) => Err(fault),
     }
+}
+
+fn process_worker_command(
+    engine: &mut HciEngine,
+    command: HciCommand,
+    blocked_iso_handles: &mut BTreeSet<u16>,
+    pending_iso_group: &mut Option<IsoSduGroupRequest>,
+    iso_drain_state: &mut IsoDrainState,
+) -> Result<Option<StreamRouteState>, EngineFault> {
+    let route_state =
+        process_stream_route_command(engine, &command)?;
+    if route_state.is_none() {
+        process_command(
+            engine,
+            command,
+            blocked_iso_handles,
+            pending_iso_group,
+            iso_drain_state,
+        )?;
+    }
+    Ok(route_state)
 }
 
 fn process_stream_route_command(
