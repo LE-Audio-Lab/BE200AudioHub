@@ -4681,6 +4681,246 @@ mod tests {
         );
     }
 
+    fn drive_to_cis_established() -> ControlMachine {
+        let mut machine = drive_to_enabled();
+        machine.begin_cis_creation().unwrap();
+        machine
+            .on_hci_report(&HciReport::SemanticCisCreateState(
+                SemanticCisCreateState::Ready {
+                    cig_id: 1,
+                    established_cis_ids: vec![1, 2],
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::CisEstablished
+        );
+        machine
+    }
+
+    #[test]
+    fn iso_path_setup_runs_left_then_right_to_ready() {
+        let mut machine = drive_to_cis_established();
+        let left = CisRef {
+            cig_id: 1,
+            cis_id: 1,
+        };
+        let right = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+
+        let actions = machine.begin_iso_path_setup().unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::SetupIsoInputPathByRef {
+                    cis: left,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::IsoPathSetup {
+                        cis: left,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::SettingUpIsoPath {
+                side: AudioSide::Left,
+            }
+        );
+
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::SetupComplete {
+                    cis: left,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(
+                    ControlTimer::IsoPathSetup {
+                        cis: left,
+                    },
+                ),
+                ControlAction::SetupIsoInputPathByRef {
+                    cis: right,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::IsoPathSetup {
+                        cis: right,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::SettingUpIsoPath {
+                side: AudioSide::Right,
+            }
+        );
+
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::SetupComplete {
+                    cis: right,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::IsoPathSetup {
+                    cis: right,
+                },
+            )]
+        );
+        assert_eq!(machine.phase(), ControlPhase::IsoPathsReady);
+        assert_eq!(
+            machine.iso_paths_ready(),
+            &BTreeSet::from([left, right])
+        );
+    }
+
+    #[test]
+    fn uncertain_right_path_failure_removes_paths_before_any_cis() {
+        use crate::hci_host::iso_path::{
+            SemanticIsoPathFailureKind,
+        };
+
+        let mut machine = drive_to_cis_established();
+        let left = CisRef {
+            cig_id: 1,
+            cis_id: 1,
+        };
+        let right = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+
+        machine.begin_iso_path_setup().unwrap();
+        machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::SetupComplete {
+                    cis: left,
+                    direction: IsoDataPathDirection::Input,
+                },
+            ))
+            .unwrap();
+
+        let failure = SemanticIsoPathFailure {
+            cis: right,
+            may_have_configured: true,
+            kind: SemanticIsoPathFailureKind::
+                ConnectionHandleMismatch,
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::Failed(
+                    failure.clone(),
+                ),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(
+                    ControlTimer::IsoPathSetup {
+                        cis: right,
+                    },
+                ),
+                ControlAction::RemoveIsoPathByRef {
+                    cis: right,
+                    directions: 0x01,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupIsoPath {
+                        cis: right,
+                    },
+                ),
+            ]
+        );
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::IsoPathSetup {
+                cis,
+                failure: actual,
+            }) if *cis == right && actual == &failure
+        ));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectCisByRef { .. }
+        )));
+
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::RemoveComplete {
+                    cis: right,
+                    directions: 0x01,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(
+                    ControlTimer::CleanupIsoPath {
+                        cis: right,
+                    },
+                ),
+                ControlAction::RemoveIsoPathByRef {
+                    cis: left,
+                    directions: 0x01,
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupIsoPath {
+                        cis: left,
+                    },
+                ),
+            ]
+        );
+
+        let actions = machine
+            .on_hci_report(&HciReport::SemanticIsoPathState(
+                SemanticIsoPathState::RemoveComplete {
+                    cis: left,
+                    directions: 0x01,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(
+                ControlTimer::CleanupIsoPath {
+                    cis: left,
+                },
+            )
+        );
+        assert_eq!(
+            actions[1],
+            ControlAction::DisconnectCisByRef {
+                cis: right,
+            }
+        );
+        assert_eq!(
+            actions[2],
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupCis {
+                    cis: right,
+                },
+            )
+        );
+        assert!(machine.iso_paths_ready().is_empty());
+    }
+
     #[test]
     fn partial_cis_failure_disconnects_cis_releases_ases_then_removes_cig() {
         use crate::hci_host::iso::{
