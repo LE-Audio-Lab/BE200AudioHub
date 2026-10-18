@@ -1624,7 +1624,7 @@ fn side_index(side: AudioSide) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use bumble::Address;
+    use bumble::{Address, Uuid};
     use bumble_smp::privacy::resolvable_private_address;
 
     use crate::{
@@ -2204,6 +2204,438 @@ mod tests {
             }),
         ];
         machine
+    }
+
+    fn integration_planned_sink(
+        side: AudioSide,
+        member_index: usize,
+        connection_handle: u16,
+        generation: u64,
+        location: bumble_profiles::bap::AudioLocation,
+    ) -> crate::control::codec_plan::PlannedSink {
+        use bumble_hci::CodingFormat;
+        use bumble_profiles::bap::{
+            CodecSpecificConfiguration, FrameDuration,
+            SamplingFrequency,
+        };
+        use crate::control::audio_snapshot::GattCharacteristicRange;
+
+        crate::control::codec_plan::PlannedSink {
+            side,
+            member_index,
+            connection: ConnectionToken {
+                connection_handle,
+                generation,
+            },
+            ase_id: 1,
+            ase_value_handle: 0x0046,
+            ase_end_group_handle: 0x0048,
+            ascs_control_point: GattCharacteristicRange {
+                declaration_handle: 0x0042,
+                value_handle: 0x0043,
+                end_group_handle: 0x0045,
+                properties: 0x12,
+            },
+            audio_location: location,
+            codec_id: CodingFormat::LC3,
+            codec_specific_configuration:
+                CodecSpecificConfiguration {
+                    sampling_frequency: Some(
+                        SamplingFrequency::FREQ_48000,
+                    ),
+                    frame_duration: Some(
+                        FrameDuration::DURATION_10000_US,
+                    ),
+                    audio_channel_allocation: Some(location),
+                    octets_per_codec_frame: Some(100),
+                    codec_frames_per_sdu: Some(1),
+                },
+        }
+    }
+
+    fn machine_at_codec_planned() -> ControlMachine {
+        use bumble_profiles::bap::{
+            AudioLocation, ContextType,
+        };
+        use crate::architecture::control::LeAudioFormat;
+
+        let mut machine = machine_at_set_connected();
+        machine.phase = ControlPhase::CodecPlanned;
+        machine.codec_plan = Some(StereoCodecPlan {
+            format: LeAudioFormat {
+                sample_rate_hz: 48_000,
+                frame_duration_us: 10_000,
+                octets_per_sdu: 100,
+            },
+            context: ContextType::MEDIA,
+            left: integration_planned_sink(
+                AudioSide::Left,
+                1,
+                0x0801,
+                2,
+                AudioLocation::FRONT_LEFT,
+            ),
+            right: integration_planned_sink(
+                AudioSide::Right,
+                0,
+                0x0800,
+                1,
+                AudioLocation::FRONT_RIGHT,
+            ),
+        });
+        machine
+    }
+
+    fn only_begin_gatt(actions: &[ControlAction]) -> GattRequest {
+        let requests = actions
+            .iter()
+            .filter_map(|action| match action {
+                ControlAction::BeginGatt(request) => {
+                    Some(request.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1, "expected one BeginGatt: {actions:?}");
+        requests.into_iter().next().unwrap()
+    }
+
+    fn complete_gatt(
+        machine: &mut ControlMachine,
+        request: &GattRequest,
+        result: crate::hci_host::gatt::GattResult,
+    ) -> Vec<ControlAction> {
+        machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Complete {
+                    request_id: request.request_id,
+                    connection: request.connection,
+                    result,
+                },
+            ))
+            .unwrap()
+    }
+
+    fn codec_status_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseEndpoint, AudioRole,
+        };
+
+        let planned = machine.planned_sink(side).unwrap();
+        let mut endpoint =
+            AseEndpoint::new(planned.ase_id, AudioRole::Sink);
+        endpoint.state = AseState::CODEC_CONFIGURED;
+        endpoint.codec_id = planned.codec_id;
+        endpoint.codec_specific_configuration =
+            planned.codec_specific_configuration.to_bytes();
+        endpoint.value().unwrap()
+    }
+
+    fn codec_cp_success_bytes(
+        machine: &ControlMachine,
+        side: AudioSide,
+    ) -> Vec<u8> {
+        use bumble_profiles::ascs::{
+            AseControlResponse, AseOpcode, AseReasonCode,
+            AseResponse, AseResponseCode,
+        };
+
+        AseControlResponse {
+            opcode: AseOpcode::ConfigCodec,
+            responses: vec![AseResponse {
+                ase_id: machine.planned_sink(side).unwrap().ase_id,
+                code: AseResponseCode::SUCCESS,
+                reason: AseReasonCode::NONE,
+            }],
+        }
+        .to_bytes()
+        .unwrap()
+    }
+
+    fn drive_ase_prepare(
+        machine: &mut ControlMachine,
+        mut actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::hci_host::gatt::{
+            GattDescriptor, GattOperation, GattResult,
+        };
+
+        let request = only_begin_gatt(&actions);
+        let ase_cccd = match request.operation {
+            GattOperation::DiscoverDescriptors {
+                ending_handle, ..
+            } => ending_handle,
+            ref other => panic!(
+                "expected ASE descriptor discovery, got {other:?}"
+            ),
+        };
+        actions = complete_gatt(
+            machine,
+            &request,
+            GattResult::Descriptors(vec![GattDescriptor {
+                handle: ase_cccd,
+                uuid: Uuid::from_16_bits(0x2902),
+            }]),
+        );
+
+        let request = only_begin_gatt(&actions);
+        let cp_cccd = match request.operation {
+            GattOperation::DiscoverDescriptors {
+                ending_handle, ..
+            } => ending_handle,
+            ref other => panic!(
+                "expected CP descriptor discovery, got {other:?}"
+            ),
+        };
+        actions = complete_gatt(
+            machine,
+            &request,
+            GattResult::Descriptors(vec![GattDescriptor {
+                handle: cp_cccd,
+                uuid: Uuid::from_16_bits(0x2902),
+            }]),
+        );
+
+        let request = only_begin_gatt(&actions);
+        let (value_handle, cccd_handle, indicate) =
+            match request.operation {
+                GattOperation::Subscribe {
+                    value_handle,
+                    cccd_handle,
+                    indicate,
+                } => (value_handle, cccd_handle, indicate),
+                ref other => panic!(
+                    "expected ASE subscribe, got {other:?}"
+                ),
+            };
+        actions = complete_gatt(
+            machine,
+            &request,
+            GattResult::Subscription {
+                value_handle,
+                cccd_handle,
+                indicate,
+                enabled: true,
+            },
+        );
+
+        let request = only_begin_gatt(&actions);
+        let (value_handle, cccd_handle, indicate) =
+            match request.operation {
+                GattOperation::Subscribe {
+                    value_handle,
+                    cccd_handle,
+                    indicate,
+                } => (value_handle, cccd_handle, indicate),
+                ref other => panic!(
+                    "expected CP subscribe, got {other:?}"
+                ),
+            };
+        complete_gatt(
+            machine,
+            &request,
+            GattResult::Subscription {
+                value_handle,
+                cccd_handle,
+                indicate,
+                enabled: true,
+            },
+        )
+    }
+
+    fn drive_config_codec(
+        machine: &mut ControlMachine,
+        side: AudioSide,
+        actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::hci_host::gatt::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        let _ = complete_gatt(
+            machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+
+        assert!(machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0043,
+                        value: codec_cp_success_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap()
+            .is_empty());
+
+        let actions = machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0046,
+                        value: codec_status_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap();
+
+        let readback = only_begin_gatt(&actions);
+        assert_eq!(
+            readback.operation,
+            GattOperation::ReadValue {
+                attribute_handle: 0x0046,
+            }
+        );
+        complete_gatt(
+            machine,
+            &readback,
+            GattResult::Value {
+                attribute_handle: 0x0046,
+                value: codec_status_bytes(machine, side),
+            },
+        )
+    }
+
+    #[test]
+    fn codec_configuration_runs_left_then_right_to_codec_configured() {
+        let mut machine = machine_at_codec_planned();
+
+        let actions = machine.begin_codec_configuration().unwrap();
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::PreparingCodecAse {
+                side: AudioSide::Left,
+            }
+        );
+
+        let actions = drive_ase_prepare(&mut machine, actions);
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::ConfiguringCodec {
+                side: AudioSide::Left,
+            }
+        );
+        assert!(machine.prepared_ase(AudioSide::Left).is_some());
+
+        let actions =
+            drive_config_codec(&mut machine, AudioSide::Left, actions);
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::PreparingCodecAse {
+                side: AudioSide::Right,
+            }
+        );
+        assert!(machine.codec_status(AudioSide::Left).is_some());
+
+        let actions = drive_ase_prepare(&mut machine, actions);
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::ConfiguringCodec {
+                side: AudioSide::Right,
+            }
+        );
+
+        let actions =
+            drive_config_codec(&mut machine, AudioSide::Right, actions);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(
+                ControlTimer::AseOperation {
+                    side: AudioSide::Right
+                }
+            )
+        )));
+        assert_eq!(machine.phase(), ControlPhase::CodecConfigured);
+        assert!(machine.codec_status(AudioSide::Left).is_some());
+        assert!(machine.codec_status(AudioSide::Right).is_some());
+    }
+
+    #[test]
+    fn codec_semantic_timeout_after_write_response_rolls_back() {
+        use crate::hci_host::gatt::{
+            GattOperation, GattResult,
+        };
+
+        let mut machine = machine_at_codec_planned();
+        let actions = machine.begin_codec_configuration().unwrap();
+        let actions = drive_ase_prepare(&mut machine, actions);
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest { .. }
+        ));
+        let actions = complete_gatt(
+            &mut machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(ControlTimer::Gatt { .. })
+        )));
+        assert_eq!(
+            machine.phase(),
+            ControlPhase::ConfiguringCodec {
+                side: AudioSide::Left,
+            }
+        );
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::AseOperation {
+                    side: AudioSide::Left,
+                },
+            ))
+            .unwrap();
+        let disconnect = actions
+            .iter()
+            .position(|action| matches!(
+                action,
+                ControlAction::DisconnectAcl { .. }
+            ))
+            .expect("semantic timeout must begin ACL rollback");
+        assert!(actions[..disconnect].iter().any(|action| matches!(
+            action,
+            ControlAction::DisarmTimer(
+                ControlTimer::AseOperation {
+                    side: AudioSide::Left
+                }
+            )
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::CancelGatt { .. }
+        )));
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::AseOperationTimeout {
+                side: AudioSide::Left,
+            })
+        ));
     }
 
     #[test]
