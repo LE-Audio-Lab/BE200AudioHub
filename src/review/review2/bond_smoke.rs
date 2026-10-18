@@ -695,7 +695,7 @@ fn wait_cancel_terminal(
     reports: &HciReportInbox,
     tracker: &mut BondSmokeTracker,
     timeout: Duration,
-) -> Result<Option<crate::hci_host::connection::LeConnectionSnapshot>, BondSmokeRunError> {
+) -> Result<Option<crate::plane::l1_hci::acl::connection::LeConnectionSnapshot>, BondSmokeRunError> {
     wait_for_report(
         reports,
         tracker,
@@ -1376,7 +1376,7 @@ mod tests {
         tracker.observe(&HciReport::ConnectionSet(
             LeConnectionSetSnapshot {
                 connections: vec![
-                    crate::hci_host::connection::LeConnectionSnapshot {
+                    crate::plane::l1_hci::acl::connection::LeConnectionSnapshot {
                         connection_handle: 0x0800,
                         generation: 3,
                         role: 0,
@@ -1408,7 +1408,7 @@ mod tests {
         let mut tracker = BondSmokeTracker::default();
         for (token, peer) in [(first, [1, 2, 3, 4, 5, 6]), (second, [7, 8, 9, 10, 11, 12])] {
             tracker.connection_set.connections.push(
-                crate::hci_host::connection::LeConnectionSnapshot {
+                crate::plane::l1_hci::acl::connection::LeConnectionSnapshot {
                     connection_handle: token.connection_handle,
                     generation: token.generation,
                     role: 0,
@@ -1475,7 +1475,7 @@ mod tests {
             members: vec![left.clone(), right.clone()],
         };
         let obs = |address: Address, connectable: bool| {
-            crate::hci_host::scan::ScanObservation {
+            crate::plane::l1_hci::acl::scan::ScanObservation {
                 address: address.to_string(true),
                 address_type: address.address_type().0,
                 name: None,

@@ -4,4 +4,3 @@
 
 pub mod acl;
 pub mod gatt;
-pub mod host;

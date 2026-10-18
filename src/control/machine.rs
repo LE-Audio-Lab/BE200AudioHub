@@ -3840,11 +3840,10 @@ mod tests {
 
     use crate::{
         control::plan::ControlMemberPlan,
-        hci_host::{
-            engine::{
-                ControllerCapabilities, ControllerIdentity,
-                PacketPoolSnapshot,
-            },
+        hci_host::engine::{
+            ControllerCapabilities, ControllerIdentity, PacketPoolSnapshot,
+        },
+        plane::l1_hci::acl::{
             scan::{ScanObservation, ScanSummary},
             security::StoredLeKeyMaterial,
         },
@@ -4105,8 +4104,8 @@ mod tests {
         handle: u16,
         generation: u64,
         encrypted: u8,
-    ) -> crate::hci_host::connection::LeConnectionSnapshot {
-        crate::hci_host::connection::LeConnectionSnapshot {
+    ) -> crate::plane::l1_hci::acl::connection::LeConnectionSnapshot {
+        crate::plane::l1_hci::acl::connection::LeConnectionSnapshot {
             connection_handle: handle,
             generation,
             role: 0,
@@ -4296,7 +4295,7 @@ mod tests {
 
         let failure = StoredEncryptionFailure {
             connection: second_token,
-            kind: crate::hci_host::security::
+            kind: crate::plane::l1_hci::acl::security::
                 StoredEncryptionFailureKind::EncryptionNotEnabled,
         };
         let actions = machine
@@ -4514,7 +4513,7 @@ mod tests {
     fn complete_gatt(
         machine: &mut ControlMachine,
         request: &GattRequest,
-        result: crate::hci_host::gatt::GattResult,
+        result: crate::plane::l1_hci::gatt::transaction::GattResult,
     ) -> Vec<ControlAction> {
         machine
             .on_hci_report(&HciReport::Gatt(
@@ -4570,7 +4569,7 @@ mod tests {
         machine: &mut ControlMachine,
         mut actions: Vec<ControlAction>,
     ) -> Vec<ControlAction> {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattDescriptor, GattOperation, GattResult,
         };
 
@@ -4662,7 +4661,7 @@ mod tests {
         side: AudioSide,
         actions: Vec<ControlAction>,
     ) -> Vec<ControlAction> {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult, GattValueEvent,
         };
 
@@ -4782,7 +4781,7 @@ mod tests {
 
     #[test]
     fn codec_semantic_timeout_after_write_response_rolls_back() {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult,
         };
 
@@ -4946,7 +4945,7 @@ mod tests {
         side: AudioSide,
         actions: Vec<ControlAction>,
     ) -> Vec<ControlAction> {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult, GattValueEvent,
         };
 
@@ -5132,7 +5131,7 @@ mod tests {
         side: AudioSide,
         actions: Vec<ControlAction>,
     ) -> Vec<ControlAction> {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult, GattValueEvent,
         };
 
@@ -5294,7 +5293,7 @@ mod tests {
         side: AudioSide,
         actions: Vec<ControlAction>,
     ) -> Vec<ControlAction> {
-        use crate::hci_host::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult, GattValueEvent,
         };
 
@@ -5734,7 +5733,7 @@ mod tests {
         let request = only_begin_gatt(actions);
         assert!(matches!(
             request.operation,
-            crate::hci_host::gatt::GattOperation::ReadValue {
+            crate::plane::l1_hci::gatt::transaction::GattOperation::ReadValue {
                 attribute_handle: 0x0046,
             }
         ));
@@ -5742,7 +5741,7 @@ mod tests {
     }
 
     fn drive_to_streaming_ready() -> ControlMachine {
-        use crate::hci_host::gatt::GattResult;
+        use crate::plane::l1_hci::gatt::transaction::GattResult;
 
         let mut machine = drive_to_iso_paths_ready();
         let actions = machine.begin_streaming_gate().unwrap();
@@ -6036,7 +6035,7 @@ mod tests {
 
     #[test]
     fn streaming_gate_retries_left_then_confirms_both_ears() {
-        use crate::hci_host::gatt::GattResult;
+        use crate::plane::l1_hci::gatt::transaction::GattResult;
 
         let mut machine = drive_to_iso_paths_ready();
 
@@ -6634,7 +6633,7 @@ mod tests {
             [
                 ControlAction::BeginGatt(GattRequest {
                     connection,
-                    operation: crate::hci_host::gatt::GattOperation::
+                    operation: crate::plane::l1_hci::gatt::transaction::GattOperation::
                         ExchangeMtu { client_rx_mtu: 247 },
                     ..
                 }),
@@ -6702,10 +6701,10 @@ mod tests {
             other => panic!("unexpected action {other:?}"),
         };
 
-        let failure = crate::hci_host::gatt::GattFailure {
+        let failure = crate::plane::l1_hci::gatt::transaction::GattFailure {
             request_id: request.request_id,
             connection: request.connection,
-            kind: crate::hci_host::gatt::GattFailureKind::Att {
+            kind: crate::plane::l1_hci::gatt::transaction::GattFailureKind::Att {
                 request_opcode: 0x02,
                 attribute_handle: 0,
                 error_code: 0x0E,

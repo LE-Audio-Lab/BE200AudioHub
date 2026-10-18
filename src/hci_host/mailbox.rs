@@ -788,7 +788,7 @@ mod tests {
 
     #[test]
     fn gatt_requests_use_bounded_control_lane() {
-        use super::super::gatt::{
+        use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattRequest,
         };
 
@@ -833,7 +833,7 @@ mod tests {
                 connection_handle: 0x0800,
                 generation: 7,
             },
-            key: super::super::security::StoredLeKeyMaterial::
+            key: crate::plane::l1_hci::acl::security::StoredLeKeyMaterial::
                 secure_connections([0x55; 16]),
         };
         control

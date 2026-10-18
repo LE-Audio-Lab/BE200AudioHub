@@ -1002,30 +1002,35 @@ mod tests {
 
     use crate::{
         hci_host::{
-            connection::{
-                FalConnectRequest, LeInitiationParameters,
-                LePeerIdentity,
-            },
-            gatt::{
-                GattFailure, GattFailureKind, GattOperation, GattReport,
-                GattRequest,
-            },
             iso::{
                 CigAllocation, CigConfig, CigConfigureState, CisAllocation,
                 CisConfig,
             },
             iso_tx::IsoSduGroupRequest,
             mailbox::{hci_mailbox, hci_mailbox_with_iso},
-            privacy::{
-                ResolvingListConfig, ResolvingPeer,
-                DEFAULT_RPA_TIMEOUT_SECONDS,
+        },
+        plane::{
+            l1_hci::{
+                acl::{
+                    connection::{
+                        FalConnectRequest, LeInitiationParameters, LePeerIdentity,
+                    },
+                    privacy::{
+                        ResolvingListConfig, ResolvingPeer,
+                        DEFAULT_RPA_TIMEOUT_SECONDS,
+                    },
+                },
+                gatt::transaction::{
+                    GattFailure, GattFailureKind, GattOperation, GattReport,
+                    GattRequest,
+                },
+            },
+            l2_transport::{
+            packet::HostPacket,
+            sink::ControllerPacketSink,
             },
         },
         runtime::mailbox::RecvError,
-        plane::l2_transport::{
-            packet::HostPacket,
-            sink::ControllerPacketSink,
-        },
     };
 
     use super::*;
