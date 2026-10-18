@@ -30,7 +30,10 @@ use super::{
         CigRemoveState, CisDisconnectState,
         SemanticCisDisconnectState,
     },
-    iso_path::{IsoDataPathConfig, IsoPathOperationState},
+    iso_path::{
+        IsoDataPathConfig, IsoPathOperationState,
+        SemanticIsoPathState,
+    },
     iso_tx::{IsoDrainRequest, IsoDrainState, IsoSduGroupRequest},
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
@@ -57,8 +60,13 @@ pub enum HciCommand {
     DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
     SetupIsoPath(IsoDataPathConfig),
+    SetupIsoInputPathByRef { cis: CisRef },
     RemoveIsoPath {
         connection_handle: u16,
+        directions: u8,
+    },
+    RemoveIsoPathByRef {
+        cis: CisRef,
         directions: u8,
     },
     BeginIsoDrain(IsoDrainRequest),
@@ -92,6 +100,7 @@ pub enum HciReport {
     SemanticCisDisconnectState(SemanticCisDisconnectState),
     CigRemoveState(CigRemoveState),
     IsoPathState(IsoPathOperationState),
+    SemanticIsoPathState(SemanticIsoPathState),
     IsoDrainState(IsoDrainState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
@@ -334,6 +343,15 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
+    pub fn try_setup_iso_input_path_by_ref(
+        &self,
+        cis: CisRef,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::SetupIsoInputPathByRef { cis })
+            .map_err(map_send_error)
+    }
+
     pub fn try_remove_iso_path(
         &self,
         connection_handle: u16,
@@ -342,6 +360,19 @@ impl HciControl {
         self.tx
             .try_send(HciCommand::RemoveIsoPath {
                 connection_handle,
+                directions,
+            })
+            .map_err(map_send_error)
+    }
+
+    pub fn try_remove_iso_path_by_ref(
+        &self,
+        cis: CisRef,
+        directions: u8,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::RemoveIsoPathByRef {
+                cis,
                 directions,
             })
             .map_err(map_send_error)
@@ -577,6 +608,35 @@ mod tests {
         assert_eq!(
             ports.control_rx.try_recv().unwrap(),
             HciCommand::RemoveCig { cig_id: 1 }
+        );
+    }
+
+    #[test]
+    fn semantic_iso_paths_use_bounded_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 3, 1, 1);
+        let cis = CisRef {
+            cig_id: 1,
+            cis_id: 2,
+        };
+
+        control
+            .try_setup_iso_input_path_by_ref(cis)
+            .unwrap();
+        control
+            .try_remove_iso_path_by_ref(cis, 0x01)
+            .unwrap();
+
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::SetupIsoInputPathByRef { cis }
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::RemoveIsoPathByRef {
+                cis,
+                directions: 0x01,
+            }
         );
     }
 
