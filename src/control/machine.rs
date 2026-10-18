@@ -44,6 +44,10 @@ use crate::{
         StoredEncryptionFailure, StoredEncryptionRequest,
         StoredEncryptionState,
     },
+    stream_route::{
+        StereoStreamRouteBinding, StreamRouteFailure,
+        StreamRouteState,
+    },
     },
 };
 
@@ -118,6 +122,11 @@ pub enum ControlPhase {
     IsoPathsReady,
     AwaitingStreaming { side: AudioSide },
     StreamingReady,
+    BindingStreamRoute {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
+    StreamBoundReady,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -146,6 +155,10 @@ pub enum ControlTimer {
     IsoPathSetup { cis: CisRef },
     StreamingProbe { side: AudioSide },
     StreamingDeadline { side: AudioSide },
+    StreamRouteBind {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
     CleanupIsoPath { cis: CisRef },
     CleanupCis { cis: CisRef },
     CleanupAse { side: AudioSide },
@@ -184,6 +197,7 @@ pub enum ControlAction {
     },
     DisconnectCisByRef { cis: CisRef },
     RemoveCig { cig_id: u8 },
+    BindStreamRoute(StereoStreamRouteBinding),
     BeginGatt(GattRequest),
     CancelGatt {
         connection: ConnectionToken,
@@ -323,6 +337,11 @@ pub enum ControlFailure {
     StreamingDeadline {
         side: AudioSide,
     },
+    StreamRoute(StreamRouteFailure),
+    StreamRouteTimeout {
+        session_id: SessionId,
+        stream_id: StreamId,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -367,6 +386,8 @@ pub struct ControlMachine {
     iso_paths_may_exist: BTreeSet<CisRef>,
     streaming_gate: Option<StreamingGateMachine>,
     streaming_statuses: [Option<AseStatus>; 2],
+    pending_stream_binding: Option<StreamBinding>,
+    active_stream_binding: Option<StreamBinding>,
     rollback_iso_path_queue: Vec<CisRef>,
     rollback_iso_path_current: Option<CisRef>,
     rollback_cis_queue: Vec<CisRef>,
@@ -411,6 +432,8 @@ impl ControlMachine {
             iso_paths_may_exist: BTreeSet::new(),
             streaming_gate: None,
             streaming_statuses: [None, None],
+            pending_stream_binding: None,
+            active_stream_binding: None,
             rollback_iso_path_queue: Vec::new(),
             rollback_iso_path_current: None,
             rollback_cis_queue: Vec::new(),
@@ -503,12 +526,24 @@ impl ControlMachine {
 
     pub fn stream_binding(
         &self,
+    ) -> Result<StreamBinding, ControlFailure> {
+        if self.phase != ControlPhase::StreamBoundReady {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        Ok(self
+            .active_stream_binding
+            .expect("StreamBoundReady requires active binding"))
+    }
+
+    pub fn begin_stream_handoff(
+        &mut self,
         session_id: SessionId,
         stream_id: StreamId,
-    ) -> Result<StreamBinding, ControlFailure> {
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
         if self.phase != ControlPhase::StreamingReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
+
         let codec = self
             .codec_plan
             .as_ref()
@@ -517,15 +552,44 @@ impl ControlMachine {
             .qos_plan
             .as_ref()
             .expect("StreamingReady requires QoS plan");
+        let left = self
+            .cis_for_side(AudioSide::Left)
+            .expect("StreamingReady requires left CIS");
+        let right = self
+            .cis_for_side(AudioSide::Right)
+            .expect("StreamingReady requires right CIS");
 
-        Ok(StreamBinding {
+        let binding = StreamBinding {
             session_id,
             stream_id,
             format: codec.format,
             presentation_delay_us:
                 qos.left.parameters.presentation_delay,
             topology: StreamTopology::StereoSplit,
-        })
+        };
+        self.pending_stream_binding = Some(binding);
+        self.active_stream_binding = None;
+        self.phase = ControlPhase::BindingStreamRoute {
+            session_id,
+            stream_id,
+        };
+
+        Ok(vec![
+            ControlAction::BindStreamRoute(
+                StereoStreamRouteBinding {
+                    session_id,
+                    stream_id,
+                    left,
+                    right,
+                },
+            ),
+            ControlAction::ArmTimer(
+                ControlTimer::StreamRouteBind {
+                    session_id,
+                    stream_id,
+                },
+            ),
+        ])
     }
 
     pub fn begin_streaming_gate(
@@ -536,6 +600,8 @@ impl ControlMachine {
         }
         self.streaming_gate = None;
         self.streaming_statuses = [None, None];
+        self.pending_stream_binding = None;
+        self.active_stream_binding = None;
         self.start_streaming_gate(AudioSide::Left)
     }
 
