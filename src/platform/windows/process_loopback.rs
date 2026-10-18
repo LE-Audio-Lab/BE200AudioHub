@@ -1048,6 +1048,43 @@ mod imp {
             }
         }
     }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn completion_handler_advertises_agile_object() {
+            let event = unsafe {
+                CreateEventW(ptr::null(), 0, 0, ptr::null())
+            };
+            assert!(!event.is_null());
+
+            let handler = Box::new(CompletionHandler {
+                vtable: &COMPLETION_HANDLER_VTABLE,
+                refs: AtomicU32::new(1),
+                event,
+            });
+            let raw = Box::into_raw(handler);
+            let mut out: *mut c_void = ptr::null_mut();
+
+            let hr = unsafe {
+                completion_query_interface(
+                    raw.cast(),
+                    &IID_IAGILE_OBJECT,
+                    &mut out,
+                )
+            };
+            assert_eq!(hr, S_OK);
+            assert_eq!(out, raw.cast());
+
+            unsafe {
+                // QI adds one reference, then release both references.
+                completion_release(out);
+                completion_release(raw.cast());
+            }
+        }
+    }
+
 }
 
 #[cfg(windows)]
@@ -1078,45 +1115,6 @@ impl ProcessLoopbackCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn completion_handler_advertises_agile_object() {
-        use std::{
-            ffi::c_void,
-            ptr,
-            sync::atomic::AtomicU32,
-        };
-
-        let event = unsafe {
-            imp::CreateEventW(ptr::null(), 0, 0, ptr::null())
-        };
-        assert!(!event.is_null());
-
-        let handler = Box::new(imp::CompletionHandler {
-            vtable: &imp::COMPLETION_HANDLER_VTABLE,
-            refs: AtomicU32::new(1),
-            event,
-        });
-        let raw = Box::into_raw(handler);
-        let mut out: *mut c_void = ptr::null_mut();
-
-        let hr = unsafe {
-            imp::completion_query_interface(
-                raw.cast(),
-                &imp::IID_IAGILE_OBJECT,
-                &mut out,
-            )
-        };
-        assert_eq!(hr, imp::S_OK);
-        assert_eq!(out, raw.cast());
-
-        unsafe {
-            // QI adds one reference, then release both references.
-            imp::completion_release(out);
-            imp::completion_release(raw.cast());
-        }
-    }
 
     #[test]
     fn packet_metadata_is_transport_neutral() {
