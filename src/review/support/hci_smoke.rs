@@ -9,7 +9,7 @@ use crate::{
 };
 
 use crate::{
-    plane::l1_hci::interface::mailbox::{HciReport, HciReportInbox},
+    plane::l1_hci::interface::report::{HciReport, HciReportInbox},
     plane::l1_hci::host::{
         engine::{OperationalAttachState, PassiveScanState},
         stack::{spawn_be200_hci_stack, HciStackConfig, HciStackExit},

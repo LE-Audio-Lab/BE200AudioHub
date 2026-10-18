@@ -5,7 +5,7 @@
 //! timer actions are returned to the Core timer owner as directives.
 
 use crate::{
-    plane::l1_hci::interface::mailbox::HciControl,
+    plane::l1_hci::interface::command::HciControl,
     runtime::mailbox::SendError,
 };
 

@@ -6,7 +6,7 @@ use std::{
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
 use crate::{
-    plane::l1_hci::interface::mailbox::{HciCommand, HciReport, HciWorkerPorts},
+    plane::l1_hci::interface::{command::HciCommand, mailbox::HciWorkerPorts, report::HciReport},
     plane::{
         l1_hci::{
             acl::{
@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     fn recv_report(
-        reports: &crate::plane::l1_hci::interface::mailbox::HciReportInbox,
+        reports: &crate::plane::l1_hci::interface::report::HciReportInbox,
     ) -> HciReport {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {

@@ -34,7 +34,7 @@ use crate::{
         lc3::{encode_lc3_silence, prepare_synthetic_lc3},
         synthetic::SyntheticToneConfig,
     },
-    plane::l1_hci::interface::mailbox::HciReport,
+    plane::l1_hci::interface::report::HciReport,
     plane::l1_hci::{
         iso::{
             cig_cis::{

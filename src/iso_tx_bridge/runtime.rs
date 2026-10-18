@@ -10,7 +10,7 @@ use crate::{
         media::EncodedStereoFrame,
         types::FrameId,
     },
-    plane::l1_hci::interface::mailbox::HciLogicalIsoTx,
+    plane::l1_hci::interface::iso_tx::HciLogicalIsoTx,
     runtime::mailbox::SendError,
 };
 

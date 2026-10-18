@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    plane::l1_hci::interface::mailbox::{HciReport, HciReportInbox},
+    plane::l1_hci::interface::report::{HciReport, HciReportInbox},
     plane::l1_hci::{
         iso::feature::CisHostFeatureState,
         host::{
