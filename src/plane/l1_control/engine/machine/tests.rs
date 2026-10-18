@@ -2,7 +2,10 @@
     use bumble_smp::privacy::resolvable_private_address;
 
     use crate::{
-        plane::l1_control::model::set_plan::ControlMemberPlan,
+        plane::l1_control::{
+            discovery::snapshot::AudioMemberSnapshot,
+            model::set_plan::ControlMemberPlan,
+        },
         plane::l1_hci::{
             host::engine::{
                 ControllerCapabilities, ControllerIdentity, PacketPoolSnapshot,
