@@ -8,12 +8,17 @@ mod iso_tx_bridge;
 mod control;
 
 mod hci_host;
-mod review2;
-mod review2_bond;
-mod review2_bond_smoke;
-mod review2_gatt_smoke;
-mod review2_iso_smoke;
-mod round7_first_sound;
+mod review;
+
+use review::{
+    review2::{
+        attach as review2,
+        bond_smoke as review2_bond_smoke,
+        gatt_smoke as review2_gatt_smoke,
+        iso_smoke as review2_iso_smoke,
+    },
+    round7::first_sound as round7_first_sound,
+};
 
 fn main() {
     #[cfg(windows)]
