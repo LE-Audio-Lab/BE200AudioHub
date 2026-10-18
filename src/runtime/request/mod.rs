@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::architecture::mailbox::RequestId;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RequestId(pub u64);
 
 type ReplyHandler<R> = Box<dyn FnOnce(R) + Send + 'static>;
 
