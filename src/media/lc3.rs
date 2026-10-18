@@ -77,10 +77,6 @@ impl Lc3StereoEncoder {
         })
     }
 
-    pub const fn format(&self) -> LeAudioFormat {
-        self.format
-    }
-
     pub fn encode(
         &self,
         pcm: &PcmStereoFrame,
