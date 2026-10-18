@@ -83,6 +83,7 @@ use crate::plane::l1_control::{
         set_plan::{ControlPlanError, ControlSetPlan},
     },
     operation::{
+        ase_control::AseControlOperation,
         audio_discovery::AudioDiscoveryOperation,
         rollback::RollbackOperation,
     },
@@ -384,8 +385,7 @@ pub struct ControlMachine {
     phase: ControlPhase,
     next_gatt_request_id: GattRequestId,
     discovery_operation: AudioDiscoveryOperation,
-    ase_prepare: Option<AsePrepareMachine>,
-    ase_operation: Option<AseOperationMachine>,
+    ase_control_operation: AseControlOperation,
     streaming_gate: Option<StreamingGateMachine>,
     pending_stream_binding: Option<StreamBinding>,
     failure: Option<ControlFailure>,
@@ -403,8 +403,7 @@ impl ControlMachine {
             phase: ControlPhase::Idle,
             next_gatt_request_id: 1,
             discovery_operation: AudioDiscoveryOperation::new(),
-            ase_prepare: None,
-            ase_operation: None,
+            ase_control_operation: AseControlOperation::new(),
             streaming_gate: None,
             pending_stream_binding: None,
             failure: None,
@@ -766,8 +765,8 @@ impl ControlMachine {
         if self.phase != ControlPhase::CodecPlanned {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.ase_prepare = None;
-        self.ase_operation = None;
+        self.ase_control_operation.prepare = None;
+        self.ase_control_operation.control = None;
         self.confirmed.prepared_ases = [None, None];
         self.confirmed.codec_statuses = [None, None];
         self.start_ase_prepare(AudioSide::Left)
@@ -792,8 +791,8 @@ impl ControlMachine {
         self.confirmed.enable_statuses = [None, None];
         self.cleanup_knowledge.cig_may_exist = false;
         self.rollback.cig_pending = false;
-        self.ase_prepare = None;
-        self.ase_operation = None;
+        self.ase_control_operation.prepare = None;
+        self.ase_control_operation.control = None;
         self.confirmed.prepared_ases = [None, None];
         self.confirmed.codec_statuses = [None, None];
         self.phase = ControlPhase::CodecPlanned;
@@ -812,8 +811,8 @@ impl ControlMachine {
         self.planned.iso_plan = None;
         self.cleanup_knowledge.cig_may_exist = false;
         self.rollback.cig_pending = false;
-        self.ase_prepare = None;
-        self.ase_operation = None;
+        self.ase_control_operation.prepare = None;
+        self.ase_control_operation.control = None;
         self.confirmed.prepared_ases = [None, None];
         self.confirmed.codec_statuses = [None, None];
         self.start_audio_member_discovery(0)
@@ -942,8 +941,7 @@ impl ControlMachine {
                         .map(|sink| sink.member_index)
                         .ok() == Some(member_index)
             )
-                && self
-                    .ase_prepare
+                && self.ase_control_operation.prepare
                     .as_ref()
                     .and_then(|value| value.pending_request_id())
                     == Some(request_id) =>
@@ -953,7 +951,7 @@ impl ControlMachine {
                     _ => unreachable!(),
                 };
                 let connection = self.planned_sink(side)?.connection;
-                self.ase_prepare = None;
+                self.ase_control_operation.prepare = None;
                 let mut actions = vec![
                     ControlAction::CancelGatt {
                         connection,
@@ -1038,8 +1036,7 @@ impl ControlMachine {
                 })
                 .map(|(_, active_member)| active_member)
                 == Some(member_index)
-                && self
-                    .ase_operation
+                && self.ase_control_operation.control
                     .as_ref()
                     .and_then(|value| value.pending_request_id())
                     == Some(request_id) =>
@@ -1048,7 +1045,7 @@ impl ControlMachine {
                     .active_ase_operation_side()
                     .expect("GATT timer requires active ASE operation");
                 let connection = self.planned_sink(side)?.connection;
-                self.ase_operation = None;
+                self.ase_control_operation.control = None;
                 let mut actions = vec![
                     ControlAction::CancelGatt {
                         connection,
@@ -1075,11 +1072,10 @@ impl ControlMachine {
             {
                 let connection = self.planned_sink(side)?.connection;
                 let member_index = self.planned_sink(side)?.member_index;
-                let pending = self
-                    .ase_operation
+                let pending = self.ase_control_operation.control
                     .as_ref()
                     .and_then(|value| value.pending_request_id());
-                self.ase_operation = None;
+                self.ase_control_operation.control = None;
 
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::AseOperation { side },
@@ -2483,7 +2479,7 @@ impl ControlMachine {
             ControlFailure::AsePrepare { side, failure }
         })?;
         self.next_gatt_request_id = machine.next_request_id();
-        self.ase_prepare = Some(machine);
+        self.ase_control_operation.prepare = Some(machine);
         self.phase = ControlPhase::PreparingCodecAse { side };
         self.translate_ase_prepare_action(side, None, action)
     }
@@ -2509,7 +2505,7 @@ impl ControlMachine {
             ControlFailure::AseOperation { side, failure }
         })?;
         self.next_gatt_request_id = machine.next_request_id();
-        self.ase_operation = Some(machine);
+        self.ase_control_operation.control = Some(machine);
         self.phase = ControlPhase::ConfiguringCodec { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
@@ -2552,7 +2548,7 @@ impl ControlMachine {
             ControlFailure::AseOperation { side, failure }
         })?;
         self.next_gatt_request_id = machine.next_request_id();
-        self.ase_operation = Some(machine);
+        self.ase_control_operation.control = Some(machine);
         self.phase = ControlPhase::ConfiguringQos { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
@@ -2595,7 +2591,7 @@ impl ControlMachine {
             ControlFailure::AseOperation { side, failure }
         })?;
         self.next_gatt_request_id = machine.next_request_id();
-        self.ase_operation = Some(machine);
+        self.ase_control_operation.control = Some(machine);
         self.phase = ControlPhase::Enabling { side };
 
         let mut actions = vec![ControlAction::ArmTimer(
@@ -2612,8 +2608,7 @@ impl ControlMachine {
         side: AudioSide,
         report: &GattReport,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let mut machine = self
-            .ase_prepare
+        let mut machine = self.ase_control_operation.prepare
             .take()
             .expect("prepare phase missing ASE preparation FSM");
         let pending_before = machine.pending_request_id();
@@ -2630,11 +2625,11 @@ impl ControlMachine {
 
         match outcome {
             Ok(AsePrepareAction::Ignored) => {
-                self.ase_prepare = Some(machine);
+                self.ase_control_operation.prepare = Some(machine);
                 Ok(Vec::new())
             }
             Ok(action) => {
-                self.ase_prepare = if matches!(
+                self.ase_control_operation.prepare = if matches!(
                     action,
                     AsePrepareAction::Complete(_)
                 ) {
@@ -2649,7 +2644,7 @@ impl ControlMachine {
                 )
             }
             Err(failure) => {
-                self.ase_prepare = None;
+                self.ase_control_operation.prepare = None;
                 let mut actions =
                     self.disarm_gatt_request(side, completed_request)?;
                 actions.extend(self.begin_rollback(
@@ -2696,8 +2691,7 @@ impl ControlMachine {
         side: AudioSide,
         report: &GattReport,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let mut machine = self
-            .ase_operation
+        let mut machine = self.ase_control_operation.control
             .take()
             .expect("ConfigCodec phase missing ASCS operation FSM");
         let pending_before = machine.pending_request_id();
@@ -2714,15 +2708,15 @@ impl ControlMachine {
 
         match outcome {
             Ok(AseOperationAction::Ignored) => {
-                self.ase_operation = Some(machine);
+                self.ase_control_operation.control = Some(machine);
                 Ok(Vec::new())
             }
             Ok(AseOperationAction::Await) => {
-                self.ase_operation = Some(machine);
+                self.ase_control_operation.control = Some(machine);
                 self.disarm_gatt_request(side, completed_request)
             }
             Ok(action @ AseOperationAction::BeginGatt(_)) => {
-                self.ase_operation = Some(machine);
+                self.ase_control_operation.control = Some(machine);
                 self.translate_ase_operation_action(
                     side,
                     completed_request,
@@ -2730,7 +2724,7 @@ impl ControlMachine {
                 )
             }
             Ok(action @ AseOperationAction::Complete(_)) => {
-                self.ase_operation = None;
+                self.ase_control_operation.control = None;
                 self.translate_ase_operation_action(
                     side,
                     completed_request,
@@ -2738,7 +2732,7 @@ impl ControlMachine {
                 )
             }
             Err(failure) => {
-                self.ase_operation = None;
+                self.ase_control_operation.control = None;
                 let mut actions =
                     self.disarm_gatt_request(side, completed_request)?;
 
