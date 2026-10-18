@@ -76,7 +76,10 @@ use crate::plane::l1_control::{
         },
         snapshot::{AudioMemberSnapshot, AudioSetSnapshot},
     },
-    model::set_plan::{ControlPlanError, ControlSetPlan},
+    model::{
+        confirmed_status::ConfirmedStatus,
+        set_plan::{ControlPlanError, ControlSetPlan},
+    },
     planning::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
         enable::{plan_first_enable, EnablePlanError, StereoEnablePlan},
@@ -368,37 +371,25 @@ pub enum ControlEvent {
 
 pub struct ControlMachine {
     plan: ControlSetPlan,
+    confirmed: ConfirmedStatus,
     phase: ControlPhase,
-    resolved_members: Vec<ResolvedMemberPresence>,
-    connections: [Option<ConnectionToken>; 2],
-    encryption_key_sizes: [Option<u8>; 2],
-    privacy_active: bool,
     rollback_queue: Vec<ConnectionToken>,
     rollback_current: Option<ConnectionToken>,
     cleanup_failures: Vec<ControlCleanupFailure>,
     next_gatt_request_id: GattRequestId,
     audio_discovery: Option<AudioDiscoveryMachine>,
     audio_members: Vec<AudioMemberSnapshot>,
-    audio_set: Option<AudioSetSnapshot>,
     codec_plan: Option<StereoCodecPlan>,
     ase_prepare: Option<AsePrepareMachine>,
     ase_operation: Option<AseOperationMachine>,
-    prepared_ases: [Option<PreparedAseControl>; 2],
-    codec_statuses: [Option<AseStatus>; 2],
     iso_plan: Option<StereoIsoPlan>,
     qos_plan: Option<StereoQosPlan>,
-    qos_statuses: [Option<AseStatus>; 2],
     enable_plan: Option<StereoEnablePlan>,
-    enable_statuses: [Option<AseStatus>; 2],
     cig_may_exist: bool,
     rollback_cig_pending: bool,
-    live_cis: BTreeSet<CisRef>,
-    iso_paths_ready: BTreeSet<CisRef>,
     iso_paths_may_exist: BTreeSet<CisRef>,
     streaming_gate: Option<StreamingGateMachine>,
-    streaming_statuses: [Option<AseStatus>; 2],
     pending_stream_binding: Option<StreamBinding>,
-    active_stream_binding: Option<StreamBinding>,
     rollback_stream_route: Option<(SessionId, StreamId)>,
     rollback_stream_route_unbind_pending: bool,
     rollback_iso_path_queue: Vec<CisRef>,
@@ -416,37 +407,25 @@ impl ControlMachine {
         plan.validate()?;
         Ok(Self {
             plan,
+            confirmed: ConfirmedStatus::new(),
             phase: ControlPhase::Idle,
-            resolved_members: Vec::new(),
-            connections: [None, None],
-            encryption_key_sizes: [None, None],
-            privacy_active: false,
             rollback_queue: Vec::new(),
             rollback_current: None,
             cleanup_failures: Vec::new(),
             next_gatt_request_id: 1,
             audio_discovery: None,
             audio_members: Vec::new(),
-            audio_set: None,
             codec_plan: None,
             ase_prepare: None,
             ase_operation: None,
-            prepared_ases: [None, None],
-            codec_statuses: [None, None],
             iso_plan: None,
             qos_plan: None,
-            qos_statuses: [None, None],
             enable_plan: None,
-            enable_statuses: [None, None],
             cig_may_exist: false,
             rollback_cig_pending: false,
-            live_cis: BTreeSet::new(),
-            iso_paths_ready: BTreeSet::new(),
             iso_paths_may_exist: BTreeSet::new(),
             streaming_gate: None,
-            streaming_statuses: [None, None],
             pending_stream_binding: None,
-            active_stream_binding: None,
             rollback_stream_route: None,
             rollback_stream_route_unbind_pending: false,
             rollback_iso_path_queue: Vec::new(),
@@ -510,7 +489,7 @@ impl ControlMachine {
             ControlPhase::Faulted => ControlState::Faulted,
         };
 
-        let binding = self.active_stream_binding.or(self.pending_stream_binding);
+        let binding = self.confirmed.active_stream_binding.or(self.pending_stream_binding);
         ControlConditionUpdate {
             state,
             stream_id: binding.map(|binding| binding.stream_id),
@@ -519,7 +498,7 @@ impl ControlMachine {
     }
 
     pub fn resolved_members(&self) -> &[ResolvedMemberPresence] {
-        &self.resolved_members
+        &self.confirmed.resolved_members
     }
 
     pub fn failure(&self) -> Option<&ControlFailure> {
@@ -527,11 +506,11 @@ impl ControlMachine {
     }
 
     pub fn connections(&self) -> [Option<ConnectionToken>; 2] {
-        self.connections
+        self.confirmed.connections
     }
 
     pub fn audio_set(&self) -> Option<&AudioSetSnapshot> {
-        self.audio_set.as_ref()
+        self.confirmed.audio_set.as_ref()
     }
 
     pub fn codec_plan(&self) -> Option<&StereoCodecPlan> {
@@ -542,14 +521,14 @@ impl ControlMachine {
         &self,
         side: AudioSide,
     ) -> Option<&PreparedAseControl> {
-        self.prepared_ases[side_index(side)].as_ref()
+        self.confirmed.prepared_ases[side_index(side)].as_ref()
     }
 
     pub fn codec_status(
         &self,
         side: AudioSide,
     ) -> Option<&AseStatus> {
-        self.codec_statuses[side_index(side)].as_ref()
+        self.confirmed.codec_statuses[side_index(side)].as_ref()
     }
 
     pub fn iso_plan(&self) -> Option<&StereoIsoPlan> {
@@ -564,7 +543,7 @@ impl ControlMachine {
         &self,
         side: AudioSide,
     ) -> Option<&AseStatus> {
-        self.qos_statuses[side_index(side)].as_ref()
+        self.confirmed.qos_statuses[side_index(side)].as_ref()
     }
 
     pub fn enable_plan(&self) -> Option<&StereoEnablePlan> {
@@ -575,22 +554,22 @@ impl ControlMachine {
         &self,
         side: AudioSide,
     ) -> Option<&AseStatus> {
-        self.enable_statuses[side_index(side)].as_ref()
+        self.confirmed.enable_statuses[side_index(side)].as_ref()
     }
 
     pub fn live_cis(&self) -> &BTreeSet<CisRef> {
-        &self.live_cis
+        &self.confirmed.live_cis
     }
 
     pub fn iso_paths_ready(&self) -> &BTreeSet<CisRef> {
-        &self.iso_paths_ready
+        &self.confirmed.iso_paths_ready
     }
 
     pub fn streaming_status(
         &self,
         side: AudioSide,
     ) -> Option<&AseStatus> {
-        self.streaming_statuses[side_index(side)].as_ref()
+        self.confirmed.streaming_statuses[side_index(side)].as_ref()
     }
 
     pub fn stream_binding(
@@ -637,7 +616,7 @@ impl ControlMachine {
             topology: StreamTopology::StereoSplit,
         };
         self.pending_stream_binding = Some(binding);
-        self.active_stream_binding = None;
+        self.confirmed.active_stream_binding = None;
         self.phase = ControlPhase::BindingStreamRoute {
             session_id,
             stream_id,
@@ -668,9 +647,9 @@ impl ControlMachine {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
         self.streaming_gate = None;
-        self.streaming_statuses = [None, None];
+        self.confirmed.streaming_statuses = [None, None];
         self.pending_stream_binding = None;
-        self.active_stream_binding = None;
+        self.confirmed.active_stream_binding = None;
         self.rollback_stream_route = None;
         self.rollback_stream_route_unbind_pending = false;
         self.start_streaming_gate(AudioSide::Left)
@@ -682,10 +661,10 @@ impl ControlMachine {
         if self.phase != ControlPhase::CisEstablished {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.iso_paths_ready.clear();
+        self.confirmed.iso_paths_ready.clear();
         self.iso_paths_may_exist.clear();
         self.streaming_gate = None;
-        self.streaming_statuses = [None, None];
+        self.confirmed.streaming_statuses = [None, None];
         self.start_iso_path_setup(AudioSide::Left)
     }
 
@@ -700,11 +679,11 @@ impl ControlMachine {
             .as_ref()
             .expect("Enabled requires ISO plan")
             .cis_create_request();
-        self.live_cis.clear();
-        self.iso_paths_ready.clear();
+        self.confirmed.live_cis.clear();
+        self.confirmed.iso_paths_ready.clear();
         self.iso_paths_may_exist.clear();
         self.streaming_gate = None;
-        self.streaming_statuses = [None, None];
+        self.confirmed.streaming_statuses = [None, None];
         self.phase = ControlPhase::CreatingCis;
         Ok(vec![
             ControlAction::CreateCis(request),
@@ -733,8 +712,8 @@ impl ControlMachine {
         let plan = plan_first_enable(codec, iso, qos)
             .map_err(ControlFailure::EnablePlan)?;
         self.enable_plan = Some(plan);
-        self.enable_statuses = [None, None];
-        self.live_cis.clear();
+        self.confirmed.enable_statuses = [None, None];
+        self.confirmed.live_cis.clear();
         self.phase = ControlPhase::EnablePlanned;
         Ok(())
     }
@@ -765,10 +744,10 @@ impl ControlMachine {
         let plan = plan_first_qos(codec, iso)
             .map_err(ControlFailure::QosPlan)?;
         self.qos_plan = Some(plan);
-        self.qos_statuses = [None, None];
+        self.confirmed.qos_statuses = [None, None];
         self.enable_plan = None;
-        self.enable_statuses = [None, None];
-        self.live_cis.clear();
+        self.confirmed.enable_statuses = [None, None];
+        self.confirmed.live_cis.clear();
         self.phase = ControlPhase::QosPlanned;
         Ok(())
     }
@@ -796,9 +775,9 @@ impl ControlMachine {
             .map_err(ControlFailure::IsoPlan)?;
         self.iso_plan = Some(plan);
         self.qos_plan = None;
-        self.qos_statuses = [None, None];
+        self.confirmed.qos_statuses = [None, None];
         self.enable_plan = None;
-        self.enable_statuses = [None, None];
+        self.confirmed.enable_statuses = [None, None];
         self.phase = ControlPhase::IsoPlanned;
         Ok(())
     }
@@ -828,8 +807,8 @@ impl ControlMachine {
         }
         self.ase_prepare = None;
         self.ase_operation = None;
-        self.prepared_ases = [None, None];
-        self.codec_statuses = [None, None];
+        self.confirmed.prepared_ases = [None, None];
+        self.confirmed.codec_statuses = [None, None];
         self.start_ase_prepare(AudioSide::Left)
     }
 
@@ -848,15 +827,15 @@ impl ControlMachine {
         self.codec_plan = Some(plan);
         self.iso_plan = None;
         self.qos_plan = None;
-        self.qos_statuses = [None, None];
+        self.confirmed.qos_statuses = [None, None];
         self.enable_plan = None;
-        self.enable_statuses = [None, None];
+        self.confirmed.enable_statuses = [None, None];
         self.cig_may_exist = false;
         self.rollback_cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
-        self.prepared_ases = [None, None];
-        self.codec_statuses = [None, None];
+        self.confirmed.prepared_ases = [None, None];
+        self.confirmed.codec_statuses = [None, None];
         self.phase = ControlPhase::CodecPlanned;
         Ok(())
     }
@@ -868,15 +847,15 @@ impl ControlMachine {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
         self.audio_members.clear();
-        self.audio_set = None;
+        self.confirmed.audio_set = None;
         self.codec_plan = None;
         self.iso_plan = None;
         self.cig_may_exist = false;
         self.rollback_cig_pending = false;
         self.ase_prepare = None;
         self.ase_operation = None;
-        self.prepared_ases = [None, None];
-        self.codec_statuses = [None, None];
+        self.confirmed.prepared_ases = [None, None];
+        self.confirmed.codec_statuses = [None, None];
         self.start_audio_member_discovery(0)
     }
 
@@ -969,7 +948,7 @@ impl ControlMachine {
                     .and_then(|value| value.pending_request_id())
                     == Some(request_id) =>
             {
-                let connection = self.connections[member_index]
+                let connection = self.confirmed.connections[member_index]
                     .expect("audio discovery requires live connection");
                 self.audio_discovery = None;
                 let mut actions = vec![
@@ -1639,7 +1618,7 @@ impl ControlMachine {
                     Err(failure) => return self.fail(failure),
                 };
 
-                self.resolved_members = resolved;
+                self.confirmed.resolved_members = resolved;
                 self.phase = ControlPhase::ConfiguringPrivacy;
                 Ok(vec![
                     ControlAction::DisarmTimer(ControlTimer::ScanStop),
@@ -1653,7 +1632,7 @@ impl ControlMachine {
                     ControllerPrivacyState::Ready,
                 ),
             ) => {
-                self.privacy_active = true;
+                self.confirmed.privacy_active = true;
                 let mut actions = vec![
                     ControlAction::DisarmTimer(ControlTimer::Privacy),
                 ];
@@ -1674,7 +1653,7 @@ impl ControlMachine {
                 ),
             ) => {
                 let token = connection.token();
-                self.connections[member_index] = Some(token);
+                self.confirmed.connections[member_index] = Some(token);
                 self.phase = ControlPhase::SecuringMember {
                     member_index,
                 };
@@ -1716,7 +1695,7 @@ impl ControlMachine {
                     },
                 ),
             ) => {
-                let expected = self.connections[member_index]
+                let expected = self.confirmed.connections[member_index]
                     .expect("securing phase requires a connection token");
                 if *connection != expected {
                     return self.fail(
@@ -1727,7 +1706,7 @@ impl ControlMachine {
                         },
                     );
                 }
-                self.encryption_key_sizes[member_index] =
+                self.confirmed.encryption_key_sizes[member_index] =
                     Some(*encryption_key_size);
 
                 let mut actions = vec![
@@ -1793,7 +1772,7 @@ impl ControlMachine {
                     | FalConnectionState::Connected(connection),
                 ),
             ) => {
-                self.connections[member_index] =
+                self.confirmed.connections[member_index] =
                     Some(connection.token());
                 let mut actions = vec![
                     ControlAction::DisarmTimer(
@@ -1962,7 +1941,7 @@ impl ControlMachine {
                     )]);
                 }
 
-                self.iso_paths_ready.insert(*cis);
+                self.confirmed.iso_paths_ready.insert(*cis);
                 self.iso_paths_may_exist.insert(*cis);
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::IsoPathSetup { cis: *cis },
@@ -2038,7 +2017,7 @@ impl ControlMachine {
                     .pending_stream_binding
                     .take()
                     .expect("binding phase requires pending StreamBinding");
-                self.active_stream_binding = Some(binding);
+                self.confirmed.active_stream_binding = Some(binding);
                 self.phase = ControlPhase::StreamBoundReady;
                 Ok(vec![ControlAction::DisarmTimer(
                     ControlTimer::StreamRouteBind {
@@ -2132,7 +2111,7 @@ impl ControlMachine {
                     },
                 ),
             ) if self.rollback_iso_path_current == Some(*cis) => {
-                self.iso_paths_ready.remove(cis);
+                self.confirmed.iso_paths_ready.remove(cis);
                 self.iso_paths_may_exist.remove(cis);
                 self.rollback_iso_path_current = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
@@ -2165,7 +2144,7 @@ impl ControlMachine {
                     },
                 ),
             ) if self.rollback_cis_current == Some(*cis) => {
-                self.live_cis.remove(cis);
+                self.confirmed.live_cis.remove(cis);
                 self.rollback_cis_current = None;
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCis { cis: *cis },
@@ -2273,7 +2252,7 @@ impl ControlMachine {
                         ),
                     ),
                 ];
-                if self.privacy_active {
+                if self.confirmed.privacy_active {
                     actions.push(ControlAction::ClearControllerPrivacy);
                     actions.push(ControlAction::ArmTimer(
                         ControlTimer::CleanupPrivacy,
@@ -2290,9 +2269,9 @@ impl ControlMachine {
                 ),
             ) if self.rollback_current.is_none()
                 && self.rollback_queue.is_empty()
-                && self.privacy_active =>
+                && self.confirmed.privacy_active =>
             {
-                self.privacy_active = false;
+                self.confirmed.privacy_active = false;
                 self.finish_rollback()
             }
             (
@@ -2306,7 +2285,7 @@ impl ControlMachine {
                 self.cleanup_failures.push(
                     ControlCleanupFailure::Privacy(failure.clone()),
                 );
-                self.privacy_active = false;
+                self.confirmed.privacy_active = false;
                 self.finish_rollback()
             }
 
@@ -2346,10 +2325,10 @@ impl ControlMachine {
         let cis = self
             .cis_for_side(side)
             .ok_or(ControlFailure::InvalidStartState(self.phase))?;
-        if !self.iso_paths_ready.contains(&cis) {
+        if !self.confirmed.iso_paths_ready.contains(&cis) {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let prepared = self.prepared_ases[side_index(side)]
+        let prepared = self.confirmed.prepared_ases[side_index(side)]
             .as_ref()
             .expect("streaming gate requires prepared ASE")
             .clone();
@@ -2522,7 +2501,7 @@ impl ControlMachine {
                 actions.push(ControlAction::DisarmTimer(
                     ControlTimer::StreamingDeadline { side },
                 ));
-                self.streaming_statuses[side_index(side)] =
+                self.confirmed.streaming_statuses[side_index(side)] =
                     Some(status);
                 match side {
                     AudioSide::Left => {
@@ -2564,7 +2543,7 @@ impl ControlMachine {
         &mut self,
         side: AudioSide,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let prepared = self.prepared_ases[side_index(side)]
+        let prepared = self.confirmed.prepared_ases[side_index(side)]
             .as_ref()
             .expect("prepared ASE must exist before ConfigCodec")
             .clone();
@@ -2597,7 +2576,7 @@ impl ControlMachine {
         &mut self,
         side: AudioSide,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let prepared = self.prepared_ases[side_index(side)]
+        let prepared = self.confirmed.prepared_ases[side_index(side)]
             .as_ref()
             .expect("QoS requires prepared ASE control")
             .clone();
@@ -2642,7 +2621,7 @@ impl ControlMachine {
         &mut self,
         side: AudioSide,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let prepared = self.prepared_ases[side_index(side)]
+        let prepared = self.confirmed.prepared_ases[side_index(side)]
             .as_ref()
             .expect("Enable requires prepared ASE control")
             .clone();
@@ -2759,7 +2738,7 @@ impl ControlMachine {
                 Ok(actions)
             }
             AsePrepareAction::Complete(prepared) => {
-                self.prepared_ases[side_index(side)] = Some(prepared);
+                self.confirmed.prepared_ases[side_index(side)] = Some(prepared);
                 actions.extend(self.start_config_codec(side)?);
                 Ok(actions)
             }
@@ -2889,7 +2868,7 @@ impl ControlMachine {
                             return Ok(actions);
                         }
 
-                        self.codec_statuses[side_index(side)] =
+                        self.confirmed.codec_statuses[side_index(side)] =
                             Some(status);
                         match side {
                             AudioSide::Left => {
@@ -2920,7 +2899,7 @@ impl ControlMachine {
                             return Ok(actions);
                         }
 
-                        self.qos_statuses[side_index(side)] =
+                        self.confirmed.qos_statuses[side_index(side)] =
                             Some(status);
                         match side {
                             AudioSide::Left => {
@@ -2951,7 +2930,7 @@ impl ControlMachine {
                             return Ok(actions);
                         }
 
-                        self.enable_statuses[side_index(side)] =
+                        self.confirmed.enable_statuses[side_index(side)] =
                             Some(status);
                         match side {
                             AudioSide::Left => {
@@ -3109,7 +3088,7 @@ impl ControlMachine {
         &mut self,
         member_index: usize,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let connection = self.connections[member_index]
+        let connection = self.confirmed.connections[member_index]
             .expect("audio discovery requires connected member");
         let mut discovery = AudioDiscoveryMachine::new(
             member_index,
@@ -3233,7 +3212,7 @@ impl ControlMachine {
                     )?);
                     return Ok(actions);
                 }
-                self.audio_set = Some(set);
+                self.confirmed.audio_set = Some(set);
                 self.phase = ControlPhase::AudioSetDiscovered;
                 Ok(actions)
             }
@@ -3259,7 +3238,7 @@ impl ControlMachine {
         let cis = self
             .cis_for_side(side)
             .ok_or(ControlFailure::InvalidStartState(self.phase))?;
-        if !self.live_cis.contains(&cis) {
+        if !self.confirmed.live_cis.contains(&cis) {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
         self.phase = ControlPhase::SettingUpIsoPath { side };
@@ -3306,7 +3285,7 @@ impl ControlMachine {
         for cis_id in cis_ids {
             next.insert(self.semantic_cis_ref(cig_id, *cis_id)?);
         }
-        self.live_cis = next;
+        self.confirmed.live_cis = next;
         Ok(())
     }
 
@@ -3333,7 +3312,7 @@ impl ControlMachine {
         &mut self,
         side: AudioSide,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let prepared = self.prepared_ases[side_index(side)]
+        let prepared = self.confirmed.prepared_ases[side_index(side)]
             .as_ref()
             .expect("rollback ASE release requires prepared control")
             .clone();
@@ -3526,7 +3505,7 @@ impl ControlMachine {
             binding.map(|value| (value.session_id, value.stream_id));
         self.rollback_stream_route_unbind_pending = false;
         self.pending_stream_binding = None;
-        self.active_stream_binding = None;
+        self.confirmed.active_stream_binding = None;
     }
 
     fn begin_rollback(
@@ -3573,12 +3552,12 @@ impl ControlMachine {
         self.rollback_iso_path_current = None;
 
         self.rollback_cis_queue =
-            self.live_cis.iter().copied().collect();
+            self.confirmed.live_cis.iter().copied().collect();
         self.rollback_cis_current = None;
 
         self.rollback_ase_queue.clear();
         for side in [AudioSide::Left, AudioSide::Right] {
-            if self.prepared_ases[side_index(side)].is_some() {
+            if self.confirmed.prepared_ases[side_index(side)].is_some() {
                 self.rollback_ase_queue.push(side);
             }
         }
@@ -3692,7 +3671,7 @@ impl ControlMachine {
             return Ok(Vec::new());
         }
 
-        if self.privacy_active {
+        if self.confirmed.privacy_active {
             return Ok(vec![
                 ControlAction::ClearControllerPrivacy,
                 ControlAction::ArmTimer(
@@ -3729,7 +3708,7 @@ impl ControlMachine {
         &mut self,
         connection: ConnectionToken,
     ) {
-        for slot in &mut self.connections {
+        for slot in &mut self.confirmed.connections {
             if *slot == Some(connection) {
                 *slot = None;
             }
@@ -3745,7 +3724,7 @@ impl ControlMachine {
             return false;
         }
 
-        self.connections.iter().all(|expected| {
+        self.confirmed.connections.iter().all(|expected| {
             let Some(expected) = expected else {
                 return false;
             };
