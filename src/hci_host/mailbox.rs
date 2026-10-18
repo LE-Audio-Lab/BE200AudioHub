@@ -695,6 +695,44 @@ mod tests {
     }
 
     #[test]
+    fn logical_stream_routes_use_reliable_control_lane() {
+        let (control, _ingress, _reports, ports) =
+            hci_mailbox_with_iso(1, 2, 1, 1);
+        let binding = StereoStreamRouteBinding {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+            left: CisRef {
+                cig_id: 1,
+                cis_id: 1,
+            },
+            right: CisRef {
+                cig_id: 1,
+                cis_id: 2,
+            },
+        };
+
+        control.try_bind_stream_route(binding).unwrap();
+        control
+            .try_unbind_stream_route(
+                binding.session_id,
+                binding.stream_id,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::BindStreamRoute(binding)
+        );
+        assert_eq!(
+            ports.control_rx.try_recv().unwrap(),
+            HciCommand::UnbindStreamRoute {
+                session_id: binding.session_id,
+                stream_id: binding.stream_id,
+            }
+        );
+    }
+
+    #[test]
     fn iso_drain_gate_uses_reliable_control_lane() {
         let (control, _ingress, _reports, ports) =
             hci_mailbox(1, 2, 1);
