@@ -17,6 +17,22 @@ pub(crate) struct PlannedConfiguration {
 }
 
 impl PlannedConfiguration {
+    pub(crate) fn codec_plan(&self) -> Option<&StereoCodecPlan> {
+        self.codec_plan.as_ref()
+    }
+
+    pub(crate) fn iso_plan(&self) -> Option<&StereoIsoPlan> {
+        self.iso_plan.as_ref()
+    }
+
+    pub(crate) fn qos_plan(&self) -> Option<&StereoQosPlan> {
+        self.qos_plan.as_ref()
+    }
+
+    pub(crate) fn enable_plan(&self) -> Option<&StereoEnablePlan> {
+        self.enable_plan.as_ref()
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             codec_plan: None,
