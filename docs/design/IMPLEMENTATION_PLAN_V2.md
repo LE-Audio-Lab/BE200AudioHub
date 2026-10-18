@@ -2,6 +2,29 @@
 
 Status: **Frozen implementation direction / migration plan**
 
+Current landing status (2026-10-19): **V2 structural refactor landed on `refactor/v2-architecture`.**
+
+Verified branch state at handoff:
+
+```text
+HEAD c4b088a8  docs: freeze Round6 Core Condition architecture
+cargo test --workspace --locked   372 passed / 0 failed
+cargo check --workspace --locked  PASS
+cargo build --workspace --locked  PASS
+```
+
+Rounds 1–6 completed the intended source-ownership migration:
+
+- source root reduced to `main.rs / core / plane / runtime / platform / review`;
+- `src/architecture/` and transitional `RuntimeState / RuntimeAggregator / RuntimeObservation` are removed;
+- Core/Lifecycle owns SessionId/StreamId and coarse lifecycle state;
+- Core/Condition owns one private Blackboard and the only Core read API;
+- Core/Command queries Condition and then invokes the real owner;
+- each Plane owns its operational truth and provider-side ConditionUpdate vocabulary;
+- HCI/Media high-rate telemetry remains producer-local and only publishes aggregate/coalesced or forced-final updates.
+
+This landing does **not** mean the final product runtime is composed. Remaining work begins with the post-structural phases: concrete Core startup/shutdown/recovery composition, timer ownership, bounded telemetry scheduling, MediaRt composition, ControlModel/operation extraction, and then full composed-runtime software/HIL acceptance.
+
 This document supersedes the implementation-direction portions of the earlier
 Review architecture documents where they conflict with the decisions frozen
 here. Historical Round documents and Experiment evidence remain historical
