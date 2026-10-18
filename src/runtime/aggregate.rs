@@ -146,14 +146,16 @@ impl RuntimeAggregator {
 
 #[cfg(test)]
 mod tests {
-    use crate::architecture::{
+    use crate::{
+        architecture::{
         control::{ControlSnapshot, ControlState},
         hci_host::{HciHostSnapshot, HciHostState},
         lifecycle::{LifecycleSnapshot, LifecycleState, SessionState},
         media::{MediaSnapshot, MediaState},
         runtime_state::RuntimeState,
         transport::{TransportSnapshot, TransportState},
-        types::Generation,
+        },
+        runtime::generation::Generation,
     };
 
     use super::*;

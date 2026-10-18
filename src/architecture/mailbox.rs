@@ -4,7 +4,8 @@
 //! MessageScope remains here temporarily because it carries product lifecycle
 //! identities (Generation/SessionId/StreamId) and has no active runtime owner.
 
-use super::types::{Generation, SessionId, StreamId};
+use super::types::{SessionId, StreamId};
+use crate::runtime::generation::Generation;
 use crate::runtime::mailbox::contract::{
     DeliveryClass, MailboxContract, OverflowAction,
 };

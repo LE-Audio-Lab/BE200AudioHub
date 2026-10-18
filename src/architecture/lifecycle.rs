@@ -3,7 +3,8 @@
 //! Owns desired state, generation, session lifetime, recovery policy and
 //! ordered startup/teardown. It does not own Bluetooth packet semantics.
 
-use super::types::{Generation, SessionId};
+use super::types::SessionId;
+use crate::runtime::generation::Generation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LifecycleState {

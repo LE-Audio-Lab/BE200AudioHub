@@ -1,3 +1,5 @@
+pub mod policy;
+
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
@@ -8,13 +10,10 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use crate::architecture::{
-    execution::ExecutionDomain,
-    types::Generation,
-};
+use self::policy::ExecutionDomain;
 
 use super::{
-    generation::GenerationGate,
+    generation::{Generation, GenerationGate},
     supervisor::{ContextFault, ContextFaultKind, FaultSink},
 };
 

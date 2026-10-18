@@ -9,8 +9,8 @@ use super::{
     lifecycle::{LifecycleSnapshot, LifecycleState, SessionState},
     media::{MediaSnapshot, MediaState},
     transport::{TransportSnapshot, TransportState},
-    types::Generation,
 };
+use crate::runtime::generation::Generation;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeState {

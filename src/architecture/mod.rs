@@ -5,7 +5,6 @@
 //! queue capacities remain implementation decisions.
 
 pub mod control;
-pub mod execution;
 pub mod hci_host;
 pub mod iso_tx_bridge;
 pub mod lifecycle;

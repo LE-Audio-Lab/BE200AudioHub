@@ -1,4 +1,4 @@
-use crate::architecture::execution::ExecutionDomain;
+use crate::runtime::context::policy::ExecutionDomain;
 
 use super::mailbox::{self, BoundedReceiver, BoundedSender, RecvError, SendError};
 

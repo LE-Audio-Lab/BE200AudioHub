@@ -3,7 +3,8 @@ use std::sync::{
     Arc,
 };
 
-use crate::architecture::types::Generation;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Generation(pub u64);
 
 #[derive(Clone, Debug)]
 pub struct GenerationGate {
