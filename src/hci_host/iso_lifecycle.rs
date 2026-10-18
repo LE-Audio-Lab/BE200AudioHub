@@ -1,3 +1,5 @@
+use super::iso::CisRef;
+
 use bumble_hci::{
     codes::{HCI_DISCONNECT_COMMAND, HCI_LE_REMOVE_CIG_COMMAND},
     Command,
@@ -113,6 +115,24 @@ pub enum CisDisconnectState {
         event_reason: u8,
     },
     Failed(CisDisconnectFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SemanticCisDisconnectState {
+    Submitting {
+        cis: CisRef,
+    },
+    AwaitingEvent {
+        cis: CisRef,
+    },
+    Disconnected {
+        cis: CisRef,
+        event_reason: u8,
+    },
+    Failed {
+        cis: CisRef,
+        kind: CisDisconnectFailureKind,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
