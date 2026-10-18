@@ -5851,8 +5851,50 @@ mod tests {
                 stream_id: StreamId(11),
             })
         ));
-        assert!(actions.iter().any(|action| matches!(
-            action,
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(
+                    ControlTimer::StreamRouteBind {
+                        session_id: SessionId(7),
+                        stream_id: StreamId(11),
+                    },
+                ),
+                ControlAction::UnbindStreamRoute {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupStreamRoute {
+                        session_id: SessionId(7),
+                        stream_id: StreamId(11),
+                    },
+                ),
+            ]
+        );
+        assert!(machine.stream_binding().is_err());
+
+        let actions = machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Unbound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                    was_bound: true,
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(
+                ControlTimer::CleanupStreamRoute {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            )
+        );
+        assert_eq!(
+            actions[1],
             ControlAction::RemoveIsoPathByRef {
                 cis: CisRef {
                     cig_id: 1,
@@ -5860,8 +5902,78 @@ mod tests {
                 },
                 directions: 0x01,
             }
+        );
+        assert_eq!(
+            actions[2],
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupIsoPath {
+                    cis: CisRef {
+                        cig_id: 1,
+                        cis_id: 2,
+                    },
+                },
+            )
+        );
+        assert!(!actions[..1].iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectCisByRef { .. }
+                | ControlAction::RemoveCig { .. }
+                | ControlAction::DisconnectAcl { .. }
         )));
-        assert!(machine.stream_binding().is_err());
+    }
+
+    #[test]
+    fn route_cleanup_timeout_records_failure_then_starts_path_cleanup() {
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::StreamRouteBind {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        let cleanup_timer = ControlTimer::CleanupStreamRoute {
+            session_id: SessionId(7),
+            stream_id: StreamId(11),
+        };
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(cleanup_timer))
+            .unwrap();
+
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(machine.cleanup_failures.contains(
+            &ControlCleanupFailure::Timeout(cleanup_timer)
+        ));
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(cleanup_timer)
+        );
+        assert_eq!(
+            actions[1],
+            ControlAction::RemoveIsoPathByRef {
+                cis: CisRef {
+                    cig_id: 1,
+                    cis_id: 2,
+                },
+                directions: 0x01,
+            }
+        );
+        assert_eq!(
+            actions[2],
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupIsoPath {
+                    cis: CisRef {
+                        cig_id: 1,
+                        cis_id: 2,
+                    },
+                },
+            )
+        );
     }
 
     #[test]
