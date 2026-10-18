@@ -1,10 +1,10 @@
-//! L1 — Control Plane.
+//! Transitional coarse Control read projection.
 //!
-//! Owns LE Audio semantics: device/set identity, PACS/ASCS/CSIS/CAS, codec/QoS
-//! planning, ASE state and semantic CIG/CIS/ISO-path lifecycle.
-//! It is also the sole reducer/writer for RuntimeState.
+//! Logical stream contract types are owned by L1-Control/interface/stream.
+//! This snapshot remains only until Core/Condition replaces old RuntimeState.
 
-use super::types::{SessionId, StreamId};
+use super::types::StreamId;
+use crate::plane::l1_control::interface::stream::LeAudioFormat;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlState {
@@ -18,36 +18,6 @@ pub enum ControlState {
     Streaming,
     TearingDown,
     Faulted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LeAudioFormat {
-    pub sample_rate_hz: u32,
-    pub frame_duration_us: u32,
-    pub octets_per_sdu: u16,
-}
-
-/// Logical stream topology exported by Control.
-///
-/// This is deliberately transport-neutral: it describes the audio shape, not
-/// ASE/CIG/CIS/HCI identities. The current product stream is one logical stereo
-/// stream split into left/right mono legs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamTopology {
-    StereoSplit,
-}
-
-/// Stable Control -> Media / StreamClock / IsoTxBridge handoff.
-///
-/// SessionId and StreamId are owned/minted by L0 orchestration and supplied to
-/// Control. No Bluetooth transport identity is allowed in this contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StreamBinding {
-    pub session_id: SessionId,
-    pub stream_id: StreamId,
-    pub format: LeAudioFormat,
-    pub presentation_delay_us: u32,
-    pub topology: StreamTopology,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

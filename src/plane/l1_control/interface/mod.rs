@@ -3,3 +3,4 @@
 pub mod command;
 pub mod dispatch;
 pub mod report;
+pub mod stream;

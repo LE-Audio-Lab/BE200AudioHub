@@ -6,8 +6,11 @@ use bumble_profiles::ascs::{
 
 use crate::{
     architecture::{
-        control::{ControlSnapshot, ControlState, StreamBinding, StreamTopology},
-        types::{AudioSide, SessionId, StreamId},
+        control::{ControlSnapshot, ControlState},
+        types::{SessionId, StreamId},
+    },
+    plane::l1_control::interface::stream::{
+        AudioSide, StreamBinding, StreamTopology,
     },
     plane::l1_hci::interface::report::HciReport,
     plane::l1_hci::{
