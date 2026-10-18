@@ -3,6 +3,7 @@ use crossbeam_channel::{
 };
 
 use crate::{
+    architecture::types::{SessionId, StreamId},
     runtime::mailbox::{RecvError, SendError},
     transport::{
         packet::ControllerPacket,
@@ -38,6 +39,9 @@ use super::{
     privacy::{ControllerPrivacyState, ResolvingListConfig},
     scan::ScanSummary,
     security::{StoredEncryptionRequest, StoredEncryptionState},
+    stream_route::{
+        StereoStreamRouteBinding, StreamRouteState,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +72,11 @@ pub enum HciCommand {
     RemoveIsoPathByRef {
         cis: CisRef,
         directions: u8,
+    },
+    BindStreamRoute(StereoStreamRouteBinding),
+    UnbindStreamRoute {
+        session_id: SessionId,
+        stream_id: StreamId,
     },
     BeginIsoDrain(IsoDrainRequest),
     ResumeIsoData(IsoDrainRequest),
@@ -101,6 +110,7 @@ pub enum HciReport {
     CigRemoveState(CigRemoveState),
     IsoPathState(IsoPathOperationState),
     SemanticIsoPathState(SemanticIsoPathState),
+    StreamRouteState(StreamRouteState),
     IsoDrainState(IsoDrainState),
     ConnectionSet(LeConnectionSetSnapshot),
     Gatt(GattReport),
@@ -374,6 +384,28 @@ impl HciControl {
             .try_send(HciCommand::RemoveIsoPathByRef {
                 cis,
                 directions,
+            })
+            .map_err(map_send_error)
+    }
+
+    pub fn try_bind_stream_route(
+        &self,
+        binding: StereoStreamRouteBinding,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::BindStreamRoute(binding))
+            .map_err(map_send_error)
+    }
+
+    pub fn try_unbind_stream_route(
+        &self,
+        session_id: SessionId,
+        stream_id: StreamId,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::UnbindStreamRoute {
+                session_id,
+                stream_id,
             })
             .map_err(map_send_error)
     }
