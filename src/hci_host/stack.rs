@@ -8,7 +8,8 @@ use crate::{
 
 use super::{
     mailbox::{
-        hci_mailbox_with_iso, HciControl, HciIsoTx, HciReportInbox,
+        hci_mailbox_with_iso, HciControl, HciIsoTx,
+        HciLogicalIsoTx, HciReportInbox,
     },
     worker::{spawn_hci_worker, HciWorkerExit, HciWorkerJoin},
 };
@@ -61,6 +62,12 @@ impl HciStack {
     /// commands and never blocks the producer on controller credit.
     pub fn iso_tx(&self) -> HciIsoTx {
         self.control.iso_tx()
+    }
+
+    /// Product realtime data-plane handle. Payloads are addressed only by
+    /// SessionId/StreamId and never expose CIS/HCI connection handles.
+    pub fn logical_iso_tx(&self) -> HciLogicalIsoTx {
+        self.control.logical_iso_tx()
     }
 
     /// Ordered shutdown: stop HCI semantic production first, then cancel raw
