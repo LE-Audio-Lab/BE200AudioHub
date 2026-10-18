@@ -288,3 +288,54 @@ Round 5 preserves:
 L1-Control now owns the semantic implementation and logical stream contract and exposes directional command/report interfaces.
 
 ControlMachine remains a proven mega-FSM, but its field ownership is now classified. The next semantic refactor should begin with a mechanical ControlModel container extraction, not a state-machine rewrite.
+
+
+---
+
+## 10. Post-Round8 implementation status
+
+The extraction plan above has now been executed after the V2 structural
+refactor. The original `ControlModel` name was intentionally not retained as
+the concrete type name because the audit categories proved more precise when
+kept separate.
+
+Landed ownership:
+
+```text
+model/confirmed_status.rs
+    ConfirmedStatus
+
+model/planned_configuration.rs
+    PlannedConfiguration
+
+model/cleanup_knowledge.rs
+    CleanupKnowledge
+
+operation/audio_discovery.rs
+operation/ase_control.rs
+operation/streaming.rs
+operation/stream_route.rs
+operation/rollback.rs
+```
+
+The Engine implementation was also physically decomposed into connection,
+audio, stream, rollback, event-reducer and report-reducer flows. Regression
+tests were separated from the production machine source.
+
+All bounded extraction gates remained:
+
+```text
+cargo test --workspace --locked
+372 passed / 0 failed
+```
+
+Final check/build also pass.
+
+The only intentionally deferred item from the old C8 recommendation is explicit
+`current/target` semantic state. `ControlPhase` still has real execution
+semantics as the admission/cursor for explicit stage APIs. It therefore remains
+an internal Engine cursor/checkpoint until Core runtime composition determines
+whether those stages become automatically chained.
+
+The authoritative current description is
+`docs/design/CONTROL_DECOMPOSITION_POST_R8.md`.
