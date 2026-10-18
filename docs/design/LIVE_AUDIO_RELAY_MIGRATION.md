@@ -147,6 +147,13 @@ The 10 ms Media consumer:
 4. encodes left/right LC3;
 5. pushes encoded frame to IsoTxBridge.
 
+### M5.1 — live Media worker — LANDED
+
+`LivePcmIsoWorker` owns the live absolute-grid loop on a dedicated Media
+thread. It starts before Process Loopback activation and emits encoded zero PCM
+while capture is not ready, so COM/WASAPI startup cannot starve an already-live
+CIS.
+
 ### M6 — current-path live HIL — NEXT
 
 Use the existing Round8 current Control/HCI setup and teardown path, replacing

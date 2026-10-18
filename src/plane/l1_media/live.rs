@@ -3,6 +3,16 @@
 //! Media time is authoritative. PCM buffering is only a bounded cushion; old
 //! PCM is consumed/discarded when the absolute media grid advances.
 
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
 use crate::{
     plane::{
         l1_control::interface::stream::StreamBinding,
@@ -26,13 +36,16 @@ use crate::{
                 LIVE_PCM_CONSUMER_FRAMES,
             },
             source::synthetic::SAMPLES_PER_FRAME,
+            telemetry::MediaBridgeTelemetrySnapshot,
         },
     },
 };
 
 const LIVE_ENCODED_CAPACITY: usize = 4;
+pub const LIVE_BRIDGE_START_LEAD_US: u64 = 20_000;
+const WORKER_MAX_SLEEP_US: u64 = 2_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LivePcmError {
     Clock(StreamClockError),
     Codec(MediaLc3Error),
@@ -40,6 +53,9 @@ pub enum LivePcmError {
     FrameInsert(FrameInsertOutcome),
     FrameIdOverflow,
     ConsumerFrameSizeMismatch,
+    ThreadSpawn,
+    StartupChannelClosed,
+    ThreadPanicked,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,6 +141,10 @@ impl LivePcmIsoRuntime {
 
     pub fn stats(&self) -> LivePcmStats {
         self.stats
+    }
+
+    pub fn bridge_telemetry(&self) -> MediaBridgeTelemetrySnapshot {
+        self.bridge.telemetry_snapshot()
     }
 
     pub fn pcm_fill_frames(&self) -> usize {
@@ -232,6 +252,114 @@ impl LivePcmIsoRuntime {
             pcm,
             bridge,
         })
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LivePcmWorkerExit {
+    pub pcm: LivePcmStats,
+    pub bridge: MediaBridgeTelemetrySnapshot,
+}
+
+pub struct LivePcmIsoWorker {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<Result<LivePcmWorkerExit, LivePcmError>>>,
+}
+
+impl LivePcmIsoWorker {
+    pub fn start(
+        binding: StreamBinding,
+        boundary: PcmRelayBoundary,
+        tx: HciLogicalIsoTx,
+    ) -> Result<Self, LivePcmError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let (startup_tx, startup_rx) = mpsc::sync_channel(1);
+
+        let join = thread::Builder::new()
+            .name("be200-media-live".into())
+            .spawn(move || {
+                let origin = Instant::now();
+                let mut runtime = match LivePcmIsoRuntime::new(
+                    binding,
+                    boundary,
+                    LIVE_BRIDGE_START_LEAD_US,
+                    tx,
+                ) {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = startup_tx.send(Err(error.clone()));
+                        return Err(error);
+                    }
+                };
+
+                runtime.arm_source();
+                let _ = startup_tx.send(Ok(()));
+
+                while !thread_stop.load(Ordering::Acquire) {
+                    let now_us = u64::try_from(
+                        origin.elapsed().as_micros(),
+                    )
+                    .unwrap_or(u64::MAX);
+
+                    match runtime.on_wake(now_us)? {
+                        LivePcmStep::Wait { deadline_us, .. } => {
+                            if deadline_us > now_us {
+                                let sleep_us = (deadline_us - now_us)
+                                    .min(WORKER_MAX_SLEEP_US);
+                                thread::sleep(Duration::from_micros(
+                                    sleep_us,
+                                ));
+                            } else {
+                                thread::yield_now();
+                            }
+                        }
+                        LivePcmStep::Interval { .. } => {}
+                    }
+                }
+
+                runtime.disable_source();
+                Ok(LivePcmWorkerExit {
+                    pcm: runtime.stats(),
+                    bridge: runtime.bridge_telemetry(),
+                })
+            })
+            .map_err(|_| LivePcmError::ThreadSpawn)?;
+
+        match startup_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                stop,
+                join: Some(join),
+            }),
+            Ok(Err(error)) => {
+                let _ = join.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = join.join();
+                Err(LivePcmError::StartupChannelClosed)
+            }
+        }
+    }
+
+    pub fn shutdown(
+        mut self,
+    ) -> Result<LivePcmWorkerExit, LivePcmError> {
+        self.stop.store(true, Ordering::Release);
+        let Some(join) = self.join.take() else {
+            return Err(LivePcmError::StartupChannelClosed);
+        };
+        join.join().map_err(|_| LivePcmError::ThreadPanicked)?
+    }
+}
+
+impl Drop for LivePcmIsoWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
