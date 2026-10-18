@@ -82,7 +82,6 @@ mod tests {
     use crate::architecture::control::ControlState;
 
     use super::super::machine::ControlPhase;
-    use super::*;
 
     #[test]
     fn exported_snapshot_coarsens_internal_control_phases() {
