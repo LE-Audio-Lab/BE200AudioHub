@@ -5,7 +5,10 @@ use bumble_profiles::ascs::{
 };
 
 use crate::{
-    architecture::types::AudioSide,
+    architecture::{
+        control::{StreamBinding, StreamTopology},
+        types::{AudioSide, SessionId, StreamId},
+    },
     hci_host::{
     connection::{
         ConnectionToken, DisconnectFailure, DisconnectState,
@@ -496,6 +499,33 @@ impl ControlMachine {
         side: AudioSide,
     ) -> Option<&AseStatus> {
         self.streaming_statuses[side_index(side)].as_ref()
+    }
+
+    pub fn stream_binding(
+        &self,
+        session_id: SessionId,
+        stream_id: StreamId,
+    ) -> Result<StreamBinding, ControlFailure> {
+        if self.phase != ControlPhase::StreamingReady {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        let codec = self
+            .codec_plan
+            .as_ref()
+            .expect("StreamingReady requires codec plan");
+        let qos = self
+            .qos_plan
+            .as_ref()
+            .expect("StreamingReady requires QoS plan");
+
+        Ok(StreamBinding {
+            session_id,
+            stream_id,
+            format: codec.format,
+            presentation_delay_us:
+                qos.left.parameters.presentation_delay,
+            topology: StreamTopology::StereoSplit,
+        })
     }
 
     pub fn begin_streaming_gate(
