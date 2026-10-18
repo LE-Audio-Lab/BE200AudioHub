@@ -109,6 +109,13 @@ Preserves Relay KEEPALIVE → ARMED → RELAY activation semantics. Consumer-sid
 keepalive is now PCM zeros fed toward Media rather than zeros rendered through
 a Windows Buds endpoint.
 
+### M3.1 — producer/consumer split — LANDED
+
+`PcmRelayBoundary` is now consumer-owned and returns a separate
+`PcmRelayProducer` for the capture thread. The two sides share only the
+lock-free ring plus atomic mode. Consumer-only drift state is never shared with
+the WASAPI producer.
+
 ### M4 — Windows Process Loopback source — NEXT
 
 Port the source semantics only:

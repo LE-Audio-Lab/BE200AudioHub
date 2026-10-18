@@ -7,7 +7,10 @@
 //! activation this boundary emits real zeros to Media; after activation it
 //! feeds PCM that will be LC3 encoded and submitted through IsoTxBridge.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use super::{
     drift::{DriftTrimResult, ProvisionalPositiveDriftGuard},
@@ -49,16 +52,98 @@ pub struct PcmConsumeResult {
 }
 
 #[derive(Debug)]
-pub struct PcmRelayBoundary {
+struct SharedPcmBoundary {
     ring: SpscStereoPcmRing,
-    drift_guard: ProvisionalPositiveDriftGuard,
     mode: AtomicU8,
     target_cushion_frames: usize,
     startup_hold_frames: usize,
 }
 
+impl SharedPcmBoundary {
+    fn mode(&self) -> PcmBoundaryMode {
+        match self.mode.load(Ordering::Acquire) {
+            MODE_ARMED => PcmBoundaryMode::Armed,
+            MODE_RELAY => PcmBoundaryMode::Relay,
+            _ => PcmBoundaryMode::KeepAlive,
+        }
+    }
+}
+
+/// Single-producer capture handle.
+///
+/// Exactly one instance should be owned by the Process Loopback capture thread.
+/// It never mutates consumer-only drift state.
+#[derive(Debug)]
+pub struct PcmRelayProducer {
+    shared: Arc<SharedPcmBoundary>,
+}
+
+impl PcmRelayProducer {
+    pub fn fill_frames(&self) -> usize {
+        self.shared.ring.fill_frames()
+    }
+
+    pub fn push(
+        &self,
+        frames: &[[f32; 2]],
+        silent: bool,
+    ) -> PcmPushResult {
+        let input_frames = frames.len();
+        if input_frames == 0 {
+            return PcmPushResult::default();
+        }
+
+        let runtime = self.shared.mode() == PcmBoundaryMode::Relay;
+        let intentional_silent_trim_frames = if runtime && silent {
+            let fill = self.shared.ring.fill_frames();
+            if fill > self.shared.target_cushion_frames {
+                input_frames.min(fill - self.shared.target_cushion_frames)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let frames_to_write =
+            input_frames.saturating_sub(intentional_silent_trim_frames);
+        let max_fill = if runtime {
+            self.shared.ring.capacity_frames()
+        } else {
+            self.shared.startup_hold_frames
+        };
+
+        let written_frames = if frames_to_write == 0 {
+            0
+        } else if silent {
+            self.shared
+                .ring
+                .write_silence(frames_to_write, max_fill)
+        } else {
+            self.shared.ring.write(&frames[..frames_to_write], max_fill)
+        };
+
+        PcmPushResult {
+            input_frames,
+            written_frames,
+            intentional_silent_trim_frames,
+            dropped_frames: frames_to_write.saturating_sub(written_frames),
+        }
+    }
+}
+
+/// Single-consumer live PCM boundary owned by L1-Media.
+///
+/// The capture producer and Media consumer share only the ring and atomic mode.
+/// Drift-controller state remains consumer-local.
+#[derive(Debug)]
+pub struct PcmRelayBoundary {
+    shared: Arc<SharedPcmBoundary>,
+    drift_guard: ProvisionalPositiveDriftGuard,
+}
+
 impl PcmRelayBoundary {
-    pub fn relay_defaults() -> Self {
+    pub fn relay_defaults() -> (Self, PcmRelayProducer) {
         Self::new(
             LIVE_PCM_SAMPLE_RATE_HZ,
             LIVE_PCM_RING_CAPACITY_FRAMES,
@@ -73,7 +158,7 @@ impl PcmRelayBoundary {
         capacity_frames: usize,
         target_cushion_frames: usize,
         startup_hold_frames: usize,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<(Self, PcmRelayProducer), &'static str> {
         if target_cushion_frames == 0
             || target_cushion_frames >= capacity_frames
         {
@@ -85,80 +170,39 @@ impl PcmRelayBoundary {
             return Err("startup hold must fit between cushion and capacity");
         }
 
-        Ok(Self {
+        let shared = Arc::new(SharedPcmBoundary {
             ring: SpscStereoPcmRing::new(capacity_frames)?,
+            mode: AtomicU8::new(MODE_KEEPALIVE),
+            target_cushion_frames,
+            startup_hold_frames,
+        });
+
+        let boundary = Self {
+            shared: Arc::clone(&shared),
             drift_guard: ProvisionalPositiveDriftGuard::new(
                 sample_rate_hz,
                 capacity_frames,
                 target_cushion_frames,
             )?,
-            mode: AtomicU8::new(MODE_KEEPALIVE),
-            target_cushion_frames,
-            startup_hold_frames,
-        })
+        };
+
+        Ok((boundary, PcmRelayProducer { shared }))
     }
 
     pub fn mode(&self) -> PcmBoundaryMode {
-        match self.mode.load(Ordering::Acquire) {
-            MODE_ARMED => PcmBoundaryMode::Armed,
-            MODE_RELAY => PcmBoundaryMode::Relay,
-            _ => PcmBoundaryMode::KeepAlive,
-        }
+        self.shared.mode()
     }
 
     pub fn fill_frames(&self) -> usize {
-        self.ring.fill_frames()
+        self.shared.ring.fill_frames()
     }
 
     pub fn arm(&self) {
-        self.mode.store(MODE_ARMED, Ordering::Release);
+        self.shared.mode.store(MODE_ARMED, Ordering::Release);
     }
 
     pub fn disable(&self) {
-        self.mode.store(MODE_KEEPALIVE, Ordering::Release);
-    }
-
-    pub fn push(
-        &mut self,
-        frames: &[[f32; 2]],
-        silent: bool,
-    ) -> PcmPushResult {
-        let input_frames = frames.len();
-        if input_frames == 0 {
-            return PcmPushResult::default();
-        }
-
-        let runtime = self.mode() == PcmBoundaryMode::Relay;
-        let intentional_silent_trim_frames = if runtime && silent {
-            self.drift_guard.silent_frames_to_suppress(
-                input_frames,
-                self.ring.fill_frames(),
-            )
-        } else {
-            0
-        };
-        let frames_to_write =
-            input_frames.saturating_sub(intentional_silent_trim_frames);
-        let max_fill = if runtime {
-            self.ring.capacity_frames()
-        } else {
-            self.startup_hold_frames
-        };
-
-        let written_frames = if frames_to_write == 0 {
-            0
-        } else if silent {
-            self.ring.write_silence(frames_to_write, max_fill)
-        } else {
-            self.ring.write(&frames[..frames_to_write], max_fill)
-        };
-
-        PcmPushResult {
-            input_frames,
-            written_frames,
-            intentional_silent_trim_frames,
-            dropped_frames: frames_to_write.saturating_sub(written_frames),
-        }
+        self.shared.mode.store(MODE_KEEPALIVE, Ordering::Release);
     }
 
     pub fn consume(
@@ -176,12 +220,13 @@ impl PcmRelayBoundary {
         let mut startup_trim_frames = 0;
 
         if mode == PcmBoundaryMode::Armed {
-            let required_fill =
-                requested_frames.saturating_add(self.target_cushion_frames);
-            let observed_fill = self.ring.fill_frames();
+            let required_fill = requested_frames
+                .saturating_add(self.shared.target_cushion_frames);
+            let observed_fill = self.shared.ring.fill_frames();
 
             if observed_fill >= required_fill
                 && self
+                    .shared
                     .mode
                     .compare_exchange(
                         MODE_ARMED,
@@ -192,7 +237,7 @@ impl PcmRelayBoundary {
                     .is_ok()
             {
                 startup_trim_frames =
-                    self.ring.discard(observed_fill - required_fill);
+                    self.shared.ring.discard(observed_fill - required_fill);
             }
 
             mode = self.mode();
@@ -208,8 +253,9 @@ impl PcmRelayBoundary {
             };
         }
 
-        let read_frames = self.ring.read(destination);
-        let drift_trim = self.drift_guard.apply_after_consume(&self.ring);
+        let read_frames = self.shared.ring.read(destination);
+        let drift_trim =
+            self.drift_guard.apply_after_consume(&self.shared.ring);
 
         PcmConsumeResult {
             requested_frames,
@@ -231,7 +277,7 @@ mod tests {
 
     #[test]
     fn defaults_match_validated_relay_buffer_contract() {
-        let boundary = PcmRelayBoundary::relay_defaults();
+        let (boundary, _producer) = PcmRelayBoundary::relay_defaults();
         assert_eq!(boundary.mode(), PcmBoundaryMode::KeepAlive);
         assert_eq!(LIVE_PCM_RING_CAPACITY_FRAMES, 3_840);
         assert_eq!(LIVE_PCM_TARGET_CUSHION_FRAMES, 480);
@@ -241,7 +287,7 @@ mod tests {
 
     #[test]
     fn keepalive_and_armed_emit_real_zero_until_request_plus_cushion_exists() {
-        let mut boundary = PcmRelayBoundary::relay_defaults();
+        let (mut boundary, producer) = PcmRelayBoundary::relay_defaults();
         let mut out = [[1.0f32, 1.0f32]; LIVE_PCM_CONSUMER_FRAMES];
 
         let first = boundary.consume(&mut out);
@@ -249,7 +295,7 @@ mod tests {
         assert!(out.iter().all(|frame| *frame == [0.0, 0.0]));
 
         boundary.arm();
-        assert_eq!(boundary.push(&frames(959, 0.25), false).written_frames, 959);
+        assert_eq!(producer.push(&frames(959, 0.25), false).written_frames, 959);
 
         let still_armed = boundary.consume(&mut out);
         assert!(still_armed.keepalive);
@@ -258,9 +304,9 @@ mod tests {
 
     #[test]
     fn relay_activates_at_twenty_ms_and_retains_ten_ms_cushion() {
-        let mut boundary = PcmRelayBoundary::relay_defaults();
+        let (mut boundary, producer) = PcmRelayBoundary::relay_defaults();
         boundary.arm();
-        assert_eq!(boundary.push(&frames(960, 0.25), false).written_frames, 960);
+        assert_eq!(producer.push(&frames(960, 0.25), false).written_frames, 960);
 
         let mut out = [[0.0f32, 0.0f32]; LIVE_PCM_CONSUMER_FRAMES];
         let result = boundary.consume(&mut out);
@@ -274,10 +320,10 @@ mod tests {
 
     #[test]
     fn preactivation_capture_is_bounded_by_forty_ms_startup_hold() {
-        let mut boundary = PcmRelayBoundary::relay_defaults();
+        let (mut boundary, producer) = PcmRelayBoundary::relay_defaults();
         boundary.arm();
 
-        let result = boundary.push(&frames(2_400, 0.5), false);
+        let result = producer.push(&frames(2_400, 0.5), false);
         assert_eq!(result.written_frames, 1_920);
         assert_eq!(result.dropped_frames, 480);
         assert_eq!(boundary.fill_frames(), 1_920);
@@ -291,16 +337,32 @@ mod tests {
     }
 
     #[test]
-    fn relay_underflow_zero_fills_missing_tail() {
-        let mut boundary = PcmRelayBoundary::relay_defaults();
+    fn producer_and_consumer_can_live_on_distinct_threads() {
+        let (mut boundary, producer) = PcmRelayBoundary::relay_defaults();
         boundary.arm();
-        assert_eq!(boundary.push(&frames(960, 0.25), false).written_frames, 960);
+
+        let writer = std::thread::spawn(move || {
+            producer.push(&frames(960, 0.75), false)
+        });
+        assert_eq!(writer.join().unwrap().written_frames, 960);
+
+        let mut out = [[0.0f32, 0.0f32]; LIVE_PCM_CONSUMER_FRAMES];
+        let result = boundary.consume(&mut out);
+        assert_eq!(result.read_frames, 480);
+        assert!(out.iter().all(|frame| *frame == [0.75, -0.75]));
+    }
+
+    #[test]
+    fn relay_underflow_zero_fills_missing_tail() {
+        let (mut boundary, producer) = PcmRelayBoundary::relay_defaults();
+        boundary.arm();
+        assert_eq!(producer.push(&frames(960, 0.25), false).written_frames, 960);
 
         let mut out = [[0.0f32, 0.0f32]; LIVE_PCM_CONSUMER_FRAMES];
         let _ = boundary.consume(&mut out);
         assert_eq!(boundary.fill_frames(), 480);
 
-        assert_eq!(boundary.ring.discard(400), 400);
+        assert_eq!(boundary.shared.ring.discard(400), 400);
         let underflow = boundary.consume(&mut out);
         assert_eq!(underflow.read_frames, 80);
         assert!(out[..80].iter().all(|frame| *frame == [0.25, -0.25]));
