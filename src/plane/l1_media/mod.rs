@@ -8,3 +8,4 @@ pub mod clock;
 pub mod codec;
 pub mod interface;
 pub mod source;
+pub mod telemetry;

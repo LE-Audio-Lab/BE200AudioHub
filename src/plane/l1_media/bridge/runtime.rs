@@ -13,6 +13,10 @@ use crate::{
         l1_media::{
             clock::frame::FrameId,
             interface::frame::EncodedStereoFrame,
+            telemetry::{
+                MediaBridgeTelemetrySnapshot, MediaBridgeTraceRecord,
+                MediaTelemetry,
+            },
         },
     },
     runtime::mailbox::SendError,
@@ -54,6 +58,7 @@ pub enum BridgeTxError {
 pub struct LogicalIsoTxBridge {
     scheduler: IntervalGroupScheduler<Vec<u8>>,
     tx: HciLogicalIsoTx,
+    telemetry: MediaTelemetry,
 }
 
 impl LogicalIsoTxBridge {
@@ -72,7 +77,7 @@ impl LogicalIsoTxBridge {
         )
         .map_err(BridgeTxError::Scheduler)?;
 
-        Ok(Self { scheduler, tx })
+        Ok(Self { scheduler, tx, telemetry: MediaTelemetry::default() })
     }
 
     pub fn push_encoded(
@@ -84,6 +89,18 @@ impl LogicalIsoTxBridge {
 
     pub fn stored_len(&self) -> usize {
         self.scheduler.stored_len()
+    }
+
+    pub fn telemetry_snapshot(&self) -> MediaBridgeTelemetrySnapshot {
+        self.telemetry.bridge_snapshot()
+    }
+
+    pub fn telemetry_trace_snapshot(&self) -> Vec<MediaBridgeTraceRecord> {
+        self.telemetry.bridge_trace_snapshot()
+    }
+
+    pub fn take_telemetry_dirty(&mut self) -> bool {
+        self.telemetry.take_bridge_dirty()
     }
 
     pub fn next_deadline_us(
@@ -123,18 +140,20 @@ impl LogicalIsoTxBridge {
                     .map_err(BridgeTxError::LogicalGroup)?;
 
                 match self.tx.try_submit_group(request) {
-                    Ok(()) => Ok(BridgeTxStep::Submitted {
-                        frame_id,
-                        source,
-                        skipped_intervals,
-                        stale_frames_dropped,
-                    }),
+                    Ok(()) => {
+                        self.telemetry.observe_submitted(
+                            frame_id, source, skipped_intervals, stale_frames_dropped,
+                        );
+                        Ok(BridgeTxStep::Submitted {
+                            frame_id, source, skipped_intervals, stale_frames_dropped,
+                        })
+                    }
                     Err(SendError::Full) => {
+                        self.telemetry.observe_dropped_backpressure(
+                            frame_id, source, skipped_intervals, stale_frames_dropped,
+                        );
                         Ok(BridgeTxStep::DroppedBackpressure {
-                            frame_id,
-                            source,
-                            skipped_intervals,
-                            stale_frames_dropped,
+                            frame_id, source, skipped_intervals, stale_frames_dropped,
                         })
                     }
                     Err(SendError::Disconnected) => {
@@ -274,6 +293,16 @@ mod tests {
             EPOCH_US + 20_000
         );
         assert_eq!(bridge.stored_len(), 0);
+        let telemetry = bridge.telemetry_snapshot();
+        assert_eq!(telemetry.submitted_intervals, 1);
+        assert_eq!(telemetry.dropped_backpressure_intervals, 1);
+        assert_eq!(telemetry.fallback_intervals, 0);
+        assert!(bridge.take_telemetry_dirty());
+        assert!(!bridge.take_telemetry_dirty());
+        assert!(matches!(
+            bridge.telemetry_trace_snapshot().last(),
+            Some(MediaBridgeTraceRecord::DroppedBackpressure { frame_id: FrameId(1), .. })
+        ));
     }
 
     #[test]
