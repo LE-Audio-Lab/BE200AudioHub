@@ -1,4 +1,10 @@
-use crate::hci_host::{
+use bumble_profiles::ascs::{
+    AseOperation, AseState, AseStatus, AseStatusDetails,
+};
+
+use crate::{
+    architecture::types::AudioSide,
+    hci_host::{
     connection::{
         ConnectionToken, DisconnectFailure, DisconnectState,
         FalConnectFailure, FalConnectRequest, FalConnectionState,
@@ -20,6 +26,7 @@ use crate::hci_host::{
         StoredEncryptionFailure, StoredEncryptionRequest,
         StoredEncryptionState,
     },
+    },
 };
 
 use super::{
@@ -29,6 +36,11 @@ use super::{
     },
     audio_snapshot::{
         AudioMemberSnapshot, AudioSetSnapshot,
+    },
+    ascs_control::{
+        AseOperationAction, AseOperationFailure, AseOperationMachine,
+        AsePrepareAction, AsePrepareFailure, AsePrepareMachine,
+        PreparedAseControl,
     },
     codec_plan::{
         plan_first_stream, CodecPlanError, StereoCodecPlan,
@@ -57,6 +69,9 @@ pub enum ControlPhase {
     DiscoveringAudioMember { member_index: usize },
     AudioSetDiscovered,
     CodecPlanned,
+    PreparingCodecAse { side: AudioSide },
+    ConfiguringCodec { side: AudioSide },
+    CodecConfigured,
     CancellingConnection { member_index: usize },
     RollingBack,
     Faulted,
@@ -79,6 +94,7 @@ pub enum ControlTimer {
         member_index: usize,
         request_id: GattRequestId,
     },
+    AseOperation { side: AudioSide },
     CleanupDisconnect(ConnectionToken),
     CleanupPrivacy,
 }
@@ -161,6 +177,25 @@ pub enum ControlFailure {
     },
     AudioSet(String),
     CodecPlan(CodecPlanError),
+    AsePrepare {
+        side: AudioSide,
+        failure: AsePrepareFailure,
+    },
+    AsePrepareTimeout {
+        side: AudioSide,
+        request_id: GattRequestId,
+    },
+    AseOperation {
+        side: AudioSide,
+        failure: AseOperationFailure,
+    },
+    AseOperationTimeout {
+        side: AudioSide,
+    },
+    CodecReadbackMismatch {
+        side: AudioSide,
+        detail: String,
+    },
     Timeout(ControlTimer),
     RollbackFailed {
         primary: Box<ControlFailure>,
@@ -189,6 +224,10 @@ pub struct ControlMachine {
     audio_members: Vec<AudioMemberSnapshot>,
     audio_set: Option<AudioSetSnapshot>,
     codec_plan: Option<StereoCodecPlan>,
+    ase_prepare: Option<AsePrepareMachine>,
+    ase_operation: Option<AseOperationMachine>,
+    prepared_ases: [Option<PreparedAseControl>; 2],
+    codec_statuses: [Option<AseStatus>; 2],
     failure: Option<ControlFailure>,
 }
 
@@ -210,6 +249,10 @@ impl ControlMachine {
             audio_members: Vec::new(),
             audio_set: None,
             codec_plan: None,
+            ase_prepare: None,
+            ase_operation: None,
+            prepared_ases: [None, None],
+            codec_statuses: [None, None],
             failure: None,
         })
     }
@@ -238,6 +281,33 @@ impl ControlMachine {
         self.codec_plan.as_ref()
     }
 
+    pub fn prepared_ase(
+        &self,
+        side: AudioSide,
+    ) -> Option<&PreparedAseControl> {
+        self.prepared_ases[side_index(side)].as_ref()
+    }
+
+    pub fn codec_status(
+        &self,
+        side: AudioSide,
+    ) -> Option<&AseStatus> {
+        self.codec_statuses[side_index(side)].as_ref()
+    }
+
+    pub fn begin_codec_configuration(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if self.phase != ControlPhase::CodecPlanned {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.ase_prepare = None;
+        self.ase_operation = None;
+        self.prepared_ases = [None, None];
+        self.codec_statuses = [None, None];
+        self.start_ase_prepare(AudioSide::Left)
+    }
+
     pub fn plan_codec(
         &mut self,
     ) -> Result<(), ControlFailure> {
@@ -251,6 +321,10 @@ impl ControlMachine {
         let plan = plan_first_stream(set)
             .map_err(ControlFailure::CodecPlan)?;
         self.codec_plan = Some(plan);
+        self.ase_prepare = None;
+        self.ase_operation = None;
+        self.prepared_ases = [None, None];
+        self.codec_statuses = [None, None];
         self.phase = ControlPhase::CodecPlanned;
         Ok(())
     }
@@ -264,6 +338,10 @@ impl ControlMachine {
         self.audio_members.clear();
         self.audio_set = None;
         self.codec_plan = None;
+        self.ase_prepare = None;
+        self.ase_operation = None;
+        self.prepared_ases = [None, None];
+        self.codec_statuses = [None, None];
         self.start_audio_member_discovery(0)
     }
 
@@ -783,6 +861,70 @@ impl ControlMachine {
         }
     }
 
+    fn start_ase_prepare(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let sink = self.planned_sink(side)?.clone();
+        let mut machine = AsePrepareMachine::new(
+            sink,
+            self.next_gatt_request_id,
+        );
+        let action = machine.start().map_err(|failure| {
+            ControlFailure::AsePrepare { side, failure }
+        })?;
+        self.next_gatt_request_id = machine.next_request_id();
+        self.ase_prepare = Some(machine);
+        self.phase = ControlPhase::PreparingCodecAse { side };
+        self.translate_ase_prepare_action(side, None, action)
+    }
+
+    fn start_config_codec(
+        &mut self,
+        side: AudioSide,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let prepared = self.prepared_ases[side_index(side)]
+            .as_ref()
+            .expect("prepared ASE must exist before ConfigCodec")
+            .clone();
+        let operation = AseOperation::ConfigCodec(vec![
+            prepared.sink.config_codec_parameters(),
+        ]);
+        let mut machine = AseOperationMachine::new(
+            prepared,
+            operation,
+            AseState::CODEC_CONFIGURED,
+            self.next_gatt_request_id,
+        );
+        let action = machine.start().map_err(|failure| {
+            ControlFailure::AseOperation { side, failure }
+        })?;
+        self.next_gatt_request_id = machine.next_request_id();
+        self.ase_operation = Some(machine);
+        self.phase = ControlPhase::ConfiguringCodec { side };
+
+        let mut actions = vec![ControlAction::ArmTimer(
+            ControlTimer::AseOperation { side },
+        )];
+        actions.extend(
+            self.translate_ase_operation_action(side, None, action)?,
+        );
+        Ok(actions)
+    }
+
+    fn planned_sink(
+        &self,
+        side: AudioSide,
+    ) -> Result<&crate::control::codec_plan::PlannedSink, ControlFailure> {
+        let plan = self.codec_plan.as_ref().ok_or(
+            ControlFailure::InvalidStartState(self.phase),
+        )?;
+        Ok(match side {
+            AudioSide::Left => &plan.left,
+            AudioSide::Right => &plan.right,
+        })
+    }
+
     fn start_audio_member_discovery(
         &mut self,
         member_index: usize,
@@ -1081,6 +1223,13 @@ impl ControlMachine {
         self.phase = ControlPhase::Faulted;
         self.failure = Some(failure.clone());
         Err(failure)
+    }
+}
+
+fn side_index(side: AudioSide) -> usize {
+    match side {
+        AudioSide::Left => 0,
+        AudioSide::Right => 1,
     }
 }
 
