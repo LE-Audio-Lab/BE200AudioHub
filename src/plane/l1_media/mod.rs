@@ -7,5 +7,6 @@ pub mod bridge;
 pub mod clock;
 pub mod codec;
 pub mod interface;
+pub mod pcm;
 pub mod source;
 pub mod telemetry;
