@@ -2895,6 +2895,170 @@ mod tests {
         ));
     }
 
+    fn machine_at_codec_configured() -> ControlMachine {
+        let mut machine = machine_at_codec_planned();
+        machine.phase = ControlPhase::CodecConfigured;
+        machine
+    }
+
+    #[test]
+    fn set_cig_success_reaches_cig_configured_without_retaining_raw_handles() {
+        let mut machine = machine_at_codec_configured();
+
+        machine.plan_iso().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::IsoPlanned);
+        let plan = machine.iso_plan().unwrap().clone();
+        assert_eq!(plan.cig_id, 1);
+        assert_eq!(plan.left.cis_id, 1);
+        assert_eq!(plan.right.cis_id, 2);
+
+        let actions = machine.begin_cig_configuration().unwrap();
+        assert_eq!(machine.phase(), ControlPhase::ConfiguringCig);
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::ConfigureCig(plan.cig_config()),
+                ControlAction::ArmTimer(ControlTimer::CigConfig),
+            ]
+        );
+
+        let allocation = CigAllocation {
+            cig_id: 1,
+            cis: vec![
+                crate::hci_host::iso::CisAllocation {
+                    cis_id: 1,
+                    connection_handle: 0x0900,
+                },
+                crate::hci_host::iso::CisAllocation {
+                    cis_id: 2,
+                    connection_handle: 0x0901,
+                },
+            ],
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::CigConfigureState(
+                CigConfigureState::Ready(allocation),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![ControlAction::DisarmTimer(
+                ControlTimer::CigConfig,
+            )]
+        );
+        assert_eq!(machine.phase(), ControlPhase::CigConfigured);
+        assert!(machine.cig_may_exist);
+        // Control retains only the semantic plan. The controller-assigned
+        // 0x0900/0x0901 handles from CigAllocation are intentionally not
+        // represented in ControlMachine state.
+        assert_eq!(machine.iso_plan().unwrap(), &plan);
+    }
+
+    #[test]
+    fn set_cig_uncertain_failure_removes_cig_before_acl_rollback() {
+        let mut machine = machine_at_codec_configured();
+        machine.plan_iso().unwrap();
+        machine.begin_cig_configuration().unwrap();
+
+        let failure = CigConfigureFailure {
+            cig_id: 1,
+            may_have_allocated: true,
+            kind: crate::hci_host::iso::CigConfigureFailureKind::
+                MalformedResponse,
+        };
+        let actions = machine
+            .on_hci_report(&HciReport::CigConfigureState(
+                CigConfigureState::Failed(failure.clone()),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(ControlTimer::CigConfig),
+                ControlAction::RemoveCig { cig_id: 1 },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupCig { cig_id: 1 },
+                ),
+            ]
+        );
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::CigConfigure(actual))
+                if actual == &failure
+        ));
+
+        let actions = machine
+            .on_hci_report(&HciReport::CigRemoveState(
+                CigRemoveState::Removed { cig_id: 1 },
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions[0],
+            ControlAction::DisarmTimer(
+                ControlTimer::CleanupCig { cig_id: 1 },
+            )
+        );
+        assert_eq!(
+            actions[1],
+            ControlAction::DisconnectAcl {
+                connection: ConnectionToken {
+                    connection_handle: 0x0801,
+                    generation: 2,
+                },
+            }
+        );
+        assert_eq!(
+            actions[2],
+            ControlAction::ArmTimer(
+                ControlTimer::CleanupDisconnect(ConnectionToken {
+                    connection_handle: 0x0801,
+                    generation: 2,
+                }),
+            )
+        );
+        assert!(!machine.cig_may_exist);
+    }
+
+    #[test]
+    fn set_cig_timeout_assumes_possible_allocation_and_removes_cig_first() {
+        let mut machine = machine_at_codec_configured();
+        machine.plan_iso().unwrap();
+        machine.begin_cig_configuration().unwrap();
+
+        let actions = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::CigConfig,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![
+                ControlAction::DisarmTimer(ControlTimer::CigConfig),
+                ControlAction::RemoveCig { cig_id: 1 },
+                ControlAction::ArmTimer(
+                    ControlTimer::CleanupCig { cig_id: 1 },
+                ),
+            ]
+        );
+        assert_eq!(machine.phase(), ControlPhase::RollingBack);
+        assert!(machine.cig_may_exist);
+        assert!(matches!(
+            machine.failure(),
+            Some(ControlFailure::CigConfigureTimeout {
+                cig_id: 1,
+            })
+        ));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::DisconnectAcl { .. }
+        )));
+    }
+
     #[test]
     fn audio_set_checkpoint_plans_first_stereo_stream() {
         use bumble_hci::CodingFormat;
