@@ -2327,7 +2327,8 @@ impl HciEngine {
                 }
             }
             HciObservation::CommandComplete { .. }
-            | HciObservation::CommandStatus { .. } => {}
+            | HciObservation::CommandStatus { .. }
+            | HciObservation::LeRemoteFeaturesComplete { .. } => {}
         }
         Ok(())
     }
@@ -2707,7 +2708,8 @@ impl HciEngine {
                 }
                 HciObservation::AclSubmitted { .. }
                 | HciObservation::IsoSubmitted { .. }
-                | HciObservation::CompletedPackets { .. } => {
+                | HciObservation::CompletedPackets { .. }
+                | HciObservation::LeRemoteFeaturesComplete { .. } => {
                     FalConnectAction::Ignored
                 }
             }
@@ -3333,7 +3335,8 @@ impl HciEngine {
             }
             HciObservation::AclSubmitted { .. }
             | HciObservation::IsoSubmitted { .. }
-            | HciObservation::CompletedPackets { .. } => return Ok(()),
+            | HciObservation::CompletedPackets { .. }
+            | HciObservation::LeRemoteFeaturesComplete { .. } => return Ok(()),
         };
 
         if self.scan_pending_opcode != Some(opcode) {
