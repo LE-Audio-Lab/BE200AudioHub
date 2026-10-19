@@ -305,7 +305,7 @@ impl AseLivenessProbe {
         };
 
         format!(
-            "{:?} conn=0x{:04x} ase_handle=0x{:04x} result={} delta_host_submit={} delta_ncp_complete={} delta_mailbox={} delta_usb_submit={} delta_usb_complete={} delta_acl_rx={} delta_att_pdus={} delta_gatt_values={}",
+            "{:?} conn=0x{:04x} ase_handle=0x{:04x} result={} delta_host_submit={} delta_ncp_complete={} delta_mailbox={} delta_usb_submit={} delta_usb_complete={} delta_acl_rx={} delta_att_pdus={} delta_gatt_values={} event_usb_read={}/{}/cancelled:{} pending:{} acl_usb_read={}/{}/cancelled:{} pending:{}",
             self.side,
             self.connection_handle,
             self.attribute_handle,
@@ -326,6 +326,14 @@ impl AseLivenessProbe {
                 .saturating_sub(self.before.att_pdus_drained),
             self.after.gatt_value_events
                 .saturating_sub(self.before.gatt_value_events),
+            self.after.transport_event_read_arms,
+            self.after.transport_event_read_completions,
+            self.after.transport_event_read_cancelled,
+            self.after.transport_event_read_pending_estimate(),
+            self.after.transport_acl_read_arms,
+            self.after.transport_acl_read_completions,
+            self.after.transport_acl_read_cancelled,
+            self.after.transport_acl_read_pending_estimate(),
         )
     }
 }
@@ -980,7 +988,7 @@ fn format_att_write_signatures(
 
 fn format_acl_snapshot(snapshot: AclCreditSnapshot) -> String {
     format!(
-        "bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?} acl_rx={} att_pdus={} gatt_values={} host_submit={} ncp_complete={} host_retired={} mailbox={} usb_submit={} usb_complete={} att_writes=[{}]",
+        "bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?} acl_rx={} att_pdus={} gatt_values={} host_submit={} ncp_complete={} host_retired={} mailbox={} usb_submit={} usb_complete={} event_usb_read={}/{}/cancelled:{} pending:{} acl_usb_read={}/{}/cancelled:{} pending:{} att_writes=[{}]",
         snapshot.bumble_pending,
         snapshot.audit_in_flight,
         snapshot.waiting_estimate(),
@@ -994,6 +1002,14 @@ fn format_acl_snapshot(snapshot: AclCreditSnapshot) -> String {
         snapshot.transport_mailbox_enqueued,
         snapshot.transport_usb_submitted,
         snapshot.transport_usb_completed,
+        snapshot.transport_event_read_arms,
+        snapshot.transport_event_read_completions,
+        snapshot.transport_event_read_cancelled,
+        snapshot.transport_event_read_pending_estimate(),
+        snapshot.transport_acl_read_arms,
+        snapshot.transport_acl_read_completions,
+        snapshot.transport_acl_read_cancelled,
+        snapshot.transport_acl_read_pending_estimate(),
         format_att_write_signatures(snapshot.recent_att_writes),
     )
 }
@@ -1820,6 +1836,12 @@ mod tests {
                 transport_mailbox_enqueued: 20,
                 transport_usb_submitted: 20,
                 transport_usb_completed: 20,
+                transport_event_read_arms: 1,
+                transport_event_read_completions: 0,
+                transport_event_read_cancelled: 0,
+                transport_acl_read_arms: 1,
+                transport_acl_read_completions: 0,
+                transport_acl_read_cancelled: 0,
                 recent_att_writes: [None; 4],
             },
         );
@@ -1903,6 +1925,12 @@ mod tests {
             transport_mailbox_enqueued: 20,
             transport_usb_submitted: 20,
             transport_usb_completed: 20,
+            transport_event_read_arms: 1,
+            transport_event_read_completions: 0,
+            transport_event_read_cancelled: 0,
+            transport_acl_read_arms: 1,
+            transport_acl_read_completions: 0,
+            transport_acl_read_cancelled: 0,
             recent_att_writes: [None; 4],
         };
         let after = AclCreditSnapshot {
@@ -1955,6 +1983,12 @@ mod tests {
             transport_mailbox_enqueued: 20,
             transport_usb_submitted: 20,
             transport_usb_completed: 20,
+            transport_event_read_arms: 1,
+            transport_event_read_completions: 0,
+            transport_event_read_cancelled: 0,
+            transport_acl_read_arms: 1,
+            transport_acl_read_completions: 0,
+            transport_acl_read_cancelled: 0,
             recent_att_writes: [None; 4],
         };
         let after = AclCreditSnapshot {

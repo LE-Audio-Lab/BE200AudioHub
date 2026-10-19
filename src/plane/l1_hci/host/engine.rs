@@ -785,6 +785,16 @@ impl HciEngine {
             transport_mailbox_enqueued: transport.mailbox_enqueued,
             transport_usb_submitted: transport.usb_submitted,
             transport_usb_completed: transport.usb_completed,
+            transport_event_read_arms: transport.event_read_arms,
+            transport_event_read_completions:
+                transport.event_read_completions,
+            transport_event_read_cancelled:
+                transport.event_read_cancelled,
+            transport_acl_read_arms: transport.acl_read_arms,
+            transport_acl_read_completions:
+                transport.acl_read_completions,
+            transport_acl_read_cancelled:
+                transport.acl_read_cancelled,
             recent_att_writes: self.link.recent_att_writes(),
         }
     }

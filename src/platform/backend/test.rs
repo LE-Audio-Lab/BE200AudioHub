@@ -56,6 +56,19 @@ impl TestBackend {
         Ok(())
     }
 
+    pub fn cancel_read(
+        &mut self,
+        endpoint: RxEndpoint,
+    ) -> Result<(), BackendError> {
+        let id = self
+            .pending_reads
+            .remove(&endpoint)
+            .ok_or(BackendError::NotPending(endpoint))?;
+        self.completions
+            .push(TransferCompletion::Cancelled { id });
+        Ok(())
+    }
+
     pub fn complete_next_write(&mut self) -> bool {
         let Some(write) = self.write_log.pop_front() else {
             return false;

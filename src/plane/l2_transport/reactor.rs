@@ -1,8 +1,12 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+};
 
 use crate::{
     platform::backend::{
-        BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TxEndpoint,
+        BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TransferId,
+        TxEndpoint,
     },
 };
 
@@ -56,6 +60,7 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     tx_packets: u64,
     faults: u64,
     tx_audit: Arc<TransportTxAudit>,
+    pending_read_ids: BTreeMap<TransferId, RxEndpoint>,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -75,6 +80,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             tx_packets: 0,
             faults: 0,
             tx_audit,
+            pending_read_ids: BTreeMap::new(),
         }
     }
 
@@ -150,17 +156,22 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
         match completion {
             TransferCompletion::Read {
+                id,
                 endpoint,
                 bytes,
-                ..
-            } => self.handle_read(endpoint, &bytes),
+            } => self.handle_read(id, endpoint, &bytes),
             TransferCompletion::Write { endpoint, .. } => {
                 if endpoint == TxEndpoint::Acl {
                     self.tx_audit.observe_usb_completed();
                 }
                 StepOutcome::WriteCompleted
             },
-            TransferCompletion::Cancelled { .. } => StepOutcome::Cancelled,
+            TransferCompletion::Cancelled { id } => {
+                if let Some(endpoint) = self.pending_read_ids.remove(&id) {
+                    self.tx_audit.observe_read_cancelled(endpoint);
+                }
+                StepOutcome::Cancelled
+            },
             TransferCompletion::DeviceGone => {
                 self.state = ReactorState::Detached;
                 StepOutcome::Detached
@@ -169,7 +180,16 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         }
     }
 
-    fn handle_read(&mut self, endpoint: RxEndpoint, bytes: &[u8]) -> StepOutcome {
+    fn handle_read(
+        &mut self,
+        id: TransferId,
+        endpoint: RxEndpoint,
+        bytes: &[u8],
+    ) -> StepOutcome {
+        let tracked = self.pending_read_ids.remove(&id);
+        debug_assert_eq!(tracked, Some(endpoint));
+        self.tx_audit.observe_read_completion(endpoint);
+
         let packets = {
             let reassembler = match endpoint {
                 RxEndpoint::Event => &mut self.event_rx,
@@ -202,10 +222,14 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
     }
 
     fn arm_rx(&mut self, endpoint: RxEndpoint) -> Result<(), TransportFault> {
-        self.backend
+        let id = self
+            .backend
             .arm_read(endpoint)
-            .map(|_| ())
-            .map_err(TransportFault::Backend)
+            .map_err(TransportFault::Backend)?;
+        let old = self.pending_read_ids.insert(id, endpoint);
+        debug_assert!(old.is_none(), "duplicate read TransferId");
+        self.tx_audit.observe_read_arm(endpoint);
+        Ok(())
     }
 
     fn fail(&mut self, fault: TransportFault) -> StepOutcome {
@@ -248,6 +272,22 @@ mod tests {
         reactor.start().unwrap();
         assert!(reactor.backend.pending_read(RxEndpoint::Event));
         assert!(reactor.backend.pending_read(RxEndpoint::Acl));
+    }
+
+    #[test]
+    fn cancelled_acl_read_is_visible_and_not_mistaken_for_pending() {
+        let (mut reactor, _rx) = reactor(8);
+        reactor.start().unwrap();
+
+        reactor.backend.cancel_read(RxEndpoint::Acl).unwrap();
+        assert_eq!(reactor.step(), StepOutcome::Cancelled);
+
+        let snapshot = reactor.tx_audit.snapshot();
+        assert_eq!(snapshot.acl_read_arms, 1);
+        assert_eq!(snapshot.acl_read_completions, 0);
+        assert_eq!(snapshot.acl_read_cancelled, 1);
+        assert!(reactor.backend.pending_read(RxEndpoint::Event));
+        assert!(!reactor.backend.pending_read(RxEndpoint::Acl));
     }
 
     #[test]

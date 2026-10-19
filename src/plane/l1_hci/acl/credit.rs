@@ -46,12 +46,32 @@ pub struct AclCreditSnapshot {
     pub transport_mailbox_enqueued: u64,
     pub transport_usb_submitted: u64,
     pub transport_usb_completed: u64,
+    pub transport_event_read_arms: u64,
+    pub transport_event_read_completions: u64,
+    pub transport_event_read_cancelled: u64,
+    pub transport_acl_read_arms: u64,
+    pub transport_acl_read_completions: u64,
+    pub transport_acl_read_cancelled: u64,
     pub recent_att_writes: [Option<AclAttWriteSignature>; 4],
 }
 
 impl AclCreditSnapshot {
     pub fn waiting_estimate(self) -> usize {
         self.bumble_pending.saturating_sub(self.audit_in_flight)
+    }
+
+    pub fn transport_acl_read_pending_estimate(self) -> u64 {
+        self.transport_acl_read_arms.saturating_sub(
+            self.transport_acl_read_completions
+                .saturating_add(self.transport_acl_read_cancelled),
+        )
+    }
+
+    pub fn transport_event_read_pending_estimate(self) -> u64 {
+        self.transport_event_read_arms.saturating_sub(
+            self.transport_event_read_completions
+                .saturating_add(self.transport_event_read_cancelled),
+        )
     }
 }
 
