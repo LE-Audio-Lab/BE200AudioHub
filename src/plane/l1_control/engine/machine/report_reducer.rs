@@ -303,12 +303,9 @@ impl ControlMachine {
                 let plan = self.planned.iso_plan
                     .as_ref()
                     .expect("ConfiguringCig requires ISO plan");
-                let expected_cis_ids = self.required_cis_ids();
-                if !cig_allocation_matches_plan(
-                    allocation,
-                    plan,
-                    &expected_cis_ids,
-                ) {
+                if !cig_allocation_matches_plan(allocation, plan) {
+                    let expected_cis_ids =
+                        vec![plan.left.cis_id, plan.right.cis_id];
                     let actual_cis_ids = allocation
                         .cis
                         .iter()
@@ -384,17 +381,17 @@ impl ControlMachine {
                     *cig_id,
                     established_cis_ids,
                 ) {
-                    let mut expected = self.required_cis_ids();
+                    let plan = self.planned.iso_plan
+                        .as_ref()
+                        .expect("CreatingCis requires ISO plan");
+                    let mut expected =
+                        vec![plan.left.cis_id, plan.right.cis_id];
                     expected.sort_unstable();
                     let mut actual = established_cis_ids.clone();
                     actual.sort_unstable();
-                    let expected_cig_id = self.planned.iso_plan
-                        .as_ref()
-                        .expect("CreatingCis requires ISO plan")
-                        .cig_id;
                     return self.fail(
                         ControlFailure::CisCreateMismatch {
-                            expected_cig_id,
+                            expected_cig_id: plan.cig_id,
                             actual_cig_id: *cig_id,
                             expected_cis_ids: expected,
                             actual_cis_ids: actual,
@@ -803,12 +800,6 @@ impl ControlMachine {
                 ControlPhase::AwaitingStreaming { side },
                 HciReport::Gatt(report),
             ) => self.on_streaming_gatt_report(side, report),
-            (
-                ControlPhase::RollingBack,
-                HciReport::Gatt(report),
-            ) if self.has_group_rollback_ase_operation() => {
-                self.on_group_rollback_ase_gatt_report(report)
-            }
             (
                 ControlPhase::RollingBack,
                 HciReport::Gatt(report),

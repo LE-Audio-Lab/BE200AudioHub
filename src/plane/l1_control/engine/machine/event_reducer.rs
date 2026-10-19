@@ -483,58 +483,15 @@ impl ControlMachine {
             ControlEvent::TimerExpired(
                 ControlTimer::CleanupAse { side },
             ) if self.phase == ControlPhase::RollingBack
-                && self.rollback.ase_group_operations[side_index(side)]
-                    .is_some() =>
-            {
-                let index = side_index(side);
-                let gate = self.rollback.ase_group_operations[index]
-                    .as_ref()
-                    .expect("group CleanupAse timeout requires active operation")
-                    .gate_snapshot();
-                let pending = gate.pending_request_id;
-                self.rollback.cleanup_failures.push(
-                    ControlCleanupFailure::AseReleaseGateTimeout {
-                        side,
-                        gate,
-                    },
-                );
-                self.rollback.ase_group_operations[index] = None;
-
-                let mut actions = vec![ControlAction::DisarmTimer(
-                    ControlTimer::CleanupAse { side },
-                )];
-                if let Some(request_id) = pending {
-                    let member_index =
-                        self.planned_sink(side)?.member_index;
-                    actions.push(ControlAction::CancelGatt {
-                        connection: self.planned_sink(side)?.connection,
-                        request_id,
-                    });
-                    actions.push(ControlAction::DisarmTimer(
-                        ControlTimer::Gatt {
-                            member_index,
-                            request_id,
-                        },
-                    ));
-                }
-                actions.extend(self.continue_rollback()?);
-                Ok(actions)
-            }
-            ControlEvent::TimerExpired(
-                ControlTimer::CleanupAse { side },
-            ) if self.phase == ControlPhase::RollingBack
                 && self.rollback.ase_current == Some(side) =>
             {
-                let gate = self.rollback.ase_operation
+                let pending = self.rollback.ase_operation
                     .as_ref()
-                    .expect("CleanupAse timeout requires active ASE operation")
-                    .gate_snapshot();
-                let pending = gate.pending_request_id;
+                    .and_then(|machine| machine.pending_request_id());
                 self.rollback.cleanup_failures.push(
-                    ControlCleanupFailure::AseReleaseGateTimeout {
-                        side,
-                        gate,
-                    },
+                    ControlCleanupFailure::Timeout(
+                        ControlTimer::CleanupAse { side },
+                    ),
                 );
                 self.rollback.ase_operation = None;
                 self.rollback.ase_current = None;
@@ -574,51 +531,6 @@ impl ControlMachine {
                 let mut actions = vec![ControlAction::DisarmTimer(
                     ControlTimer::CleanupCig { cig_id },
                 )];
-                actions.extend(self.continue_rollback()?);
-                Ok(actions)
-            }
-            ControlEvent::TimerExpired(
-                ControlTimer::Gatt {
-                    member_index,
-                    request_id,
-                },
-            ) if self.phase == ControlPhase::RollingBack
-                && self.group_rollback_side_for_request(
-                    member_index,
-                    request_id,
-                )
-                .is_some() =>
-            {
-                let side = self
-                    .group_rollback_side_for_request(
-                        member_index,
-                        request_id,
-                    )
-                    .expect("group rollback GATT timer requires side");
-                self.rollback.ase_group_operations[side_index(side)] = None;
-                self.rollback.cleanup_failures.push(
-                    ControlCleanupFailure::Timeout(
-                        ControlTimer::Gatt {
-                            member_index,
-                            request_id,
-                        },
-                    ),
-                );
-                let mut actions = vec![
-                    ControlAction::CancelGatt {
-                        connection: self.planned_sink(side)?.connection,
-                        request_id,
-                    },
-                    ControlAction::DisarmTimer(
-                        ControlTimer::Gatt {
-                            member_index,
-                            request_id,
-                        },
-                    ),
-                    ControlAction::DisarmTimer(
-                        ControlTimer::CleanupAse { side },
-                    ),
-                ];
                 actions.extend(self.continue_rollback()?);
                 Ok(actions)
             }

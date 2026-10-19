@@ -1,5 +1,4 @@
 use std::{
-    sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -16,7 +15,6 @@ use super::{
     packet::{ControllerPacket, HostPacket},
     reactor::{StepOutcome, TransportFault, TransportReactor},
     sink::ControllerPacketSink,
-    tx_audit::{AclTransportTxSnapshot, TransportTxAudit},
 };
 
 const TX_BUDGET_PER_TURN: usize = 32;
@@ -34,7 +32,6 @@ pub enum TransportWorkerExit {
 pub struct TransportTx {
     tx: BoundedSender<HostPacket>,
     cancel: CancellationToken,
-    audit: Arc<TransportTxAudit>,
 }
 
 impl TransportTx {
@@ -50,25 +47,13 @@ impl TransportTx {
             Self {
                 tx,
                 cancel: CancellationToken::new(),
-                audit: Arc::new(TransportTxAudit::default()),
             },
             rx,
         )
     }
 
     pub fn try_send(&self, packet: HostPacket) -> Result<(), SendError> {
-        let is_acl = matches!(&packet, HostPacket::Acl(_));
-        let result = self.tx.try_send(packet);
-        if result.is_ok() && is_acl {
-            self.audit.observe_mailbox_enqueued();
-        }
-        result
-    }
-
-    pub(crate) fn acl_tx_audit_snapshot(
-        &self,
-    ) -> AclTransportTxSnapshot {
-        self.audit.snapshot()
+        self.tx.try_send(packet)
     }
 
     pub fn cancel(&self) {
@@ -123,30 +108,9 @@ where
     F: FnOnce() -> Result<B, BackendError> + Send + 'static,
     S: ControllerPacketSink + Send + 'static,
 {
-    spawn_transport_worker_with_sink_and_acl_rx_depth(
-        factory,
-        tx_capacity,
-        hci_sink,
-        1,
-    )
-}
-
-pub fn spawn_transport_worker_with_sink_and_acl_rx_depth<B, F, S>(
-    factory: F,
-    tx_capacity: usize,
-    hci_sink: S,
-    acl_rx_read_depth: usize,
-) -> (TransportTx, TransportWorkerJoin)
-where
-    B: DeviceBackend + 'static,
-    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
-    S: ControllerPacketSink + Send + 'static,
-{
     let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
-    let audit = Arc::new(TransportTxAudit::default());
-    let worker_audit = audit.clone();
 
     let join = thread::Builder::new()
         .name("UsbReactor".into())
@@ -158,12 +122,7 @@ where
                 }
             };
 
-            let mut reactor = TransportReactor::new_with_acl_rx_depth(
-                backend,
-                hci_sink,
-                worker_audit,
-                acl_rx_read_depth,
-            );
+            let mut reactor = TransportReactor::new(backend, hci_sink);
             if let Err(fault) = reactor.start() {
                 return TransportWorkerExit::Faulted(fault);
             }
@@ -174,10 +133,7 @@ where
         })
         .expect("failed to spawn USB reactor");
 
-    (
-        TransportTx { tx, cancel, audit },
-        TransportWorkerJoin { join },
-    )
+    (TransportTx { tx, cancel }, TransportWorkerJoin { join })
 }
 
 fn run_loop<B, S>(
@@ -423,7 +379,6 @@ mod tests {
         let tx = TransportTx {
             tx: raw_tx,
             cancel: CancellationToken::new(),
-            audit: Arc::new(TransportTxAudit::default()),
         };
         tx.try_send(HostPacket::Acl(vec![1])).unwrap();
         assert_eq!(

@@ -31,45 +31,6 @@ impl ControlPlane {
         self.machine.condition_update()
     }
 
-    pub(crate) fn prepared_ase_for_review(
-        &self,
-        side: crate::plane::l1_control::interface::stream::AudioSide,
-    ) -> Option<crate::plane::l1_control::ascs::operation::PreparedAseControl> {
-        self.machine.prepared_ase(side).cloned()
-    }
-
-    pub(crate) fn phase_for_review(
-        &self,
-    ) -> crate::plane::l1_control::engine::machine::ControlPhase {
-        self.machine.phase()
-    }
-
-    pub(crate) fn set_review_stream_profile(
-        &mut self,
-        profile: crate::plane::l1_control::engine::machine::ReviewStreamProfile,
-    ) -> Result<(), ControlFailure> {
-        self.machine.set_review_stream_profile(profile)
-    }
-
-    pub(crate) fn begin_emergency_teardown_for_review(
-        &mut self,
-    ) -> Result<ControlStep, ControlFailure> {
-        let actions = self.machine.begin_emergency_teardown_for_review()?;
-        Ok(self.finish_step(actions))
-    }
-
-    /// Review/HIL-only legacy graceful entry point. Product StopControl now
-    /// deliberately skips ASCS Release and retires controller resources
-    /// directly.
-    pub(crate) fn begin_group_release_teardown_for_review(
-        &mut self,
-    ) -> Result<ControlStep, ControlFailure> {
-        let actions = self.machine.begin_teardown_with_release_mode(
-            crate::plane::l1_control::engine::machine::GracefulAseReleaseMode::Group,
-        )?;
-        Ok(self.finish_step(actions))
-    }
-
     pub fn handle_intent(
         &mut self,
         intent: ControlIntent,

@@ -18,11 +18,6 @@ impl ControlMachine {
                 self.plan_codec()?;
                 self.begin_codec_configuration()
             }
-            ControlPhase::CodecConfigured
-                if self.review_profile == ReviewStreamProfile::CodecOnly =>
-            {
-                Ok(Vec::new())
-            }
             ControlPhase::CodecConfigured => {
                 self.plan_iso()?;
                 self.begin_cig_configuration()
@@ -109,11 +104,7 @@ impl ControlMachine {
         self.confirmed.active_stream_binding = None;
         self.rollback.stream_route = None;
         self.rollback.stream_route_unbind_pending = false;
-        self.start_streaming_gate(if self.single_cis_right_profile() {
-            AudioSide::Right
-        } else {
-            AudioSide::Left
-        })
+        self.start_streaming_gate(AudioSide::Left)
     }
 
     pub fn begin_iso_path_setup(
@@ -126,11 +117,7 @@ impl ControlMachine {
         self.cleanup_knowledge.iso_paths_may_exist.clear();
         self.streaming_operation.gate = None;
         self.confirmed.streaming_statuses = [None, None];
-        self.start_iso_path_setup(if self.single_cis_right_profile() {
-            AudioSide::Right
-        } else {
-            AudioSide::Left
-        })
+        self.start_iso_path_setup(AudioSide::Left)
     }
 
     pub fn begin_cis_creation(
@@ -139,15 +126,10 @@ impl ControlMachine {
         if self.phase != ControlPhase::Enabled {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        let plan = self.planned.iso_plan
+        let request = self.planned.iso_plan
             .as_ref()
-            .expect("Enabled requires ISO plan");
-        let mut request = plan.cis_create_request();
-        if self.single_cis_right_profile() {
-            request.bindings.retain(|binding| {
-                binding.cis_id == plan.right.cis_id
-            });
-        }
+            .expect("Enabled requires ISO plan")
+            .cis_create_request();
         self.confirmed.live_cis.clear();
         self.confirmed.iso_paths_ready.clear();
         self.cleanup_knowledge.iso_paths_may_exist.clear();
@@ -190,11 +172,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::EnablePlanned {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.start_enable(if self.single_cis_right_profile() {
-            AudioSide::Right
-        } else {
-            AudioSide::Left
-        })
+        self.start_enable(AudioSide::Left)
     }
 
     pub fn plan_qos(
@@ -226,11 +204,7 @@ impl ControlMachine {
         if self.phase != ControlPhase::QosPlanned {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
-        self.start_config_qos(if self.single_cis_right_profile() {
-            AudioSide::Right
-        } else {
-            AudioSide::Left
-        })
+        self.start_config_qos(AudioSide::Left)
     }
 
     pub fn plan_iso(
@@ -242,12 +216,8 @@ impl ControlMachine {
         let codec = self.planned.codec_plan
             .as_ref()
             .expect("CodecConfigured requires codec plan");
-        let mut plan = plan_first_iso(codec)
+        let plan = plan_first_iso(codec)
             .map_err(ControlFailure::IsoPlan)?;
-        if self.review_profile == ReviewStreamProfile::DualCisLowQos {
-            plan.rtn = 3;
-            plan.max_transport_latency_ms = 22;
-        }
         self.planned.iso_plan = Some(plan);
         self.planned.qos_plan = None;
         self.confirmed.qos_statuses = [None, None];
@@ -266,13 +236,9 @@ impl ControlMachine {
         let plan = self.planned.iso_plan
             .as_ref()
             .expect("IsoPlanned requires ISO plan");
-        let mut config = plan.cig_config();
-        if self.single_cis_right_profile() {
-            config.cis.retain(|cis| cis.cis_id == plan.right.cis_id);
-        }
         self.phase = ControlPhase::ConfiguringCig;
         Ok(vec![
-            ControlAction::ConfigureCig(config),
+            ControlAction::ConfigureCig(plan.cig_config()),
             ControlAction::ArmTimer(ControlTimer::CigConfig),
         ])
     }
@@ -412,12 +378,13 @@ impl ControlMachine {
         let Some(plan) = self.planned.iso_plan.as_ref() else {
             return false;
         };
-        let mut expected = self.required_cis_ids();
-        if cig_id != plan.cig_id || cis_ids.len() != expected.len() {
+        if cig_id != plan.cig_id || cis_ids.len() != 2 {
             return false;
         }
         let mut actual = cis_ids.to_vec();
         actual.sort_unstable();
+        let mut expected =
+            vec![plan.left.cis_id, plan.right.cis_id];
         expected.sort_unstable();
         actual == expected
     }

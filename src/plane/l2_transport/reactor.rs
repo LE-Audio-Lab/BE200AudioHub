@@ -1,12 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
-
 use crate::{
     platform::backend::{
-        BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TransferId,
-        TxEndpoint,
+        BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TxEndpoint,
     },
 };
 
@@ -19,7 +13,6 @@ use super::{
         TransportConditionUpdate, TransportState,
     },
     sink::{ControllerPacketSink, PacketSinkError},
-    tx_audit::TransportTxAudit,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,27 +52,10 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     rx_packets: u64,
     tx_packets: u64,
     faults: u64,
-    tx_audit: Arc<TransportTxAudit>,
-    pending_read_ids: HashMap<TransferId, RxEndpoint>,
-    acl_rx_read_depth: usize,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
-    pub fn new(
-        backend: B,
-        hci_rx: S,
-        tx_audit: Arc<TransportTxAudit>,
-    ) -> Self {
-        Self::new_with_acl_rx_depth(backend, hci_rx, tx_audit, 1)
-    }
-
-    pub fn new_with_acl_rx_depth(
-        backend: B,
-        hci_rx: S,
-        tx_audit: Arc<TransportTxAudit>,
-        acl_rx_read_depth: usize,
-    ) -> Self {
-        assert!(acl_rx_read_depth > 0, "ACL RX read depth must be nonzero");
+    pub fn new(backend: B, hci_rx: S) -> Self {
         Self {
             backend,
             state: ReactorState::Stopped,
@@ -90,9 +66,6 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             rx_packets: 0,
             tx_packets: 0,
             faults: 0,
-            tx_audit,
-            pending_read_ids: HashMap::new(),
-            acl_rx_read_depth,
         }
     }
 
@@ -123,9 +96,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         }
 
         self.arm_rx(RxEndpoint::Event)?;
-        for _ in 0..self.acl_rx_read_depth {
-            self.arm_rx(RxEndpoint::Acl)?;
-        }
+        self.arm_rx(RxEndpoint::Acl)?;
         self.state = ReactorState::Running;
         Ok(())
     }
@@ -150,9 +121,6 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         match self.backend.submit_write(endpoint, bytes) {
             Ok(_) => {
                 self.tx_packets = self.tx_packets.saturating_add(1);
-                if endpoint == TxEndpoint::Acl {
-                    self.tx_audit.observe_usb_submitted();
-                }
                 Ok(())
             }
             Err(error) => Err(TransportFault::Backend(error)),
@@ -170,22 +138,12 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
         match completion {
             TransferCompletion::Read {
-                id,
                 endpoint,
                 bytes,
-            } => self.handle_read(id, endpoint, &bytes),
-            TransferCompletion::Write { endpoint, .. } => {
-                if endpoint == TxEndpoint::Acl {
-                    self.tx_audit.observe_usb_completed();
-                }
-                StepOutcome::WriteCompleted
-            },
-            TransferCompletion::Cancelled { id } => {
-                if let Some(endpoint) = self.pending_read_ids.remove(&id) {
-                    self.tx_audit.observe_read_cancelled(endpoint);
-                }
-                StepOutcome::Cancelled
-            },
+                ..
+            } => self.handle_read(endpoint, &bytes),
+            TransferCompletion::Write { .. } => StepOutcome::WriteCompleted,
+            TransferCompletion::Cancelled { .. } => StepOutcome::Cancelled,
             TransferCompletion::DeviceGone => {
                 self.state = ReactorState::Detached;
                 StepOutcome::Detached
@@ -194,16 +152,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         }
     }
 
-    fn handle_read(
-        &mut self,
-        id: TransferId,
-        endpoint: RxEndpoint,
-        bytes: &[u8],
-    ) -> StepOutcome {
-        let tracked = self.pending_read_ids.remove(&id);
-        debug_assert_eq!(tracked, Some(endpoint));
-        self.tx_audit.observe_read_completion(endpoint);
-
+    fn handle_read(&mut self, endpoint: RxEndpoint, bytes: &[u8]) -> StepOutcome {
         let packets = {
             let reassembler = match endpoint {
                 RxEndpoint::Event => &mut self.event_rx,
@@ -236,14 +185,10 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
     }
 
     fn arm_rx(&mut self, endpoint: RxEndpoint) -> Result<(), TransportFault> {
-        let id = self
-            .backend
+        self.backend
             .arm_read(endpoint)
-            .map_err(TransportFault::Backend)?;
-        let old = self.pending_read_ids.insert(id, endpoint);
-        debug_assert!(old.is_none(), "duplicate read TransferId");
-        self.tx_audit.observe_read_arm(endpoint);
-        Ok(())
+            .map(|_| ())
+            .map_err(TransportFault::Backend)
     }
 
     fn fail(&mut self, fault: TransportFault) -> StepOutcome {
@@ -270,14 +215,7 @@ mod tests {
         crate::runtime::mailbox::BoundedReceiver<ControllerPacket>,
     ) {
         let (tx, rx) = mailbox::bounded(hci_capacity);
-        (
-            TransportReactor::new(
-                TestBackend::default(),
-                tx,
-                Arc::new(TransportTxAudit::default()),
-            ),
-            rx,
-        )
+        (TransportReactor::new(TestBackend::default(), tx), rx)
     }
 
     #[test]
@@ -286,63 +224,6 @@ mod tests {
         reactor.start().unwrap();
         assert!(reactor.backend.pending_read(RxEndpoint::Event));
         assert!(reactor.backend.pending_read(RxEndpoint::Acl));
-    }
-
-    #[test]
-    fn acl_rx_depth_two_keeps_two_reads_outstanding() {
-        let (tx, _rx) = mailbox::bounded(8);
-        let audit = Arc::new(TransportTxAudit::default());
-        let mut reactor = TransportReactor::new_with_acl_rx_depth(
-            TestBackend::default(),
-            tx,
-            audit.clone(),
-            2,
-        );
-        reactor.start().unwrap();
-
-        assert_eq!(
-            reactor.backend.pending_read_count(RxEndpoint::Event),
-            1
-        );
-        assert_eq!(
-            reactor.backend.pending_read_count(RxEndpoint::Acl),
-            2
-        );
-        let snapshot = audit.snapshot();
-        assert_eq!(snapshot.acl_read_arms, 2);
-        assert_eq!(snapshot.acl_read_completions, 0);
-
-        reactor
-            .backend
-            .inject_read(
-                RxEndpoint::Acl,
-                vec![0x00, 0x08, 0x00, 0x00],
-            )
-            .unwrap();
-        assert_eq!(reactor.step(), StepOutcome::PacketsDelivered(1));
-        assert_eq!(
-            reactor.backend.pending_read_count(RxEndpoint::Acl),
-            2
-        );
-        let snapshot = audit.snapshot();
-        assert_eq!(snapshot.acl_read_arms, 3);
-        assert_eq!(snapshot.acl_read_completions, 1);
-    }
-
-    #[test]
-    fn cancelled_acl_read_is_visible_and_not_mistaken_for_pending() {
-        let (mut reactor, _rx) = reactor(8);
-        reactor.start().unwrap();
-
-        reactor.backend.cancel_read(RxEndpoint::Acl).unwrap();
-        assert_eq!(reactor.step(), StepOutcome::Cancelled);
-
-        let snapshot = reactor.tx_audit.snapshot();
-        assert_eq!(snapshot.acl_read_arms, 1);
-        assert_eq!(snapshot.acl_read_completions, 0);
-        assert_eq!(snapshot.acl_read_cancelled, 1);
-        assert!(reactor.backend.pending_read(RxEndpoint::Event));
-        assert!(!reactor.backend.pending_read(RxEndpoint::Acl));
     }
 
     #[test]

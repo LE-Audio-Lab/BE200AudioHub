@@ -408,27 +408,11 @@ pub enum AseOperationFailure {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AseOperationCompletion {
-    VerifiedReadback,
-    NotificationGate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AseOperationGateSnapshot {
-    pub phase: AseOperationPhase,
-    pub pending_request_id: Option<GattRequestId>,
-    pub write_complete: bool,
-    pub cp_success: bool,
-    pub notified_state: Option<AseState>,
-}
-
 pub struct AseOperationMachine {
     prepared: PreparedAseControl,
     operation: AseOperation,
     expected_notification_state: AseState,
     expected_readback_state: AseState,
-    completion: AseOperationCompletion,
     phase: AseOperationPhase,
     pending_request_id: Option<GattRequestId>,
     next_request_id: GattRequestId,
@@ -465,28 +449,6 @@ impl AseOperationMachine {
             operation,
             expected_notification_state,
             expected_readback_state,
-            completion: AseOperationCompletion::VerifiedReadback,
-            phase: AseOperationPhase::Idle,
-            pending_request_id: None,
-            next_request_id: first_request_id,
-            write_complete: false,
-            cp_success: false,
-            notified_status: None,
-        }
-    }
-
-    pub fn new_notification_gate(
-        prepared: PreparedAseControl,
-        operation: AseOperation,
-        expected_notification_state: AseState,
-        first_request_id: GattRequestId,
-    ) -> Self {
-        Self {
-            prepared,
-            operation,
-            expected_notification_state,
-            expected_readback_state: expected_notification_state,
-            completion: AseOperationCompletion::NotificationGate,
             phase: AseOperationPhase::Idle,
             pending_request_id: None,
             next_request_id: first_request_id,
@@ -502,19 +464,6 @@ impl AseOperationMachine {
 
     pub fn pending_request_id(&self) -> Option<GattRequestId> {
         self.pending_request_id
-    }
-
-    pub fn gate_snapshot(&self) -> AseOperationGateSnapshot {
-        AseOperationGateSnapshot {
-            phase: self.phase,
-            pending_request_id: self.pending_request_id,
-            write_complete: self.write_complete,
-            cp_success: self.cp_success,
-            notified_state: self
-                .notified_status
-                .as_ref()
-                .map(|status| status.state),
-        }
     }
 
     pub fn next_request_id(&self) -> GattRequestId {
@@ -611,7 +560,7 @@ impl AseOperationMachine {
                     return self.unexpected(result);
                 }
                 self.write_complete = true;
-                self.maybe_complete_or_begin_readback()
+                self.maybe_begin_readback()
             }
 
             AseOperationPhase::ReadingBack => {
@@ -725,7 +674,7 @@ impl AseOperationMachine {
             }
 
             self.cp_success = true;
-            return self.maybe_complete_or_begin_readback();
+            return self.maybe_begin_readback();
         }
 
         if attribute_handle == self.prepared.sink.ase_value_handle {
@@ -742,7 +691,7 @@ impl AseOperationMachine {
             self.verify_status_identity(&status)?;
             if status.state == self.expected_notification_state {
                 self.notified_status = Some(status);
-                return self.maybe_complete_or_begin_readback();
+                return self.maybe_begin_readback();
             }
             return Ok(AseOperationAction::Await);
         }
@@ -765,33 +714,25 @@ impl AseOperationMachine {
         Ok(())
     }
 
-    fn maybe_complete_or_begin_readback(
+    fn maybe_begin_readback(
         &mut self,
     ) -> Result<AseOperationAction, AseOperationFailure> {
-        if self.phase != AseOperationPhase::WaitingGates
-            || self.pending_request_id.is_some()
-            || !self.write_complete
-            || !self.cp_success
+        if self.phase == AseOperationPhase::WaitingGates
+            && self.pending_request_id.is_none()
+            && self.write_complete
+            && self.cp_success
+            && self.notified_status.is_some()
         {
-            return Ok(AseOperationAction::Await);
+            return self.issue(
+                AseOperationPhase::ReadingBack,
+                GattOperation::ReadValue {
+                    attribute_handle:
+                        self.prepared.sink.ase_value_handle,
+                },
+            );
         }
 
-        let Some(notified_status) = self.notified_status.clone() else {
-            return Ok(AseOperationAction::Await);
-        };
-
-        if self.completion == AseOperationCompletion::NotificationGate {
-            self.phase = AseOperationPhase::Complete;
-            return Ok(AseOperationAction::Complete(notified_status));
-        }
-
-        self.issue(
-            AseOperationPhase::ReadingBack,
-            GattOperation::ReadValue {
-                attribute_handle:
-                    self.prepared.sink.ase_value_handle,
-            },
-        )
+        Ok(AseOperationAction::Await)
     }
 
     fn issue(
@@ -1252,79 +1193,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn release_notification_gate_completes_at_releasing_without_readback() {
-        use bumble_profiles::ascs::{
-            AseControlResponse, AseOpcode, AseReasonCode,
-            AseResponse, AseResponseCode,
-        };
-
-        let prepared = prepared();
-        let mut machine = AseOperationMachine::new_notification_gate(
-            prepared.clone(),
-            AseOperation::Release(vec![prepared.sink.ase_id]),
-            AseState::RELEASING,
-            210,
-        );
-
-        let write = operation_request(machine.start().unwrap());
-        let _ = machine
-            .on_gatt_report(&GattReport::Complete {
-                request_id: write.request_id,
-                connection: write.connection,
-                result: GattResult::WriteComplete {
-                    attribute_handle: 0x0043,
-                    with_response: false,
-                },
-            })
-            .unwrap();
-
-        let cp = AseControlResponse {
-            opcode: AseOpcode::Release,
-            responses: vec![AseResponse {
-                ase_id: 1,
-                code: AseResponseCode::SUCCESS,
-                reason: AseReasonCode::NONE,
-            }],
-        }
-        .to_bytes()
-        .unwrap();
-        assert_eq!(
-            machine
-                .on_gatt_report(&GattReport::Value(
-                    GattValueEvent::Notification {
-                        connection: prepared.sink.connection,
-                        attribute_handle: 0x0043,
-                        value: cp,
-                    },
-                ))
-                .unwrap(),
-            AseOperationAction::Await
-        );
-
-        let action = machine
-            .on_gatt_report(&GattReport::Value(
-                GattValueEvent::Notification {
-                    connection: prepared.sink.connection,
-                    attribute_handle: 0x0046,
-                    value: vec![1, AseState::RELEASING.0],
-                },
-            ))
-            .unwrap();
-
-        assert!(matches!(
-            action,
-            AseOperationAction::Complete(AseStatus {
-                ase_id: 1,
-                state: AseState::RELEASING,
-                ..
-            })
-        ));
-        assert_eq!(machine.phase(), AseOperationPhase::Complete);
-        assert_eq!(machine.pending_request_id(), None);
-        assert_eq!(machine.next_request_id(), 211);
     }
 
     #[test]

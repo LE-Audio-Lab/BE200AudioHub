@@ -12,7 +12,6 @@ use bumble_host::HostTransport;
 
 use crate::{
     runtime::mailbox::SendError,
-    plane::l1_hci::acl::credit::AclAttWriteSignature,
     plane::l2_transport::{
         packet::{ControllerPacket, HostPacket},
         worker::TransportTx,
@@ -46,11 +45,6 @@ pub enum HciObservation {
     CompletedPackets {
         completions: Vec<(u16, u16)>,
     },
-    LeRemoteFeaturesComplete {
-        status: u8,
-        connection_handle: u16,
-        features: [u8; 8],
-    },
 }
 
 pub struct QueueHostTransport {
@@ -59,10 +53,6 @@ pub struct QueueHostTransport {
     observations: VecDeque<HciObservation>,
     suppress_command_complete_once: BTreeSet<u16>,
     fault: Option<LinkFault>,
-    acl_rx_packets: u64,
-    recent_att_writes: [Option<AclAttWriteSignature>; 4],
-    recent_att_write_cursor: usize,
-    recent_att_write_count: usize,
 }
 
 impl QueueHostTransport {
@@ -73,10 +63,6 @@ impl QueueHostTransport {
             observations: VecDeque::new(),
             suppress_command_complete_once: BTreeSet::new(),
             fault: None,
-            acl_rx_packets: 0,
-            recent_att_writes: [None; 4],
-            recent_att_write_cursor: 0,
-            recent_att_write_count: 0,
         }
     }
 
@@ -106,10 +92,6 @@ impl QueueHostTransport {
         let parsed = HciPacket::from_bytes(&h4)
             .map_err(|_| LinkFault::InvalidControllerPacket)?;
 
-        if packet_type == HCI_ACL_DATA_PACKET {
-            self.acl_rx_packets = self.acl_rx_packets.saturating_add(1);
-        }
-
         let suppress = matches!(
             self.observations.back(),
             Some(HciObservation::CommandComplete { opcode, .. })
@@ -124,68 +106,6 @@ impl QueueHostTransport {
 
     pub fn take_fault(&mut self) -> Option<LinkFault> {
         self.fault.take()
-    }
-
-    pub fn acl_rx_packets(&self) -> u64 {
-        self.acl_rx_packets
-    }
-
-    pub fn acl_tx_transport_snapshot(
-        &self,
-    ) -> crate::plane::l2_transport::tx_audit::AclTransportTxSnapshot {
-        self.tx.acl_tx_audit_snapshot()
-    }
-
-    pub fn recent_att_writes(
-        &self,
-    ) -> [Option<AclAttWriteSignature>; 4] {
-        let mut ordered = [None; 4];
-        let count = self.recent_att_write_count.min(4);
-        let start = if self.recent_att_write_count < 4 {
-            0
-        } else {
-            self.recent_att_write_cursor
-        };
-        for (offset, slot) in ordered.iter_mut().take(count).enumerate() {
-            *slot = self.recent_att_writes[(start + offset) % 4];
-        }
-        ordered
-    }
-
-    fn observe_att_write_command(&mut self, packet: &AclDataPacket) {
-        const ATT_CID: u16 = 0x0004;
-        const ATT_WRITE_COMMAND: u8 = 0x52;
-
-        let data = &packet.data;
-        if data.len() < 7 {
-            return;
-        }
-        let cid = u16::from_le_bytes([data[2], data[3]]);
-        if cid != ATT_CID || data[4] != ATT_WRITE_COMMAND {
-            return;
-        }
-
-        let attribute_handle =
-            u16::from_le_bytes([data[5], data[6]]);
-        let value = &data[7..];
-        let mut value_prefix = [0u8; 8];
-        let prefix_len = value.len().min(value_prefix.len());
-        value_prefix[..prefix_len]
-            .copy_from_slice(&value[..prefix_len]);
-
-        let signature = AclAttWriteSignature {
-            connection_handle: packet.connection_handle,
-            attribute_handle,
-            value_len: u16::try_from(value.len()).unwrap_or(u16::MAX),
-            value_prefix_len: u8::try_from(prefix_len).unwrap_or(8),
-            value_prefix,
-        };
-        self.recent_att_writes[self.recent_att_write_cursor] =
-            Some(signature);
-        self.recent_att_write_cursor =
-            (self.recent_att_write_cursor + 1) % 4;
-        self.recent_att_write_count =
-            self.recent_att_write_count.saturating_add(1);
     }
 
     pub fn take_observations(&mut self) -> Vec<HciObservation> {
@@ -302,20 +222,6 @@ fn observe_native_event(bytes: &[u8]) -> Option<HciObservation> {
             status: bytes[2],
         }),
 
-        // LE Meta / LE Read Remote Features Complete:
-        // event=0x3e, len=12, subevent=0x04, status, handle_le[2], features[8]
-        0x3e if bytes.len() == 14 && bytes[2] == 0x04 => {
-            let mut features = [0u8; 8];
-            features.copy_from_slice(&bytes[6..14]);
-            Some(HciObservation::LeRemoteFeaturesComplete {
-                status: bytes[3],
-                connection_handle: u16::from_le_bytes([
-                    bytes[4], bytes[5],
-                ]),
-                features,
-            })
-        }
-
         _ => None,
     }
 }
@@ -331,7 +237,6 @@ impl HostTransport for QueueHostTransport {
         packet: AclDataPacket,
     ) -> bool {
         let connection_handle = packet.connection_handle;
-        self.observe_att_write_command(&packet);
         let sent =
             self.send_native(HCI_ACL_DATA_PACKET, packet.to_bytes());
         if sent {
@@ -530,82 +435,6 @@ mod tests {
                 opcode: 0x200d,
                 status: 0x0c,
             }]
-        );
-    }
-
-    #[test]
-    fn le_remote_features_complete_is_journaled_without_stealing_event() {
-        let (tx, _rx) = tx(4);
-        let mut link = QueueHostTransport::new(tx);
-
-        link.ingest(ControllerPacket::Event(vec![
-            0x3e, 0x0c, 0x04, 0x00, 0x00, 0x08,
-            1, 2, 3, 4, 5, 6, 7, 8,
-        ]))
-        .unwrap();
-
-        assert_eq!(
-            link.take_observations(),
-            vec![HciObservation::LeRemoteFeaturesComplete {
-                status: 0,
-                connection_handle: 0x0800,
-                features: [1, 2, 3, 4, 5, 6, 7, 8],
-            }]
-        );
-        assert_eq!(link.drain_host_events(0).len(), 1);
-    }
-
-    #[test]
-    fn valid_controller_acl_ingest_counts_rx_after_parse() {
-        let (tx, _rx) = tx(4);
-        let mut link = QueueHostTransport::new(tx);
-
-        let packet = AclDataPacket {
-            connection_handle: 0x0800,
-            pb_flag: 0b10,
-            bc_flag: 0,
-            data_total_length: 4,
-            data: vec![0, 0, 4, 0],
-        }
-        .to_bytes();
-
-        link.ingest(ControllerPacket::Acl(packet[1..].to_vec()))
-            .unwrap();
-
-        assert_eq!(link.acl_rx_packets(), 1);
-        assert_eq!(link.drain_host_events(0).len(), 1);
-    }
-
-    #[test]
-    fn att_write_command_signature_keeps_handle_and_value_prefix() {
-        let (tx, _rx) = tx(4);
-        let mut link = QueueHostTransport::new(tx);
-
-        let packet = AclDataPacket {
-            connection_handle: 0x0801,
-            pb_flag: 0b10,
-            bc_flag: 0,
-            data_total_length: 12,
-            data: vec![
-                0x08, 0x00, // L2CAP payload length
-                0x04, 0x00, // ATT fixed CID
-                0x52,       // ATT Write Command
-                0x43, 0x00, // ASCS Control Point handle
-                0x08, 0x01, 0x02, 0xaa, 0xbb,
-            ],
-        };
-
-        assert!(link.send_acl_packet(0, packet));
-
-        let writes = link.recent_att_writes();
-        let signature = writes[0].unwrap();
-        assert_eq!(signature.connection_handle, 0x0801);
-        assert_eq!(signature.attribute_handle, 0x0043);
-        assert_eq!(signature.value_len, 5);
-        assert_eq!(signature.value_prefix_len, 5);
-        assert_eq!(
-            &signature.value_prefix[..5],
-            &[0x08, 0x01, 0x02, 0xaa, 0xbb],
         );
     }
 

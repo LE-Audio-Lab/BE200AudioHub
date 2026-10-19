@@ -3,202 +3,15 @@
 //! State is owned by operation::RollbackOperation.
 //!
 //! Failure rollback keeps the established fail-closed
-//! route -> path -> CIS -> ASE Release -> CIG -> ACL/privacy ordering.
+//! route -> path -> CIS -> best-effort ASE Release -> CIG -> ACL/privacy ordering.
 //!
-//! Product Stop is intentionally protocol-ungraceful but controller-clean:
-//! route -> path -> CIS -> CIG -> ACL/privacy. It does not depend on the
-//! ASCS/GATT bearer remaining responsive. Serial/Group ASE Release modes remain
-//! available only to Review/HIL so the historical graceful path can still be
-//! diagnosed without blocking the product lifecycle.
+//! Product Stop is controller-clean and protocol-ungraceful by default:
+//! route -> ISO path -> CIS -> CIG -> ACL -> privacy.
+//! Product teardown never depends on peer-facing ASCS Release completion.
 
 use super::*;
 
 impl ControlMachine {
-    fn gatt_report_connection(report: &GattReport) -> ConnectionToken {
-        match report {
-            GattReport::Complete { connection, .. }
-            | GattReport::BearerPoisoned { connection, .. }
-            | GattReport::LateResponseDropped { connection, .. }
-            | GattReport::UnexpectedPdu { connection, .. } => *connection,
-            GattReport::Failed(failure) => failure.connection,
-            GattReport::Value(
-                GattValueEvent::Notification { connection, .. }
-                | GattValueEvent::Indication { connection, .. },
-            ) => *connection,
-        }
-    }
-
-    pub(super) fn has_group_rollback_ase_operation(&self) -> bool {
-        self.rollback
-            .ase_group_operations
-            .iter()
-            .any(Option::is_some)
-    }
-
-    pub(super) fn group_rollback_side_for_request(
-        &self,
-        member_index: usize,
-        request_id: GattRequestId,
-    ) -> Option<AudioSide> {
-        [AudioSide::Left, AudioSide::Right]
-            .into_iter()
-            .find(|side| {
-                self.rollback.ase_group_operations[side_index(*side)]
-                    .as_ref()
-                    .and_then(AseOperationMachine::pending_request_id)
-                    == Some(request_id)
-                    && self
-                        .planned_sink(*side)
-                        .ok()
-                        .map(|sink| sink.member_index)
-                        == Some(member_index)
-            })
-    }
-
-    fn start_graceful_group_ase_releases(
-        &mut self,
-    ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let sides = std::mem::take(&mut self.rollback.ase_queue);
-        let mut actions = Vec::new();
-
-        for side in sides {
-            let prepared = self.confirmed.prepared_ases[side_index(side)]
-                .as_ref()
-                .expect("group Release requires prepared control")
-                .clone();
-            let ase_id = prepared.sink.ase_id;
-            let mut machine = AseOperationMachine::new_notification_gate(
-                prepared,
-                AseOperation::Release(vec![ase_id]),
-                AseState::RELEASING,
-                self.next_gatt_request_id,
-            );
-            let action = match machine.start() {
-                Ok(action) => action,
-                Err(failure) => {
-                    self.rollback.cleanup_failures.push(
-                        ControlCleanupFailure::AseRelease {
-                            side,
-                            failure,
-                        },
-                    );
-                    continue;
-                }
-            };
-
-            self.next_gatt_request_id = machine.next_request_id();
-            self.rollback.ase_group_operations[side_index(side)] =
-                Some(machine);
-            actions.push(ControlAction::ArmTimer(
-                ControlTimer::CleanupAse { side },
-            ));
-            actions.extend(
-                self.translate_rollback_ase_action(
-                    side,
-                    None,
-                    action,
-                )?,
-            );
-        }
-
-        if self.has_group_rollback_ase_operation() {
-            Ok(actions)
-        } else {
-            actions.extend(self.continue_rollback()?);
-            Ok(actions)
-        }
-    }
-
-    pub(super) fn on_group_rollback_ase_gatt_report(
-        &mut self,
-        report: &GattReport,
-    ) -> Result<Vec<ControlAction>, ControlFailure> {
-        let connection = Self::gatt_report_connection(report);
-        let mut side = None;
-        for candidate in [AudioSide::Left, AudioSide::Right] {
-            if self.rollback.ase_group_operations[side_index(candidate)]
-                .is_some()
-                && self.planned_sink(candidate)?.connection == connection
-            {
-                side = Some(candidate);
-                break;
-            }
-        }
-        let Some(side) = side else {
-            return Ok(Vec::new());
-        };
-
-        let index = side_index(side);
-        let mut machine = self.rollback.ase_group_operations[index]
-            .take()
-            .expect("group rollback report requires active operation");
-        let pending_before = machine.pending_request_id();
-        let outcome = machine.on_gatt_report(report);
-        let pending_after = machine.pending_request_id();
-        self.next_gatt_request_id = machine.next_request_id();
-        let completed_request = if pending_before.is_some()
-            && pending_before != pending_after
-        {
-            pending_before
-        } else {
-            None
-        };
-
-        match outcome {
-            Ok(AseOperationAction::Ignored) => {
-                self.rollback.ase_group_operations[index] =
-                    Some(machine);
-                Ok(Vec::new())
-            }
-            Ok(AseOperationAction::Await) => {
-                self.rollback.ase_group_operations[index] =
-                    Some(machine);
-                self.disarm_gatt_request(side, completed_request)
-            }
-            Ok(action @ AseOperationAction::BeginGatt(_)) => {
-                self.rollback.ase_group_operations[index] =
-                    Some(machine);
-                self.translate_rollback_ase_action(
-                    side,
-                    completed_request,
-                    action,
-                )
-            }
-            Ok(action @ AseOperationAction::Complete(_)) => {
-                self.translate_rollback_ase_action(
-                    side,
-                    completed_request,
-                    action,
-                )
-            }
-            Err(failure) => {
-                self.rollback.cleanup_failures.push(
-                    ControlCleanupFailure::AseRelease {
-                        side,
-                        failure,
-                    },
-                );
-                let mut actions =
-                    self.disarm_gatt_request(side, completed_request)?;
-                if let Some(request_id) = pending_after {
-                    actions.push(ControlAction::CancelGatt {
-                        connection: self.planned_sink(side)?.connection,
-                        request_id,
-                    });
-                    actions.extend(self.disarm_gatt_request(
-                        side,
-                        Some(request_id),
-                    )?);
-                }
-                actions.push(ControlAction::DisarmTimer(
-                    ControlTimer::CleanupAse { side },
-                ));
-                actions.extend(self.continue_rollback()?);
-                Ok(actions)
-            }
-        }
-    }
-
     pub(super) fn start_rollback_ase_release(
         &mut self,
         side: AudioSide,
@@ -208,26 +21,13 @@ impl ControlMachine {
             .expect("rollback ASE release requires prepared control")
             .clone();
         let ase_id = prepared.sink.ase_id;
-        let operation = AseOperation::Release(vec![ase_id]);
-        let mut machine = if self.failure.is_none() {
-            // Graceful Stop must pivot on RELEASING while the ISO path/CIS
-            // are still live. Waiting for terminal IDLE here deadlocks peers
-            // that only finish Release after transport teardown.
-            AseOperationMachine::new_notification_gate(
-                prepared,
-                operation,
-                AseState::RELEASING,
-                self.next_gatt_request_id,
-            )
-        } else {
-            AseOperationMachine::new_with_states(
-                prepared,
-                operation,
-                AseState::RELEASING,
-                AseState::IDLE,
-                self.next_gatt_request_id,
-            )
-        };
+        let mut machine = AseOperationMachine::new_with_states(
+            prepared,
+            AseOperation::Release(vec![ase_id]),
+            AseState::RELEASING,
+            AseState::IDLE,
+            self.next_gatt_request_id,
+        );
         let action = match machine.start() {
             Ok(action) => action,
             Err(failure) => {
@@ -354,26 +154,14 @@ impl ControlMachine {
             AseOperationAction::Await
             | AseOperationAction::Ignored => Ok(actions),
             AseOperationAction::Complete(status) => {
-                let valid = if self.failure.is_none() {
-                    status.state == AseState::RELEASING
-                } else {
-                    matches!(
-                        status.state,
-                        AseState::IDLE | AseState::CODEC_CONFIGURED
-                    )
-                };
-                if !valid {
+                if status.state != AseState::IDLE {
                     self.rollback.cleanup_failures.push(
                         ControlCleanupFailure::AseRelease {
                             side,
                             failure:
                                 AseOperationFailure::ReadbackStateMismatch {
                                     ase_id: status.ase_id,
-                                    expected_state: if self.failure.is_none() {
-                                        AseState::RELEASING.0
-                                    } else {
-                                        AseState::IDLE.0
-                                    },
+                                    expected_state: AseState::IDLE.0,
                                     actual_state: status.state.0,
                                 },
                         },
@@ -399,63 +187,13 @@ impl ControlMachine {
         self.confirmed.active_stream_binding = None;
     }
 
-    /// Begin the product teardown from a route-bound stream.
+    /// Begin product teardown from a route-bound stream.
     ///
-    /// Product Stop deliberately skips ASCS Release. The peer-facing GATT
-    /// control bearer has proven capable of becoming permanently unresponsive
-    /// while HCI/LL state remains live; shutdown therefore depends only on
-    /// controller-owned resources that the Host can retire deterministically.
-    ///
-    /// Ordering remains semantic and controller-clean:
-    /// route -> ISO path -> CIS -> CIG -> ACL -> privacy.
+    /// Stop deliberately skips ASCS Release and retires only controller-owned
+    /// resources. Successful cleanup returns Control to Idle, while cleanup
+    /// failures become TeardownFailed.
     pub fn begin_teardown(
         &mut self,
-    ) -> Result<Vec<ControlAction>, ControlFailure> {
-        self.begin_teardown_with_release_mode(
-            GracefulAseReleaseMode::Skip,
-        )
-    }
-
-    pub(crate) fn begin_emergency_teardown_for_review(
-        &mut self,
-    ) -> Result<Vec<ControlAction>, ControlFailure> {
-        if !matches!(
-            self.phase,
-            ControlPhase::CodecConfigured
-                | ControlPhase::StreamingReady
-                | ControlPhase::StreamBoundReady
-        ) {
-            return Err(ControlFailure::InvalidStartState(self.phase));
-        }
-
-        self.failure = None;
-        self.prepare_stream_route_rollback();
-        self.rollback.acl_queue = self.confirmed.connections
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
-        self.rollback.acl_current = None;
-        self.rollback.iso_path_queue =
-            self.cleanup_knowledge.iso_paths_may_exist.iter().copied().collect();
-        self.rollback.iso_path_current = None;
-        self.rollback.cis_queue =
-            self.confirmed.live_cis.iter().copied().collect();
-        self.rollback.cis_current = None;
-        self.rollback.ase_queue.clear();
-        self.rollback.ase_current = None;
-        self.rollback.ase_operation = None;
-        self.rollback.ase_group_operations = [None, None];
-        self.rollback.graceful_ase_release_mode =
-            GracefulAseReleaseMode::Skip;
-        self.rollback.cleanup_failures.clear();
-        self.phase = ControlPhase::RollingBack;
-        self.continue_rollback()
-    }
-
-    pub(crate) fn begin_teardown_with_release_mode(
-        &mut self,
-        release_mode: GracefulAseReleaseMode,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         if self.phase != ControlPhase::StreamBoundReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
@@ -478,16 +216,11 @@ impl ControlMachine {
             self.confirmed.live_cis.iter().copied().collect();
         self.rollback.cis_current = None;
 
+        // Product Stop intentionally leaves the ASE release queue empty.
+        // Failure rollback still owns best-effort peer cleanup separately.
         self.rollback.ase_queue.clear();
-        for side in [AudioSide::Left, AudioSide::Right] {
-            if self.confirmed.prepared_ases[side_index(side)].is_some() {
-                self.rollback.ase_queue.push(side);
-            }
-        }
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
-        self.rollback.ase_group_operations = [None, None];
-        self.rollback.graceful_ase_release_mode = release_mode;
         self.rollback.cleanup_failures.clear();
 
         self.phase = ControlPhase::RollingBack;
@@ -513,9 +246,6 @@ impl ControlMachine {
         self.rollback.ase_queue.clear();
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
-        self.rollback.ase_group_operations = [None, None];
-        self.rollback.graceful_ase_release_mode =
-            GracefulAseReleaseMode::Serial;
         self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
         self.continue_rollback()
@@ -550,9 +280,6 @@ impl ControlMachine {
         }
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
-        self.rollback.ase_group_operations = [None, None];
-        self.rollback.graceful_ase_release_mode =
-            GracefulAseReleaseMode::Serial;
 
         self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
@@ -587,32 +314,8 @@ impl ControlMachine {
 
         let normal_teardown = self.failure.is_none();
 
-        // Review-only graceful modes may release Streaming ASEs before
-        // disturbing the ISO path/CIS. Product Stop selects Skip, while
-        // failure rollback keeps its separate fail-closed ordering.
-        if normal_teardown {
-            match self.rollback.graceful_ase_release_mode {
-                GracefulAseReleaseMode::Serial => {
-                    if self.rollback.ase_current.is_none() {
-                        if let Some(side) = self.rollback.ase_queue.pop() {
-                            return self.start_rollback_ase_release(side);
-                        }
-                    }
-                    if self.rollback.ase_current.is_some() {
-                        return Ok(Vec::new());
-                    }
-                }
-                GracefulAseReleaseMode::Group => {
-                    if !self.rollback.ase_queue.is_empty() {
-                        return self.start_graceful_group_ase_releases();
-                    }
-                    if self.has_group_rollback_ase_operation() {
-                        return Ok(Vec::new());
-                    }
-                }
-                GracefulAseReleaseMode::Skip => {}
-            }
-        }
+        // Product Stop does not issue ASCS Release. Failure rollback may
+        // still perform best-effort peer cleanup after path/CIS retirement.
 
         if self.rollback.iso_path_current.is_none() {
             if let Some(cis) = self.rollback.iso_path_queue.pop() {

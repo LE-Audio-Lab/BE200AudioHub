@@ -4,8 +4,6 @@ use bumble_hci::{
     codes::{
         HCI_DISCONNECT_COMMAND,
         HCI_READ_BD_ADDR_COMMAND,
-        HCI_READ_RSSI_COMMAND,
-        HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND,
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
         HCI_LE_ENABLE_ENCRYPTION_COMMAND,
@@ -28,7 +26,6 @@ use crate::{
                     CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
                     CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
                     CisCreateRequest, CisCreateState, CisCreateTransaction, CisRef,
-                    CisRuntimeRecord, CisRuntimeSnapshot,
                 },
                 credit::{IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot},
                 feature::{
@@ -58,7 +55,6 @@ use crate::{
             },
             acl::{
                 connection::{
-                    AclRuntimeDataLength, AclRuntimeRecord, AclRuntimeSnapshot,
                     ConnectionEvent, ConnectionToken, DisconnectAction,
                     DisconnectConfigError, DisconnectEvent, DisconnectState,
                     DisconnectTransaction, FalConnectAction,
@@ -66,7 +62,7 @@ use crate::{
                     FalConnectTransaction, FalConnectionState,
                     LeConnectionSetSnapshot, LeConnectionSnapshot,
                 },
-                credit::{AclCreditAudit, AclCreditFault, AclCreditSnapshot},
+                credit::{AclCreditAudit, AclCreditFault},
                 privacy::{
                     ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
                     PrivacyClearTransaction, PrivacyConfigError,
@@ -146,7 +142,6 @@ pub enum EngineFault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalAttachState {
     Idle,
-    SanitizingRxFlowControl,
     Discovering,
     Ready,
     Failed(OperationalAttachFailure),
@@ -154,8 +149,6 @@ pub enum OperationalAttachState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalAttachFailure {
-    ControllerToHostFlowControlStatus(u8),
-    ControllerToHostFlowControlMalformed,
     SupportedCommandsStatus(u8),
     HostInitializationFailed,
 }
@@ -204,47 +197,10 @@ pub enum ControllerIdentityFailure {
     MalformedResponse,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AclRssiProbeResult {
-    Alive {
-        connection: ConnectionToken,
-        rssi: i8,
-    },
-    Rejected {
-        connection: ConnectionToken,
-        status: u8,
-    },
-    Malformed {
-        connection: ConnectionToken,
-        parameters_after_status: Vec<u8>,
-    },
-    HandleMismatch {
-        connection: ConnectionToken,
-        returned_handle: u16,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AclLlFeaturesProbeResult {
-    Alive {
-        connection: ConnectionToken,
-        features: [u8; 8],
-    },
-    Rejected {
-        connection: ConnectionToken,
-        status: u8,
-    },
-    HandleMismatch {
-        connection: ConnectionToken,
-        returned_handle: u16,
-    },
-}
-
 pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
     attach_state: OperationalAttachState,
-    sanitize_rx_flow_control_on_attach: bool,
     scan_state: PassiveScanState,
     scan_pending_opcode: Option<u16>,
     scan_accumulator: ScanAccumulator,
@@ -252,10 +208,6 @@ pub struct HciEngine {
     controller_identity_pending: bool,
     controller_identity_result:
         Option<Result<ControllerIdentity, ControllerIdentityFailure>>,
-    acl_rssi_probe_pending: Option<ConnectionToken>,
-    acl_rssi_probe_result: Option<AclRssiProbeResult>,
-    acl_ll_features_probe_pending: Option<ConnectionToken>,
-    acl_ll_features_probe_result: Option<AclLlFeaturesProbeResult>,
     privacy_state: ControllerPrivacyState,
     privacy_transaction: Option<PrivacyTransaction>,
     privacy_clear_transaction: Option<PrivacyClearTransaction>,
@@ -276,8 +228,6 @@ pub struct HciEngine {
     gatt_mtus: BTreeMap<u16, u16>,
     gatt_poisoned: BTreeMap<u16, GattRequestId>,
     gatt_reports: VecDeque<GattReport>,
-    att_pdus_drained: u64,
-    gatt_value_events: u64,
     cig_configure_state: CigConfigureState,
     cig_configure_transaction: Option<CigConfigureTransaction>,
     cig_remove_state: CigRemoveState,
@@ -297,28 +247,16 @@ pub struct HciEngine {
 
 impl HciEngine {
     pub fn new(tx: TransportTx) -> Self {
-        Self::new_with_attach_policy(tx, false)
-    }
-
-    pub(crate) fn new_with_attach_policy(
-        tx: TransportTx,
-        sanitize_rx_flow_control_on_attach: bool,
-    ) -> Self {
         Self {
             device: Device::new(0),
             link: QueueHostTransport::new(tx),
             attach_state: OperationalAttachState::Idle,
-            sanitize_rx_flow_control_on_attach,
             scan_state: PassiveScanState::Idle,
             scan_pending_opcode: None,
             scan_accumulator: ScanAccumulator::default(),
             completed_scan: None,
             controller_identity_pending: false,
             controller_identity_result: None,
-            acl_rssi_probe_pending: None,
-            acl_rssi_probe_result: None,
-            acl_ll_features_probe_pending: None,
-            acl_ll_features_probe_result: None,
             privacy_state: ControllerPrivacyState::Idle,
             privacy_transaction: None,
             privacy_clear_transaction: None,
@@ -339,8 +277,6 @@ impl HciEngine {
             gatt_mtus: BTreeMap::new(),
             gatt_poisoned: BTreeMap::new(),
             gatt_reports: VecDeque::new(),
-            att_pdus_drained: 0,
-            gatt_value_events: 0,
             cig_configure_state: CigConfigureState::Idle,
             cig_configure_transaction: None,
             cig_remove_state: CigRemoveState::Idle,
@@ -399,132 +335,12 @@ impl HciEngine {
         self.controller_identity_result.take()
     }
 
-    pub fn begin_acl_rssi_probe(
-        &mut self,
-        connection: ConnectionToken,
-    ) -> Result<(), EngineFault> {
-        let current_generation = self
-            .connection_generations
-            .get(&connection.connection_handle)
-            .copied();
-        if current_generation != Some(connection.generation) {
-            return Err(EngineFault::StaleConnection {
-                connection_handle: connection.connection_handle,
-                requested_generation: connection.generation,
-                current_generation,
-            });
-        }
-        if self.acl_rssi_probe_pending.is_some() {
-            return Err(EngineFault::InvalidState);
-        }
-
-        self.link
-            .suppress_next_command_complete(HCI_READ_RSSI_COMMAND);
-        self.link.handle_command(
-            0,
-            Command::ReadRssi {
-                handle: connection.connection_handle,
-            },
-        );
-        self.check_link_fault()?;
-        self.acl_rssi_probe_pending = Some(connection);
-        Ok(())
-    }
-
-    pub fn take_acl_rssi_probe_result(
-        &mut self,
-    ) -> Option<AclRssiProbeResult> {
-        self.acl_rssi_probe_result.take()
-    }
-
-    pub fn begin_acl_ll_features_probe(
-        &mut self,
-        connection: ConnectionToken,
-    ) -> Result<(), EngineFault> {
-        let current_generation = self
-            .connection_generations
-            .get(&connection.connection_handle)
-            .copied();
-        if current_generation != Some(connection.generation) {
-            return Err(EngineFault::StaleConnection {
-                connection_handle: connection.connection_handle,
-                requested_generation: connection.generation,
-                current_generation,
-            });
-        }
-        if self.acl_ll_features_probe_pending.is_some() {
-            return Err(EngineFault::InvalidState);
-        }
-
-        if !self.device.read_remote_le_features_on_handle(
-            &mut self.link,
-            connection.connection_handle,
-        ) {
-            return Err(EngineFault::InvalidState);
-        }
-        self.check_link_fault()?;
-        self.acl_ll_features_probe_pending = Some(connection);
-        Ok(())
-    }
-
-    pub fn take_acl_ll_features_probe_result(
-        &mut self,
-    ) -> Option<AclLlFeaturesProbeResult> {
-        self.acl_ll_features_probe_result.take()
-    }
-
     pub fn controller_privacy_state(&self) -> &ControllerPrivacyState {
         &self.privacy_state
     }
 
     pub fn fal_connection_state(&self) -> &FalConnectionState {
         &self.fal_connection_state
-    }
-
-    pub fn acl_runtime_snapshot(&self) -> AclRuntimeSnapshot {
-        AclRuntimeSnapshot {
-            connections: self
-                .device
-                .le_connections()
-                .map(|info| {
-                    let generation = *self
-                        .connection_generations
-                        .get(&info.connection_handle)
-                        .expect("live LE connection missing generation");
-                    AclRuntimeRecord {
-                        connection: ConnectionToken {
-                            connection_handle: info.connection_handle,
-                            generation,
-                        },
-                        connection_interval:
-                            info.parameters.connection_interval,
-                        peripheral_latency:
-                            info.parameters.peripheral_latency,
-                        supervision_timeout:
-                            info.parameters.supervision_timeout,
-                        subrate_factor:
-                            info.parameters.subrate_factor,
-                        continuation_number:
-                            info.parameters.continuation_number,
-                        data_length: info.data_length.map(|length| {
-                            AclRuntimeDataLength {
-                                max_tx_octets: length.max_tx_octets,
-                                max_tx_time: length.max_tx_time,
-                                max_rx_octets: length.max_rx_octets,
-                                max_rx_time: length.max_rx_time,
-                            }
-                        }),
-                        tx_phy: info.phy.tx_phy,
-                        rx_phy: info.phy.rx_phy,
-                        rssi: info.rssi,
-                        encryption_enabled:
-                            info.encryption_enabled,
-                        encryption_key_size:
-                            info.encryption_key_size,
-                    }
-                })
-                .collect(),
-        }
     }
 
     pub fn connection_set_snapshot(&self) -> LeConnectionSetSnapshot {
@@ -937,72 +753,6 @@ impl HciEngine {
             .map(|_| entry.link.connection_handle)
     }
 
-    pub fn cis_runtime_snapshot(&self) -> CisRuntimeSnapshot {
-        let (cig_id, established) = match &self.cis_create_state {
-            CisCreateState::Ready {
-                cig_id,
-                established,
-            } => (*cig_id, established.as_slice()),
-            CisCreateState::Failed(failure) => {
-                (failure.cig_id, failure.established.as_slice())
-            }
-            _ => return CisRuntimeSnapshot::default(),
-        };
-
-        CisRuntimeSnapshot {
-            entries: established
-                .iter()
-                .filter_map(|entry| {
-                    let handle = entry.link.connection_handle;
-                    self.device.cis_link(handle)?;
-                    Some(CisRuntimeRecord {
-                        cis: CisRef {
-                            cig_id,
-                            cis_id: entry.cis_id,
-                        },
-                        connection_handle: handle,
-                        acl: entry.acl,
-                        input_path_ready: self.device
-                            .iso_data_path(
-                                handle,
-                                IsoDataPathDirection::Input as u8,
-                            )
-                            .is_some(),
-                    })
-                })
-                .collect(),
-        }
-    }
-
-    pub fn acl_credit_snapshot(&self) -> AclCreditSnapshot {
-        let transport = self.link.acl_tx_transport_snapshot();
-        AclCreditSnapshot {
-            bumble_pending: self.device.acl_packets_pending(),
-            audit_in_flight: self.acl_credit_audit.in_flight(),
-            audit_limit: self.acl_credit_audit.limit(),
-            controller_acl_rx_packets: self.link.acl_rx_packets(),
-            att_pdus_drained: self.att_pdus_drained,
-            gatt_value_events: self.gatt_value_events,
-            audit_total_submitted: self.acl_credit_audit.total_submitted(),
-            audit_total_completed: self.acl_credit_audit.total_completed(),
-            audit_total_retired: self.acl_credit_audit.total_retired(),
-            transport_mailbox_enqueued: transport.mailbox_enqueued,
-            transport_usb_submitted: transport.usb_submitted,
-            transport_usb_completed: transport.usb_completed,
-            transport_event_read_arms: transport.event_read_arms,
-            transport_event_read_completions:
-                transport.event_read_completions,
-            transport_event_read_cancelled:
-                transport.event_read_cancelled,
-            transport_acl_read_arms: transport.acl_read_arms,
-            transport_acl_read_completions:
-                transport.acl_read_completions,
-            transport_acl_read_cancelled:
-                transport.acl_read_cancelled,
-            recent_att_writes: self.link.recent_att_writes(),
-        }
-    }
-
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
         self.iso_credit_audit.snapshot()
     }
@@ -1022,8 +772,7 @@ impl HciEngine {
     pub fn condition_state(&self) -> HciConditionState {
         let state = match self.attach_state {
             OperationalAttachState::Idle => HciHostState::Detached,
-            OperationalAttachState::SanitizingRxFlowControl
-            | OperationalAttachState::Discovering => HciHostState::Attaching,
+            OperationalAttachState::Discovering => HciHostState::Attaching,
             OperationalAttachState::Ready => HciHostState::Ready,
             OperationalAttachState::Failed(_) => HciHostState::Faulted,
         };
@@ -1794,41 +1543,25 @@ impl HciEngine {
         })
     }
 
-    fn start_supported_commands_attach(
-        &mut self,
-    ) -> Result<(), EngineFault> {
-        self.link
-            .handle_command(0, Command::ReadLocalSupportedCommands);
-        self.check_link_fault()?;
-        self.attach_state = OperationalAttachState::Discovering;
-        Ok(())
-    }
-
     /// Attach to an already-operational controller without issuing HCI Reset.
     ///
-    /// Product default remains resetless. Review/HIL can request one
-    /// idempotent controller-global hygiene command first: explicitly disable
-    /// Controller->Host flow control, then start the existing Bumble
-    /// capability/event-mask/buffer discovery chain.
+    /// Bumble Device already contains the asynchronous capability-discovery and
+    /// host-initialization completion chain. Kicking only Supported Commands is
+    /// enough for Device::poll() to schedule the remaining capability/event-mask/
+    /// buffer-size commands as completions arrive.
     pub fn begin_operational_attach(&mut self) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Idle {
             return Ok(());
         }
 
-        if !self.sanitize_rx_flow_control_on_attach {
-            return self.start_supported_commands_attach();
+        self.link
+            .handle_command(0, Command::ReadLocalSupportedCommands);
+
+        if let Some(fault) = self.link.take_fault() {
+            return Err(EngineFault::Link(fault));
         }
 
-        let command = Command::SetControllerToHostFlowControl {
-            flow_control_enable: 0,
-        };
-        self.link.suppress_next_command_complete(
-            HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND,
-        );
-        self.link.handle_command(0, command);
-        self.check_link_fault()?;
-        self.attach_state =
-            OperationalAttachState::SanitizingRxFlowControl;
+        self.attach_state = OperationalAttachState::Discovering;
         Ok(())
     }
 
@@ -1892,11 +1625,8 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
-            self.process_attach_sanitize_observation(&observation)?;
             self.process_data_credit_observation(&observation)?;
             self.process_controller_identity_observation(&observation);
-            self.process_acl_rssi_probe_observation(&observation);
-            self.process_acl_ll_features_probe_observation(&observation);
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
@@ -1906,170 +1636,6 @@ impl HciEngine {
             self.process_cig_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
-        Ok(())
-    }
-
-    fn process_acl_rssi_probe_observation(
-        &mut self,
-        observation: &HciObservation,
-    ) {
-        let Some(connection) = self.acl_rssi_probe_pending else {
-            return;
-        };
-
-        match observation {
-            HciObservation::CommandComplete {
-                opcode,
-                status,
-                parameters_after_status,
-            } if *opcode == HCI_READ_RSSI_COMMAND => {
-                self.acl_rssi_probe_pending = None;
-                self.acl_rssi_probe_result = Some(match status {
-                    Some(0) if parameters_after_status.len() == 3 => {
-                        let returned_handle = u16::from_le_bytes([
-                            parameters_after_status[0],
-                            parameters_after_status[1],
-                        ]);
-                        if returned_handle != connection.connection_handle {
-                            AclRssiProbeResult::HandleMismatch {
-                                connection,
-                                returned_handle,
-                            }
-                        } else {
-                            AclRssiProbeResult::Alive {
-                                connection,
-                                rssi: parameters_after_status[2] as i8,
-                            }
-                        }
-                    }
-                    Some(0) => AclRssiProbeResult::Malformed {
-                        connection,
-                        parameters_after_status:
-                            parameters_after_status.clone(),
-                    },
-                    Some(status) => AclRssiProbeResult::Rejected {
-                        connection,
-                        status: *status,
-                    },
-                    None => AclRssiProbeResult::Malformed {
-                        connection,
-                        parameters_after_status:
-                            parameters_after_status.clone(),
-                    },
-                });
-            }
-            HciObservation::CommandStatus { opcode, status }
-                if *opcode == HCI_READ_RSSI_COMMAND && *status != 0 =>
-            {
-                self.acl_rssi_probe_pending = None;
-                self.acl_rssi_probe_result =
-                    Some(AclRssiProbeResult::Rejected {
-                        connection,
-                        status: *status,
-                    });
-            }
-            _ => {}
-        }
-    }
-
-    fn process_acl_ll_features_probe_observation(
-        &mut self,
-        observation: &HciObservation,
-    ) {
-        let Some(connection) = self.acl_ll_features_probe_pending else {
-            return;
-        };
-
-        match observation {
-            HciObservation::CommandStatus { opcode, status }
-                if *opcode
-                    == bumble_hci::codes::HCI_LE_READ_REMOTE_FEATURES_COMMAND
-                    && *status != 0 =>
-            {
-                self.acl_ll_features_probe_pending = None;
-                self.acl_ll_features_probe_result =
-                    Some(AclLlFeaturesProbeResult::Rejected {
-                        connection,
-                        status: *status,
-                    });
-            }
-            HciObservation::LeRemoteFeaturesComplete {
-                status,
-                connection_handle,
-                features,
-            } => {
-                self.acl_ll_features_probe_pending = None;
-                self.acl_ll_features_probe_result =
-                    Some(if *connection_handle
-                        != connection.connection_handle
-                    {
-                        AclLlFeaturesProbeResult::HandleMismatch {
-                            connection,
-                            returned_handle: *connection_handle,
-                        }
-                    } else if *status != 0 {
-                        AclLlFeaturesProbeResult::Rejected {
-                            connection,
-                            status: *status,
-                        }
-                    } else {
-                        AclLlFeaturesProbeResult::Alive {
-                            connection,
-                            features: *features,
-                        }
-                    });
-            }
-            _ => {}
-        }
-    }
-
-    fn process_attach_sanitize_observation(
-        &mut self,
-        observation: &HciObservation,
-    ) -> Result<(), EngineFault> {
-        if self.attach_state
-            != OperationalAttachState::SanitizingRxFlowControl
-        {
-            return Ok(());
-        }
-
-        match observation {
-            HciObservation::CommandComplete {
-                opcode,
-                status,
-                ..
-            } if *opcode
-                == HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND =>
-            {
-                match status {
-                    Some(0) => self.start_supported_commands_attach()?,
-                    Some(status) => {
-                        self.attach_state = OperationalAttachState::Failed(
-                            OperationalAttachFailure::
-                                ControllerToHostFlowControlStatus(*status),
-                        );
-                    }
-                    None => {
-                        self.attach_state = OperationalAttachState::Failed(
-                            OperationalAttachFailure::
-                                ControllerToHostFlowControlMalformed,
-                        );
-                    }
-                }
-            }
-            HciObservation::CommandStatus { opcode, status }
-                if *opcode
-                    == HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND
-                    && *status != 0 =>
-            {
-                self.attach_state = OperationalAttachState::Failed(
-                    OperationalAttachFailure::
-                        ControllerToHostFlowControlStatus(*status),
-                );
-            }
-            _ => {}
-        }
-
         Ok(())
     }
 
@@ -2412,8 +1978,7 @@ impl HciEngine {
                 }
             }
             HciObservation::CommandComplete { .. }
-            | HciObservation::CommandStatus { .. }
-            | HciObservation::LeRemoteFeaturesComplete { .. } => {}
+            | HciObservation::CommandStatus { .. } => {}
         }
         Ok(())
     }
@@ -2793,8 +2358,7 @@ impl HciEngine {
                 }
                 HciObservation::AclSubmitted { .. }
                 | HciObservation::IsoSubmitted { .. }
-                | HciObservation::CompletedPackets { .. }
-                | HciObservation::LeRemoteFeaturesComplete { .. } => {
+                | HciObservation::CompletedPackets { .. } => {
                     FalConnectAction::Ignored
                 }
             }
@@ -2876,15 +2440,11 @@ impl HciEngine {
 
         for (handle, connection) in connections {
             for pdu in self.device.take_inbox_on_handle(handle) {
-                self.att_pdus_drained =
-                    self.att_pdus_drained.saturating_add(1);
                 match pdu {
                     bumble_att::AttPdu::HandleValueNotification {
                         attribute_handle,
                         attribute_value,
                     } => {
-                        self.gatt_value_events =
-                            self.gatt_value_events.saturating_add(1);
                         self.push_gatt_report(GattReport::Value(
                             GattValueEvent::Notification {
                                 connection,
@@ -2897,8 +2457,6 @@ impl HciEngine {
                         attribute_handle,
                         attribute_value,
                     } => {
-                        self.gatt_value_events =
-                            self.gatt_value_events.saturating_add(1);
                         if !self.device.send_att_on_handle(
                             &mut self.link,
                             handle,
@@ -3420,8 +2978,7 @@ impl HciEngine {
             }
             HciObservation::AclSubmitted { .. }
             | HciObservation::IsoSubmitted { .. }
-            | HciObservation::CompletedPackets { .. }
-            | HciObservation::LeRemoteFeaturesComplete { .. } => return Ok(()),
+            | HciObservation::CompletedPackets { .. } => return Ok(()),
         };
 
         if self.scan_pending_opcode != Some(opcode) {
@@ -3568,63 +3125,6 @@ mod tests {
         );
         assert!(engine.device().controller_ready());
         assert_eq!(engine.device().reset_status(), None);
-    }
-
-    #[test]
-    fn review_attach_can_disable_controller_to_host_flow_control_first() {
-        let (tx, rx) = TransportTx::test_channel(8);
-        let mut engine = HciEngine::new_with_attach_policy(tx, true);
-
-        engine.begin_operational_attach().unwrap();
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HostPacket::Command(vec![0x31, 0x0c, 0x01, 0x00])
-        );
-        assert_eq!(
-            engine.attach_state(),
-            OperationalAttachState::SanitizingRxFlowControl
-        );
-
-        engine
-            .ingest(ControllerPacket::Event(vec![
-                0x0e, 0x04, 0x01, 0x31, 0x0c, 0x00,
-            ]))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HostPacket::Command(vec![0x02, 0x10, 0x00])
-        );
-        assert_eq!(
-            engine.attach_state(),
-            OperationalAttachState::Discovering
-        );
-        assert_eq!(engine.device().reset_status(), None);
-    }
-
-    #[test]
-    fn review_attach_surfaces_flow_control_disable_failure() {
-        let (tx, rx) = TransportTx::test_channel(8);
-        let mut engine = HciEngine::new_with_attach_policy(tx, true);
-
-        engine.begin_operational_attach().unwrap();
-        let _ = rx.try_recv().unwrap();
-
-        engine
-            .ingest(ControllerPacket::Event(vec![
-                0x0e, 0x04, 0x01, 0x31, 0x0c, 0x0c,
-            ]))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        assert_eq!(
-            engine.attach_state(),
-            OperationalAttachState::Failed(
-                OperationalAttachFailure::
-                    ControllerToHostFlowControlStatus(0x0c)
-            )
-        );
     }
 
     #[test]
@@ -4824,71 +4324,6 @@ mod tests {
     }
 
     #[test]
-    fn acl_ll_features_probe_requires_peer_ll_response_and_returns_event() {
-        let (mut engine, rx) = engine(8);
-        let connection =
-            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
-
-        engine.begin_acl_ll_features_probe(connection).unwrap();
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HostPacket::Command(vec![0x16, 0x20, 0x02, 0x00, 0x08])
-        );
-
-        engine
-            .ingest(ControllerPacket::Event(vec![
-                0x0f, 0x04, 0x00, 0x01, 0x16, 0x20,
-            ]))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        engine
-            .ingest(ControllerPacket::Event(vec![
-                0x3e, 0x0c, 0x04, 0x00, 0x00, 0x08,
-                1, 2, 3, 4, 5, 6, 7, 8,
-            ]))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        assert_eq!(
-            engine.take_acl_ll_features_probe_result(),
-            Some(AclLlFeaturesProbeResult::Alive {
-                connection,
-                features: [1, 2, 3, 4, 5, 6, 7, 8],
-            })
-        );
-    }
-
-    #[test]
-    fn acl_rssi_probe_is_journal_only_and_returns_controller_view() {
-        let (mut engine, rx) = engine(8);
-        let connection =
-            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
-
-        engine.begin_acl_rssi_probe(connection).unwrap();
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HostPacket::Command(vec![0x05, 0x14, 0x02, 0x00, 0x08])
-        );
-
-        engine
-            .ingest(ControllerPacket::Event(vec![
-                0x0e, 0x07, 0x01, 0x05, 0x14, 0x00,
-                0x00, 0x08, 0xd6,
-            ]))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        assert_eq!(
-            engine.take_acl_rssi_probe_result(),
-            Some(AclRssiProbeResult::Alive {
-                connection,
-                rssi: -42,
-            })
-        );
-    }
-
-    #[test]
     fn controller_identity_probe_is_journal_only_and_has_no_bumble_side_effect() {
         let (mut engine, rx) = engine(16);
         make_minimal_attach_ready(&mut engine, &rx);
@@ -5037,82 +4472,6 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn cis_runtime_snapshot_exposes_live_handle_and_path_state() {
-        let (mut engine, rx) = engine(64);
-        make_minimal_attach_ready(&mut engine, &rx);
-
-        engine
-            .ingest(le_connection_complete(
-                0x0800,
-                [1, 2, 3, 4, 5, 6],
-            ))
-            .unwrap();
-        engine.poll_until_quiescent().unwrap();
-        let acl = engine.connection_set_snapshot().connections[0].token();
-
-        engine.begin_cig_configuration(CigConfig {
-            cig_id: 1,
-            sdu_interval_c_to_p: 10_000,
-            sdu_interval_p_to_c: 10_000,
-            worst_case_sca: 0,
-            packing: 0,
-            framing: 0,
-            max_transport_latency_c_to_p: 22,
-            max_transport_latency_p_to_c: 22,
-            cis: vec![crate::plane::l1_hci::iso::cig_cis::CisConfig {
-                cis_id: 2,
-                max_sdu_c_to_p: 100,
-                max_sdu_p_to_c: 0,
-                phy_c_to_p: 2,
-                phy_p_to_c: 2,
-                rtn_c_to_p: 3,
-                rtn_p_to_c: 0,
-            }],
-        }).unwrap();
-        let opcode = command_opcode(rx.try_recv().unwrap());
-        engine.ingest(complete(opcode, 0, &[1, 1, 0x01, 0x09])).unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        engine.begin_cis_creation(CisCreateRequest {
-            cig_id: 1,
-            bindings: vec![crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
-                cis_id: 2,
-                acl,
-            }],
-        }).unwrap();
-        let create = command_opcode(rx.try_recv().unwrap());
-        engine.ingest(command_status(create, 0)).unwrap();
-        engine.poll_until_quiescent().unwrap();
-        engine.ingest(cis_established(0x0901, 0)).unwrap();
-        engine.poll_until_quiescent().unwrap();
-
-        let snapshot = engine.cis_runtime_snapshot();
-        assert_eq!(snapshot.entries.len(), 1);
-        assert_eq!(snapshot.entries[0].cis, CisRef { cig_id: 1, cis_id: 2 });
-        assert_eq!(snapshot.entries[0].connection_handle, 0x0901);
-        assert_eq!(snapshot.entries[0].acl, acl);
-        assert!(!snapshot.entries[0].input_path_ready);
-    }
-
-    #[test]
-    fn acl_runtime_snapshot_projects_negotiated_connection_state() {
-        let (mut engine, _rx) = engine(8);
-        let token =
-            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
-
-        let snapshot = engine.acl_runtime_snapshot();
-        let record = snapshot.connections.iter()
-            .find(|record| record.connection == token)
-            .unwrap();
-        assert_eq!(record.connection_interval, 0x0018);
-        assert_eq!(record.peripheral_latency, 0);
-        assert_eq!(record.supervision_timeout, 0x002a);
-        assert_eq!(record.subrate_factor, 1);
-        assert_eq!(record.continuation_number, 0);
-        assert_eq!(record.encryption_enabled, 1);
     }
 
     #[test]
@@ -6136,7 +5495,6 @@ mod tests {
             establish_encrypted_test_acl(&mut engine, 0x0800, 1);
         let second =
             establish_encrypted_test_acl(&mut engine, 0x0801, 7);
-        let rx_before = engine.acl_credit_snapshot();
 
         engine
             .ingest(inbound_att(
@@ -6182,20 +5540,6 @@ mod tests {
                 }
             )] if *connection == second && value == &vec![3, 4]
         ));
-
-        let rx_after = engine.acl_credit_snapshot();
-        assert_eq!(
-            rx_after.controller_acl_rx_packets,
-            rx_before.controller_acl_rx_packets + 2
-        );
-        assert_eq!(
-            rx_after.att_pdus_drained,
-            rx_before.att_pdus_drained + 2
-        );
-        assert_eq!(
-            rx_after.gatt_value_events,
-            rx_before.gatt_value_events + 2
-        );
     }
 
     #[test]

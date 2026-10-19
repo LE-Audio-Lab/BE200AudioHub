@@ -26,8 +26,6 @@ pub enum HciCommand {
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
     ReadControllerIdentity,
-    ReadAclRssiProbe { connection: ConnectionToken },
-    ReadAclLlFeaturesProbe { connection: ConnectionToken },
     ConfigureControllerPrivacy(ResolvingListConfig),
     ClearControllerPrivacy,
     BeginFalConnection(FalConnectRequest),
@@ -35,9 +33,6 @@ pub enum HciCommand {
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
     EnsureCisHostFeature,
-    ReadAclTxAudit,
-    ReadAclRuntimeSnapshot,
-    ReadCisRuntimeSnapshot,
     ReadIsoTxAudit,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
@@ -118,24 +113,6 @@ impl HciControl {
             .map_err(map_send_error)
     }
 
-    pub fn try_read_acl_rssi_probe(
-        &self,
-        connection: ConnectionToken,
-    ) -> Result<(), SendError> {
-        self.tx
-            .try_send(HciCommand::ReadAclRssiProbe { connection })
-            .map_err(map_send_error)
-    }
-
-    pub fn try_read_acl_ll_features_probe(
-        &self,
-        connection: ConnectionToken,
-    ) -> Result<(), SendError> {
-        self.tx
-            .try_send(HciCommand::ReadAclLlFeaturesProbe { connection })
-            .map_err(map_send_error)
-    }
-
     pub fn try_configure_controller_privacy(
         &self,
         config: ResolvingListConfig,
@@ -189,30 +166,6 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::EnsureCisHostFeature)
-            .map_err(map_send_error)
-    }
-
-    pub fn try_read_acl_tx_audit(
-        &self,
-    ) -> Result<(), SendError> {
-        self.tx
-            .try_send(HciCommand::ReadAclTxAudit)
-            .map_err(map_send_error)
-    }
-
-    pub fn try_read_acl_runtime_snapshot(
-        &self,
-    ) -> Result<(), SendError> {
-        self.tx
-            .try_send(HciCommand::ReadAclRuntimeSnapshot)
-            .map_err(map_send_error)
-    }
-
-    pub fn try_read_cis_runtime_snapshot(
-        &self,
-    ) -> Result<(), SendError> {
-        self.tx
-            .try_send(HciCommand::ReadCisRuntimeSnapshot)
             .map_err(map_send_error)
     }
 

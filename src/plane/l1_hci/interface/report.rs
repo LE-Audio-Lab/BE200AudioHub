@@ -4,25 +4,19 @@ use crate::{
     plane::l1_hci::{
         acl::{
             connection::{
-                AclRuntimeSnapshot, DisconnectState, FalConnectionState,
-                LeConnectionSetSnapshot,
+                DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
             },
-            credit::AclCreditSnapshot,
             privacy::ControllerPrivacyState,
             scan::ScanSummary,
             security::StoredEncryptionState,
         },
         gatt::transaction::GattReport,
         host::engine::{
-            AclLlFeaturesProbeResult, AclRssiProbeResult,
             ControllerCapabilities, ControllerIdentity,
             ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
         },
         iso::{
-            cig_cis::{
-                CigConfigureState, CisCreateState, CisRuntimeSnapshot,
-                SemanticCisCreateState,
-            },
+            cig_cis::{CigConfigureState, CisCreateState, SemanticCisCreateState},
             credit::IsoCreditSnapshot,
             feature::CisHostFeatureState,
             lifecycle::{
@@ -43,8 +37,6 @@ pub enum HciReport {
     ControllerIdentity(
         Result<ControllerIdentity, ControllerIdentityFailure>,
     ),
-    AclRssiProbe(AclRssiProbeResult),
-    AclLlFeaturesProbe(AclLlFeaturesProbeResult),
     PassiveScanState(PassiveScanState),
     ScanComplete(ScanSummary),
     ControllerPrivacyState(ControllerPrivacyState),
@@ -52,9 +44,6 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     CisHostFeatureState(CisHostFeatureState),
-    AclTxAudit(AclCreditSnapshot),
-    AclRuntimeSnapshot(AclRuntimeSnapshot),
-    CisRuntimeSnapshot(CisRuntimeSnapshot),
     IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),

@@ -6,11 +6,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread::{self, JoinHandle},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -23,28 +19,15 @@ use crate::{
         windows::process_loopback::ProcessLoopbackCaptureStats,
     },
     plane::{
-        l1_control::{
-            engine::machine::ReviewStreamProfile,
-            interface::stream::LeAudioFormat,
-            model::set_plan::ControlSetPlan,
-        },
+        l1_control::model::set_plan::ControlSetPlan,
         l1_hci::{
             host::stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
             },
-            interface::iso_tx::{HciIsoTx, HciLogicalIsoTx},
-            iso::{
-                credit::IsoCreditSnapshot,
-                tx::{
-                    IsoSduGroupRequest, IsoSduRequest,
-                    LogicalIsoSduGroupRequest,
-                },
-            },
+            iso::credit::IsoCreditSnapshot,
         },
-        l1_control::interface::stream::AudioSide,
         l1_media::{
-            codec::lc3::encode_lc3_silence,
             live::{
                 LivePcmIsoWorker, LivePcmWorkerExit,
                 LivePcmWorkerSnapshot,
@@ -55,7 +38,6 @@ use crate::{
             },
         },
     },
-    runtime::mailbox::SendError,
     review::{
         review2::bond::{
             fingerprint_bond_store, load_verified_bond_set,
@@ -73,36 +55,6 @@ const DEFAULT_LONGEVITY_SECONDS: u64 = 300;
 const MAX_LONGEVITY_SECONDS: u64 = 86_400;
 const LONGEVITY_HEARTBEAT_STEPS: u64 = 10;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
-const ACL_LIVENESS_PROBE_TIMEOUT: Duration =
-    Duration::from_millis(750);
-const FINAL_MODEL_DURATION: Duration = Duration::from_secs(60);
-const FINAL_MODEL_CHECKPOINT: Duration = Duration::from_secs(5);
-const FINAL_MODEL_ISO_PERIOD: Duration = Duration::from_millis(10);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FinalModel {
-    AclOnly,
-    SingleCis,
-    DualCisLowQos,
-}
-
-impl FinalModel {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::AclOnly => "acl-only",
-            Self::SingleCis => "single-cis",
-            Self::DualCisLowQos => "dual-cis-low-qos",
-        }
-    }
-
-    fn review_profile(self) -> ReviewStreamProfile {
-        match self {
-            Self::AclOnly => ReviewStreamProfile::CodecOnly,
-            Self::SingleCis => ReviewStreamProfile::SingleCisRight,
-            Self::DualCisLowQos => ReviewStreamProfile::DualCisLowQos,
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRelayConfig {
@@ -113,12 +65,6 @@ pub struct LiveRelayConfig {
     pub connect_timeout: Duration,
     pub live_duration: Duration,
     pub longevity_test: bool,
-    pub group_release_ab: bool,
-    pub sanitize_rx_flow_control_ab: bool,
-    pub acl_rx_liveness_ab: bool,
-    pub acl_rx_keepalive_ab: bool,
-    pub acl_in_depth_2_ab: bool,
-    pub final_model: Option<FinalModel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,37 +74,6 @@ pub struct LiveRelayMediaResult {
     pub media: LivePcmWorkerExit,
     pub audit_before: IsoCreditSnapshot,
     pub audit_after: IsoCreditSnapshot,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FinalIsoPressureExit {
-    pub attempted_intervals: u64,
-    pub submitted_intervals: u64,
-    pub backpressure_drops: u64,
-    pub grid_skipped: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinalModelResult {
-    pub firmware: FirmwareLoadOutcome,
-    pub controller_identity: String,
-    pub model: FinalModel,
-    pub duration: Duration,
-    pub checkpoints_passed: u64,
-    pub failure: Option<String>,
-    pub pressure: Option<FinalIsoPressureExit>,
-    pub audit_before: Option<IsoCreditSnapshot>,
-    pub audit_after: Option<IsoCreditSnapshot>,
-    pub emergency_teardown_ok: bool,
-    pub bond_unchanged: bool,
-    pub exit: HciStackExit,
-}
-
-impl FinalModelResult {
-    pub fn passed(&self) -> bool {
-        self.failure.is_none() && self.emergency_teardown_ok
-            && self.bond_unchanged
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,19 +97,13 @@ pub fn parse_live_relay_args(
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
     let mut requested_live_seconds = None;
     let mut longevity_test = false;
-    let mut group_release_ab = false;
-    let mut sanitize_rx_flow_control_ab = false;
-    let mut acl_rx_liveness_ab = false;
-    let mut acl_rx_keepalive_ab = false;
-    let mut acl_in_depth_2_ab = false;
-    let mut final_model = None;
     let mut confirmed = false;
     let mut index = 0usize;
 
     while index < args.len() {
         match args[index].as_str() {
             "--sfi" | "--ddc" | "--bond-root" | "--name"
-            | "--connect-seconds" | "--seconds" | "--final-model" => {
+            | "--connect-seconds" | "--seconds" => {
                 let flag = args[index].clone();
                 let value = args
                     .get(index + 1)
@@ -233,24 +142,6 @@ pub fn parse_live_relay_args(
                         }
                         requested_live_seconds = Some(seconds);
                     }
-                    "--final-model" => {
-                        if final_model.is_some() {
-                            return Err(
-                                "--final-model specified more than once".into()
-                            );
-                        }
-                        final_model = Some(match value.as_str() {
-                            "acl-only" => FinalModel::AclOnly,
-                            "single-cis" => FinalModel::SingleCis,
-                            "dual-cis-low-qos" => FinalModel::DualCisLowQos,
-                            _ => {
-                                return Err(
-                                    "--final-model must be one of: acl-only, single-cis, dual-cis-low-qos"
-                                        .into(),
-                                )
-                            }
-                        });
-                    }
                     _ => unreachable!(),
                 }
                 index += 2;
@@ -262,52 +153,6 @@ pub fn parse_live_relay_args(
                     );
                 }
                 longevity_test = true;
-                index += 1;
-            }
-            "--group-release-ab" => {
-                if group_release_ab {
-                    return Err(
-                        "--group-release-ab specified more than once".into(),
-                    );
-                }
-                group_release_ab = true;
-                index += 1;
-            }
-            "--sanitize-rx-flow-control-ab" => {
-                if sanitize_rx_flow_control_ab {
-                    return Err(
-                        "--sanitize-rx-flow-control-ab specified more than once"
-                            .into(),
-                    );
-                }
-                sanitize_rx_flow_control_ab = true;
-                index += 1;
-            }
-            "--acl-rx-liveness-ab" => {
-                if acl_rx_liveness_ab {
-                    return Err(
-                        "--acl-rx-liveness-ab specified more than once".into(),
-                    );
-                }
-                acl_rx_liveness_ab = true;
-                index += 1;
-            }
-            "--acl-rx-keepalive-ab" => {
-                if acl_rx_keepalive_ab {
-                    return Err(
-                        "--acl-rx-keepalive-ab specified more than once".into(),
-                    );
-                }
-                acl_rx_keepalive_ab = true;
-                index += 1;
-            }
-            "--acl-in-depth-2-ab" => {
-                if acl_in_depth_2_ab {
-                    return Err(
-                        "--acl-in-depth-2-ab specified more than once".into(),
-                    );
-                }
-                acl_in_depth_2_ab = true;
                 index += 1;
             }
             "--confirm-live-relay-hil" => {
@@ -325,37 +170,6 @@ pub fn parse_live_relay_args(
                     "unknown round8 live-relay argument: {unknown}"
                 ))
             }
-        }
-    }
-
-    if acl_rx_liveness_ab && acl_rx_keepalive_ab {
-        return Err(
-            "--acl-rx-liveness-ab and --acl-rx-keepalive-ab are mutually exclusive"
-                .into(),
-        );
-    }
-
-    if acl_in_depth_2_ab && final_model.is_none() {
-        return Err(
-            "--acl-in-depth-2-ab requires --final-model".into(),
-        );
-    }
-
-    if final_model.is_some() {
-        if requested_live_seconds.is_some() {
-            return Err(
-                "--seconds is fixed to 60 for --final-model".into(),
-            );
-        }
-        if longevity_test
-            || group_release_ab
-            || acl_rx_liveness_ab
-            || acl_rx_keepalive_ab
-        {
-            return Err(
-                "--final-model cannot be combined with longevity/group-release/liveness A/B flags"
-                    .into(),
-            );
         }
     }
 
@@ -382,11 +196,7 @@ pub fn parse_live_relay_args(
             "--seconds must be in 1..={max_seconds} for {mode_name} mode"
         ));
     }
-    let live_duration = if final_model.is_some() {
-        FINAL_MODEL_DURATION
-    } else {
-        Duration::from_secs(live_seconds)
-    };
+    let live_duration = Duration::from_secs(live_seconds);
 
     Ok(LiveRelayConfig {
         sfi: sfi.ok_or_else(|| "--sfi is required".to_string())?,
@@ -398,12 +208,6 @@ pub fn parse_live_relay_args(
         connect_timeout,
         live_duration,
         longevity_test,
-        group_release_ab,
-        sanitize_rx_flow_control_ab,
-        acl_rx_liveness_ab,
-        acl_rx_keepalive_ab,
-        acl_in_depth_2_ab,
-        final_model,
     })
 }
 
@@ -531,179 +335,6 @@ fn print_longevity_snapshot(
     );
 }
 
-fn run_acl_liveness_probe(
-    label: &str,
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-) -> Result<bool, String> {
-    let probe = driver.probe_ase_liveness(
-        stack,
-        AudioSide::Right,
-        ACL_LIVENESS_PROBE_TIMEOUT,
-    )?;
-    println!("[acl-liveness] {label}: {}", probe.summary());
-    let runtime = driver.read_acl_runtime_snapshot(stack)?;
-    println!(
-        "[acl-liveness]   ACL runtime: {}",
-        CurrentPathControlDriver::format_acl_runtime_snapshot(&runtime),
-    );
-    if probe.timed_out() {
-        let controller = driver.probe_controller_rssi(
-            stack,
-            AudioSide::Right,
-            Duration::from_secs(2),
-        )?;
-        println!(
-            "[acl-liveness]   controller RSSI after ATT timeout: {controller}"
-        );
-        let peer_ll = driver.probe_peer_ll_features(
-            stack,
-            AudioSide::Right,
-            Duration::from_secs(3),
-        )?;
-        println!(
-            "[acl-liveness]   peer LL remote-features after ATT timeout: {peer_ll}"
-        );
-
-        let left = driver.probe_ase_liveness(
-            stack,
-            AudioSide::Left,
-            ACL_LIVENESS_PROBE_TIMEOUT,
-        )?;
-        println!(
-            "[acl-liveness]   opposite-ear probe after Right death: {}",
-            left.summary(),
-        );
-
-        if left.timed_out() {
-            let left_controller = driver.probe_controller_rssi(
-                stack,
-                AudioSide::Left,
-                Duration::from_secs(2),
-            )?;
-            println!(
-                "[acl-liveness]   Left controller RSSI after ATT timeout: {left_controller}"
-            );
-            let left_peer_ll = driver.probe_peer_ll_features(
-                stack,
-                AudioSide::Left,
-                Duration::from_secs(3),
-            )?;
-            println!(
-                "[acl-liveness]   Left peer LL remote-features after ATT timeout: {left_peer_ll}"
-            );
-        }
-    }
-    Ok(probe.timed_out())
-}
-
-fn wait_live_duration_with_acl_liveness(
-    duration: Duration,
-    source: &ProcessLoopbackSource,
-    media: &LivePcmIsoWorker,
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-    audit_origin: &IsoCreditSnapshot,
-) -> Result<(), String> {
-    let started = Instant::now();
-    let mut targets = vec![
-        Duration::from_secs(1),
-        Duration::from_secs(5),
-        Duration::from_secs(15),
-    ];
-    if duration > Duration::from_secs(20) {
-        targets.push(duration.saturating_sub(Duration::from_secs(1)));
-    }
-    targets.retain(|target| *target < duration);
-    targets.sort_unstable();
-    targets.dedup();
-
-    for target in targets {
-        let elapsed = started.elapsed();
-        if elapsed < target {
-            thread::sleep(target - elapsed);
-        }
-
-        let label = format!("live t={:.1}s", started.elapsed().as_secs_f64());
-        if run_acl_liveness_probe(&label, stack, driver)? {
-            return Err(format!(
-                "ACL RX liveness A/B DEAD at {label}; ATT Read left pending by design, so graceful GATT teardown must be skipped for this diagnostic run"
-            ));
-        }
-
-        // Keep the data-plane evidence visible beside each successful ATT
-        // liveness read without changing media scheduling semantics.
-        let source_stats = source.stats();
-        let media_stats = media.snapshot();
-        let iso = driver.iso_audit(stack)?;
-        println!(
-            "[acl-liveness]   media capture_frames={} intervals={} pcm_fill={} iso_submitted={} iso_completed={} iso_in_flight={}",
-            source_stats.captured_frames,
-            media_stats.pcm.intervals_consumed,
-            media_stats.pcm_fill_frames,
-            iso.total_submitted.saturating_sub(audit_origin.total_submitted),
-            iso.total_completed.saturating_sub(audit_origin.total_completed),
-            iso.in_flight,
-        );
-    }
-
-    let elapsed = started.elapsed();
-    if elapsed < duration {
-        thread::sleep(duration - elapsed);
-    }
-    Ok(())
-}
-
-fn wait_live_duration_with_acl_keepalive(
-    duration: Duration,
-    source: &ProcessLoopbackSource,
-    media: &LivePcmIsoWorker,
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-    audit_origin: &IsoCreditSnapshot,
-) -> Result<(), String> {
-    let started = Instant::now();
-    let mut target = Duration::from_secs(5);
-
-    while target < duration {
-        let elapsed = started.elapsed();
-        if elapsed < target {
-            thread::sleep(target - elapsed);
-        }
-
-        let label = format!(
-            "keepalive t={:.1}s",
-            started.elapsed().as_secs_f64(),
-        );
-        if run_acl_liveness_probe(&label, stack, driver)? {
-            return Err(format!(
-                "ACL RX keepalive A/B DEAD at {label}; ATT Read left pending by design, graceful GATT teardown must be skipped"
-            ));
-        }
-
-        let source_stats = source.stats();
-        let media_stats = media.snapshot();
-        let iso = driver.iso_audit(stack)?;
-        println!(
-            "[acl-keepalive]   media capture_frames={} intervals={} pcm_fill={} iso_submitted={} iso_completed={} iso_in_flight={}",
-            source_stats.captured_frames,
-            media_stats.pcm.intervals_consumed,
-            media_stats.pcm_fill_frames,
-            iso.total_submitted.saturating_sub(audit_origin.total_submitted),
-            iso.total_completed.saturating_sub(audit_origin.total_completed),
-            iso.in_flight,
-        );
-
-        target = target.saturating_add(Duration::from_secs(5));
-    }
-
-    let elapsed = started.elapsed();
-    if elapsed < duration {
-        thread::sleep(duration - elapsed);
-    }
-    Ok(())
-}
-
 fn wait_live_duration(
     duration: Duration,
     longevity_test: bool,
@@ -762,595 +393,17 @@ fn wait_live_duration(
     Ok(())
 }
 
-
-#[derive(Clone)]
-enum FinalPressureSpec {
-    Raw {
-        tx: HciIsoTx,
-        connection_handle: u16,
-        payload: Vec<u8>,
-    },
-    Logical {
-        tx: HciLogicalIsoTx,
-        session_id: crate::core::lifecycle::SessionId,
-        stream_id: crate::core::lifecycle::StreamId,
-        left: Vec<u8>,
-        right: Vec<u8>,
-    },
-}
-
-impl FinalPressureSpec {
-    fn submit(&self) -> Result<(), SendError> {
-        match self {
-            Self::Raw {
-                tx,
-                connection_handle,
-                payload,
-            } => tx.try_submit_group(IsoSduGroupRequest {
-                sdus: vec![IsoSduRequest {
-                    connection_handle: *connection_handle,
-                    payload: payload.clone(),
-                }],
-            }),
-            Self::Logical {
-                tx,
-                session_id,
-                stream_id,
-                left,
-                right,
-            } => tx.try_submit_group(LogicalIsoSduGroupRequest {
-                session_id: *session_id,
-                stream_id: *stream_id,
-                left: left.clone(),
-                right: right.clone(),
-            }),
-        }
-    }
-}
-
-struct FinalIsoPressure {
-    stop: Arc<AtomicBool>,
-    join: JoinHandle<Result<FinalIsoPressureExit, String>>,
-}
-
-impl FinalIsoPressure {
-    fn start(spec: FinalPressureSpec) -> Result<Self, String> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let join = thread::Builder::new()
-            .name("FinalIsoPressure".into())
-            .spawn(move || {
-                let mut stats = FinalIsoPressureExit::default();
-                let mut next = Instant::now();
-
-                while !thread_stop.load(Ordering::Relaxed) {
-                    next += FINAL_MODEL_ISO_PERIOD;
-                    let now = Instant::now();
-                    if now < next {
-                        thread::sleep(next - now);
-                    } else {
-                        while Instant::now()
-                            >= next + FINAL_MODEL_ISO_PERIOD
-                        {
-                            next += FINAL_MODEL_ISO_PERIOD;
-                            stats.grid_skipped =
-                                stats.grid_skipped.saturating_add(1);
-                        }
-                    }
-
-                    if thread_stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    stats.attempted_intervals =
-                        stats.attempted_intervals.saturating_add(1);
-                    match spec.submit() {
-                        Ok(()) => {
-                            stats.submitted_intervals =
-                                stats.submitted_intervals.saturating_add(1);
-                        }
-                        Err(SendError::Full) => {
-                            stats.backpressure_drops =
-                                stats.backpressure_drops.saturating_add(1);
-                        }
-                        Err(SendError::Disconnected) => {
-                            return Err(
-                                "final-model ISO data lane disconnected".into()
-                            );
-                        }
-                    }
-                }
-
-                Ok(stats)
-            })
-            .map_err(|error| {
-                format!("cannot start final ISO pressure worker: {error}")
-            })?;
-        Ok(Self { stop, join })
-    }
-
-    fn shutdown(self) -> Result<FinalIsoPressureExit, String> {
-        self.stop.store(true, Ordering::Relaxed);
-        self.join
-            .join()
-            .map_err(|_| "final ISO pressure worker panicked".to_string())?
-    }
-}
-
-fn final_probe_failure_diagnostics(
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-    side: AudioSide,
-) -> Result<(), String> {
-    let controller = driver.probe_controller_rssi(
-        stack,
-        side,
-        Duration::from_secs(2),
-    )?;
-    println!(
-        "[final-model]   {side:?} controller RSSI after ATT timeout: {controller}"
-    );
-    let peer_ll = driver.probe_peer_ll_features(
-        stack,
-        side,
-        Duration::from_secs(3),
-    )?;
-    println!(
-        "[final-model]   {side:?} peer LL remote-features after ATT timeout: {peer_ll}"
-    );
-    Ok(())
-}
-
-fn run_final_model_checkpoint(
-    label: &str,
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-    include_cis: bool,
-) -> Result<Option<String>, String> {
-    let right = driver.probe_ase_liveness(
-        stack,
-        AudioSide::Right,
-        ACL_LIVENESS_PROBE_TIMEOUT,
-    )?;
-    println!(
-        "[final-model] {label} Right: {}",
-        right.summary(),
-    );
-
-    let left = driver.probe_ase_liveness(
-        stack,
-        AudioSide::Left,
-        ACL_LIVENESS_PROBE_TIMEOUT,
-    )?;
-    println!(
-        "[final-model] {label} Left: {}",
-        left.summary(),
-    );
-
-    let runtime = driver.read_acl_runtime_snapshot(stack)?;
-    println!(
-        "[final-model]   ACL runtime: {}",
-        CurrentPathControlDriver::format_acl_runtime_snapshot(&runtime),
-    );
-
-    if include_cis {
-        let cis = driver.read_cis_runtime_snapshot(stack)?;
-        let text = cis.entries.iter().map(|entry| {
-            format!(
-                "cis={:?} handle=0x{:04x} acl=0x{:04x}/g{} input_path={}",
-                entry.cis,
-                entry.connection_handle,
-                entry.acl.connection_handle,
-                entry.acl.generation,
-                entry.input_path_ready,
-            )
-        }).collect::<Vec<_>>().join(" | ");
-        println!(
-            "[final-model]   CIS runtime: {}",
-            if text.is_empty() { "none" } else { &text },
-        );
-    }
-
-    if right.timed_out() {
-        final_probe_failure_diagnostics(
-            stack,
-            driver,
-            AudioSide::Right,
-        )?;
-    }
-    if left.timed_out() {
-        final_probe_failure_diagnostics(
-            stack,
-            driver,
-            AudioSide::Left,
-        )?;
-    }
-
-    if right.timed_out() || left.timed_out() {
-        Ok(Some(format!(
-            "{label}: ATT data path dead (Right timeout={} Left timeout={})",
-            right.timed_out(),
-            left.timed_out(),
-        )))
-    } else {
-        Ok(None)
-    }
-}
-
-fn run_final_model_window(
-    stack: &HciStack,
-    driver: &mut CurrentPathControlDriver,
-    include_cis: bool,
-) -> Result<(u64, Option<String>), String> {
-    let started = Instant::now();
-    let mut checkpoints_passed = 1u64;
-    let mut target = FINAL_MODEL_CHECKPOINT;
-
-    while target <= FINAL_MODEL_DURATION {
-        let elapsed = started.elapsed();
-        if elapsed < target {
-            thread::sleep(target - elapsed);
-        }
-
-        let label = format!(
-            "t={:.1}s",
-            started.elapsed().as_secs_f64(),
-        );
-        if let Some(failure) = run_final_model_checkpoint(
-            &label,
-            stack,
-            driver,
-            include_cis,
-        )? {
-            return Ok((checkpoints_passed, Some(failure)));
-        }
-
-        checkpoints_passed = checkpoints_passed.saturating_add(1);
-        target += FINAL_MODEL_CHECKPOINT;
-    }
-
-    Ok((checkpoints_passed, None))
-}
-
-#[cfg(windows)]
-fn abort_final_model(
-    stack: HciStack,
-    driver: &mut CurrentPathControlDriver,
-    pressure: Option<FinalIsoPressure>,
-    error: String,
-) -> String {
-    let pressure_note = pressure
-        .map(|pressure| match pressure.shutdown() {
-            Ok(exit) => format!(
-                "pressure stopped(submitted={}, drops={})",
-                exit.submitted_intervals,
-                exit.backpressure_drops,
-            ),
-            Err(stop_error) => {
-                format!("pressure stop failed({stop_error})")
-            }
-        })
-        .unwrap_or_else(|| "no pressure worker".into());
-
-    let drain_note = match driver.wait_iso_idle(
-        &stack,
-        ISO_DRAIN_TIMEOUT,
-    ) {
-        Ok(snapshot) => format!(
-            "ISO drain in_flight={}",
-            snapshot.in_flight,
-        ),
-        Err(drain_error) => format!(
-            "ISO drain failed({drain_error})"
-        ),
-    };
-
-    let teardown_note = match driver.emergency_stop_for_review(&stack) {
-        Ok(()) => "emergency teardown PASS".to_string(),
-        Err(teardown_error) => format!(
-            "emergency teardown failed({teardown_error})"
-        ),
-    };
-
-    let exit = stack.shutdown();
-    format!(
-        "{error}; abort cleanup: {pressure_note}; {drain_note}; {teardown_note}; shutdown hci={:?} transport={:?}",
-        exit.hci,
-        exit.transport,
-    )
-}
-
-#[cfg(windows)]
-pub fn execute_final_model(
-    config: LiveRelayConfig,
-) -> Result<FinalModelResult, String> {
-    let model = config.final_model.ok_or_else(|| {
-        "execute_final_model requires --final-model".to_string()
-    })?;
-
-    let before = fingerprint_bond_store(&config.bond_root)
-        .map_err(|error| {
-            format!(
-                "cannot fingerprint bond store before final HIL: {}",
-                error.0
-            )
-        })?;
-    let material = load_verified_bond_set(
-        &config.bond_root,
-        &config.target_name,
-    )
-    .map_err(|error| {
-        format!("cannot load verified stored bond: {}", error.0)
-    })?;
-    let controller_identity = material.controller_identity.clone();
-    let plan = control_plan(&material);
-
-    let firmware = be200_firmware_port::ensure_operational(
-        &config.sfi,
-        &config.ddc,
-    )
-    .map_err(|error| {
-        format!("firmware bypass failed: {error:?}")
-    })?;
-
-    let mut hci_config = HciStackConfig::default();
-    hci_config.sanitize_rx_flow_control_on_attach =
-        config.sanitize_rx_flow_control_ab;
-    hci_config.acl_rx_read_depth = if config.acl_in_depth_2_ab {
-        2
-    } else {
-        1
-    };
-    let stack = spawn_be200_hci_stack(hci_config);
-    let mut driver = match CurrentPathControlDriver::new_with_review_profile(
-        plan,
-        config.connect_timeout,
-        model.review_profile(),
-    ) {
-        Ok(driver) => driver,
-        Err(error) => {
-            let exit = stack.shutdown();
-            return Err(format!(
-                "{error}; stack shutdown hci={:?} transport={:?}",
-                exit.hci,
-                exit.transport,
-            ));
-        }
-    };
-
-    let setup_result = (|| -> Result<
-        (Option<FinalPressureSpec>, Option<IsoCreditSnapshot>),
-        String,
-    > {
-        Ok(match model {
-        FinalModel::AclOnly => {
-            driver.start_to_codec_configured(&stack)?;
-            (None, None)
-        }
-        FinalModel::SingleCis => {
-            driver.start_to_streaming_ready(&stack)?;
-            let cis = driver.read_cis_runtime_snapshot(&stack)?;
-            if cis.entries.len() != 1 {
-                return Err(format!(
-                    "single-cis model expected one live CIS, got {:?}",
-                    cis.entries
-                ));
-            }
-            let entry = cis.entries[0];
-            if entry.cis.cig_id != 1
-                || entry.cis.cis_id != 2
-                || !entry.input_path_ready
-            {
-                return Err(format!(
-                    "single-cis model unexpected runtime CIS: {entry:?}"
-                ));
-            }
-            let format = LeAudioFormat {
-                sample_rate_hz: 48_000,
-                frame_duration_us: 10_000,
-                octets_per_sdu: 100,
-            };
-            let (_, right) = encode_lc3_silence(format)
-                .map_err(|error| {
-                    format!("cannot encode final-model LC3 silence: {error:?}")
-                })?;
-            (
-                Some(FinalPressureSpec::Raw {
-                    tx: stack.iso_tx(),
-                    connection_handle: entry.connection_handle,
-                    payload: right,
-                }),
-                Some(driver.iso_audit(&stack)?),
-            )
-        }
-        FinalModel::DualCisLowQos => {
-            let binding = driver.start_and_bind(&stack)?;
-            let (left, right) = encode_lc3_silence(binding.format)
-                .map_err(|error| {
-                    format!("cannot encode final-model LC3 silence: {error:?}")
-                })?;
-            (
-                Some(FinalPressureSpec::Logical {
-                    tx: stack.logical_iso_tx(),
-                    session_id: binding.session_id,
-                    stream_id: binding.stream_id,
-                    left,
-                    right,
-                }),
-                Some(driver.iso_audit(&stack)?),
-            )
-        }
-        })
-    })();
-
-    let (pressure_spec, audit_before) = match setup_result {
-        Ok(setup) => setup,
-        Err(error) => {
-            return Err(abort_final_model(
-                stack,
-                &mut driver,
-                None,
-                error,
-            ));
-        }
-    };
-
-    let include_cis = model != FinalModel::AclOnly;
-    let pre_failure = match run_final_model_checkpoint(
-        "pre-run",
-        &stack,
-        &mut driver,
-        include_cis,
-    ) {
-        Ok(failure) => failure,
-        Err(error) => {
-            return Err(abort_final_model(
-                stack,
-                &mut driver,
-                None,
-                error,
-            ));
-        }
-    };
-
-    let pressure = if pre_failure.is_none() {
-        match pressure_spec {
-            Some(spec) => match FinalIsoPressure::start(spec) {
-                Ok(pressure) => Some(pressure),
-                Err(error) => {
-                    return Err(abort_final_model(
-                        stack,
-                        &mut driver,
-                        None,
-                        error,
-                    ));
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    let (checkpoints_passed, timed_failure) =
-        if pre_failure.is_none() {
-            match run_final_model_window(
-                &stack,
-                &mut driver,
-                include_cis,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    return Err(abort_final_model(
-                        stack,
-                        &mut driver,
-                        pressure,
-                        error,
-                    ));
-                }
-            }
-        } else {
-            (0, None)
-        };
-    let failure = pre_failure.or(timed_failure);
-
-    let pressure_exit = match pressure {
-        Some(pressure) => match pressure.shutdown() {
-            Ok(exit) => Some(exit),
-            Err(error) => {
-                return Err(abort_final_model(
-                    stack,
-                    &mut driver,
-                    None,
-                    error,
-                ));
-            }
-        },
-        None => None,
-    };
-
-    let audit_after = if audit_before.is_some() {
-        match driver.wait_iso_idle(&stack, ISO_DRAIN_TIMEOUT) {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                return Err(abort_final_model(
-                    stack,
-                    &mut driver,
-                    None,
-                    error,
-                ));
-            }
-        }
-    } else {
-        None
-    };
-
-    let emergency_teardown = driver.emergency_stop_for_review(&stack);
-    let emergency_teardown_ok = emergency_teardown.is_ok();
-    if let Err(error) = &emergency_teardown {
-        eprintln!(
-            "[final-model] emergency teardown FAILED: {error}"
-        );
-    } else {
-        println!(
-            "[final-model] emergency teardown -> Control Idle: PASS"
-        );
-    }
-
-    let exit = stack.shutdown();
-
-    let bond_unchanged = fingerprint_bond_store(&config.bond_root)
-        .map(|after| after == before)
-        .map_err(|error| {
-            format!(
-                "cannot fingerprint bond store after final HIL: {}",
-                error.0
-            )
-        })?;
-
-    Ok(FinalModelResult {
-        firmware,
-        controller_identity,
-        model,
-        duration: FINAL_MODEL_DURATION,
-        checkpoints_passed,
-        failure,
-        pressure: pressure_exit,
-        audit_before,
-        audit_after,
-        emergency_teardown_ok,
-        bond_unchanged,
-        exit,
-    })
-}
-
 fn run_live_media(
     stack: &HciStack,
     plan: ControlSetPlan,
     connect_timeout: Duration,
     duration: Duration,
     longevity_test: bool,
-    group_release_ab: bool,
-    acl_rx_liveness_ab: bool,
-    acl_rx_keepalive_ab: bool,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
-
-    if (acl_rx_liveness_ab || acl_rx_keepalive_ab)
-        && run_acl_liveness_probe(
-            "pre-media / route-bound",
-            stack,
-            &mut driver,
-        )?
-    {
-        return Err(
-            "ACL RX liveness A/B DEAD before media start; ATT Read left pending by design and graceful GATT teardown intentionally skipped"
-                .into(),
-        );
-    }
 
     let (boundary, producer) = PcmRelayBoundary::relay_defaults();
     let media = LivePcmIsoWorker::start(
@@ -1373,93 +426,29 @@ fn run_live_media(
                     stack,
                     ISO_DRAIN_TIMEOUT,
                 );
-                let _ = if group_release_ab {
-                    driver.stop_group_release_ab(stack)
-                } else {
-                    driver.stop(stack)
-                };
+                let _ = driver.stop(stack);
                 return Err(format!(
                     "Windows Process Loopback startup failed: {error:?}"
                 ));
             }
         };
 
-    let wait_result = if acl_rx_keepalive_ab {
-        wait_live_duration_with_acl_keepalive(
-            duration,
-            &source,
-            &media,
-            stack,
-            &mut driver,
-            &audit_before,
-        )
-    } else if acl_rx_liveness_ab {
-        wait_live_duration_with_acl_liveness(
-            duration,
-            &source,
-            &media,
-            stack,
-            &mut driver,
-            &audit_before,
-        )
-    } else {
-        wait_live_duration(
-            duration,
-            longevity_test,
-            &source,
-            &media,
-            stack,
-            &mut driver,
-            &audit_before,
-        )
-    };
+    let wait_result = wait_live_duration(
+        duration,
+        longevity_test,
+        &source,
+        &media,
+        stack,
+        &mut driver,
+        &audit_before,
+    );
 
     let source_result = source.shutdown();
     let media_result = media.shutdown();
 
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
-
-    let diagnostic_dead = wait_result
-        .as_ref()
-        .err()
-        .map(|error| {
-            error.starts_with("ACL RX liveness A/B DEAD")
-                || error.starts_with("ACL RX keepalive A/B DEAD")
-        })
-        .unwrap_or(false);
-
-    let post_media_liveness_dead = if (acl_rx_liveness_ab
-        || acl_rx_keepalive_ab)
-        && !diagnostic_dead
-        && audit_after_result.is_ok()
-    {
-        run_acl_liveness_probe(
-            "post-media / ISO-drained / pre-Stop",
-            stack,
-            &mut driver,
-        )?
-    } else {
-        false
-    };
-
-    if diagnostic_dead || post_media_liveness_dead {
-        let _ = source_result;
-        let _ = media_result;
-        let _ = audit_after_result;
-        return Err(if diagnostic_dead {
-            wait_result.unwrap_err()
-        } else {
-            "ACL RX liveness A/B DEAD after media shutdown and ISO drain but before StopControl; ATT Read left pending by design, graceful GATT teardown intentionally skipped"
-                .into()
-        });
-    }
-
-    let stop_result = if group_release_ab {
-        driver.stop_group_release_ab(stack)
-    } else {
-        driver.stop(stack)
-    };
+    let stop_result = driver.stop(stack);
 
     let (source_stats, capture_stats) = source_result.map_err(
         |error| {
@@ -1470,9 +459,7 @@ fn run_live_media(
         format!("live Media worker failed: {error:?}")
     })?;
     let audit_after = audit_after_result?;
-    if let Err(error) = stop_result {
-        return Err(error);
-    }
+    stop_result?;
     wait_result?;
 
     Ok(LiveRelayMediaResult {
@@ -1513,19 +500,13 @@ pub fn execute_live_relay(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let mut hci_config = HciStackConfig::default();
-    hci_config.sanitize_rx_flow_control_on_attach =
-        config.sanitize_rx_flow_control_ab;
-    let stack = spawn_be200_hci_stack(hci_config);
+    let stack = spawn_be200_hci_stack(HciStackConfig::default());
     let run = run_live_media(
         &stack,
         plan,
         config.connect_timeout,
         config.live_duration,
         config.longevity_test,
-        config.group_release_ab,
-        config.acl_rx_liveness_ab,
-        config.acl_rx_keepalive_ab,
     );
     let exit = stack.shutdown();
 
@@ -1579,143 +560,6 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
-        assert!(!config.group_release_ab);
-        assert!(!config.sanitize_rx_flow_control_ab);
-        assert!(!config.acl_rx_liveness_ab);
-        assert!(!config.acl_rx_keepalive_ab);
-        assert!(!config.acl_in_depth_2_ab);
-        assert_eq!(config.final_model, None);
-    }
-
-    #[test]
-    fn parser_enables_explicit_acl_rx_keepalive_ab() {
-        let mut value = args();
-        value.push("--acl-rx-keepalive-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert!(config.acl_rx_keepalive_ab);
-    }
-
-    #[test]
-    fn parser_rejects_both_acl_rx_probe_modes() {
-        let mut value = args();
-        value.push("--acl-rx-liveness-ab".into());
-        value.push("--acl-rx-keepalive-ab".into());
-
-        let error = parse_live_relay_args(&value).unwrap_err();
-        assert!(error.contains("mutually exclusive"));
-    }
-
-    #[test]
-    fn parser_enables_explicit_acl_rx_liveness_ab() {
-        let mut value = args();
-        value.push("--acl-rx-liveness-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert!(config.acl_rx_liveness_ab);
-    }
-
-    #[test]
-    fn parser_enables_explicit_rx_flow_control_sanitize_ab() {
-        let mut value = args();
-        value.push("--sanitize-rx-flow-control-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert!(config.sanitize_rx_flow_control_ab);
-    }
-
-    #[test]
-    fn parser_enables_explicit_group_release_ab() {
-        let mut value = args();
-        value.push("--group-release-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert!(config.group_release_ab);
-    }
-
-    #[test]
-    fn parser_accepts_fixed_final_models() {
-        let mut value = args();
-        let seconds = value
-            .iter()
-            .position(|arg| arg == "--seconds")
-            .unwrap();
-        value.drain(seconds..=seconds + 1);
-        value.push("--final-model".into());
-        value.push("single-cis".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert_eq!(config.final_model, Some(FinalModel::SingleCis));
-        assert_eq!(config.live_duration, FINAL_MODEL_DURATION);
-    }
-
-    #[test]
-    fn parser_rejects_final_model_duration_override() {
-        let mut value = args();
-        value.push("--final-model".into());
-        value.push("acl-only".into());
-
-        let error = parse_live_relay_args(&value).unwrap_err();
-        assert!(error.contains("--seconds is fixed"));
-    }
-
-    #[test]
-    fn parser_allows_rx_flow_control_sanitize_with_final_model() {
-        let mut value = args();
-        let seconds = value
-            .iter()
-            .position(|arg| arg == "--seconds")
-            .unwrap();
-        value.drain(seconds..=seconds + 1);
-        value.push("--final-model".into());
-        value.push("acl-only".into());
-        value.push("--sanitize-rx-flow-control-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert_eq!(config.final_model, Some(FinalModel::AclOnly));
-        assert!(config.sanitize_rx_flow_control_ab);
-    }
-
-    #[test]
-    fn parser_allows_acl_in_depth_two_with_final_model() {
-        let mut value = args();
-        let seconds = value
-            .iter()
-            .position(|arg| arg == "--seconds")
-            .unwrap();
-        value.drain(seconds..=seconds + 1);
-        value.push("--final-model".into());
-        value.push("acl-only".into());
-        value.push("--acl-in-depth-2-ab".into());
-
-        let config = parse_live_relay_args(&value).unwrap();
-        assert_eq!(config.final_model, Some(FinalModel::AclOnly));
-        assert!(config.acl_in_depth_2_ab);
-    }
-
-    #[test]
-    fn parser_rejects_acl_in_depth_two_without_final_model() {
-        let mut value = args();
-        value.push("--acl-in-depth-2-ab".into());
-
-        let error = parse_live_relay_args(&value).unwrap_err();
-        assert!(error.contains("requires --final-model"));
-    }
-
-    #[test]
-    fn parser_rejects_final_model_ab_flags() {
-        let mut value = args();
-        let seconds = value
-            .iter()
-            .position(|arg| arg == "--seconds")
-            .unwrap();
-        value.drain(seconds..=seconds + 1);
-        value.push("--final-model".into());
-        value.push("dual-cis-low-qos".into());
-        value.push("--acl-rx-keepalive-ab".into());
-
-        let error = parse_live_relay_args(&value).unwrap_err();
-        assert!(error.contains("cannot be combined"));
     }
 
     #[test]

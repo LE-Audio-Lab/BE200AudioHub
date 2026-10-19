@@ -77,27 +77,9 @@ pub(crate) fn spawn_hci_worker(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
 ) -> HciWorkerJoin {
-    spawn_hci_worker_with_attach_policy(
-        ports,
-        transport_tx,
-        false,
-    )
-}
-
-pub(crate) fn spawn_hci_worker_with_attach_policy(
-    ports: HciWorkerPorts,
-    transport_tx: TransportTx,
-    sanitize_rx_flow_control_on_attach: bool,
-) -> HciWorkerJoin {
     let join = thread::Builder::new()
         .name("HciHost".into())
-        .spawn(move || {
-            run_loop(
-                ports,
-                transport_tx,
-                sanitize_rx_flow_control_on_attach,
-            )
-        })
+        .spawn(move || run_loop(ports, transport_tx))
         .expect("failed to spawn HCI host worker");
 
     HciWorkerJoin { join }
@@ -106,7 +88,6 @@ pub(crate) fn spawn_hci_worker_with_attach_policy(
 fn run_loop(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
-    sanitize_rx_flow_control_on_attach: bool,
 ) -> HciWorkerExit {
     let HciWorkerPorts {
         control_rx,
@@ -116,10 +97,7 @@ fn run_loop(
         report_tx,
     } = ports;
 
-    let mut engine = HciEngine::new_with_attach_policy(
-        transport_tx,
-        sanitize_rx_flow_control_on_attach,
-    );
+    let mut engine = HciEngine::new(transport_tx);
     let mut last_attach_state = engine.attach_state();
     let mut last_scan_state = engine.passive_scan_state();
     let mut last_privacy_state = engine.controller_privacy_state().clone();
@@ -159,13 +137,7 @@ fn run_loop(
             match control_rx.try_recv() {
                 Ok(command) => {
                     did_work = true;
-                    let acl_audit_command =
-                        matches!(&command, HciCommand::ReadAclTxAudit);
-                    let acl_runtime_snapshot_command =
-                        matches!(&command, HciCommand::ReadAclRuntimeSnapshot);
-                    let cis_runtime_snapshot_command =
-                        matches!(&command, HciCommand::ReadCisRuntimeSnapshot);
-                    let iso_audit_command =
+                    let audit_command =
                         matches!(&command, HciCommand::ReadIsoTxAudit);
 
                     let route_state =
@@ -195,37 +167,7 @@ fn run_loop(
                         }
                     }
 
-                    if acl_audit_command {
-                        if let Err(fault) = report_tx
-                            .try_send(HciReport::AclTxAudit(
-                                engine.acl_credit_snapshot(),
-                            ))
-                            .map_err(map_report_error)
-                        {
-                            return HciWorkerExit::Faulted(fault);
-                        }
-                    }
-                    if acl_runtime_snapshot_command {
-                        if let Err(fault) = report_tx
-                            .try_send(HciReport::AclRuntimeSnapshot(
-                                engine.acl_runtime_snapshot(),
-                            ))
-                            .map_err(map_report_error)
-                        {
-                            return HciWorkerExit::Faulted(fault);
-                        }
-                    }
-                    if cis_runtime_snapshot_command {
-                        if let Err(fault) = report_tx
-                            .try_send(HciReport::CisRuntimeSnapshot(
-                                engine.cis_runtime_snapshot(),
-                            ))
-                            .map_err(map_report_error)
-                        {
-                            return HciWorkerExit::Faulted(fault);
-                        }
-                    }
-                    if iso_audit_command {
+                    if audit_command {
                         if let Err(fault) = report_tx
                             .try_send(HciReport::IsoTxAudit(
                                 engine.iso_credit_snapshot(),
@@ -446,13 +388,7 @@ fn run_loop(
                         )
                     }
                 };
-                let acl_audit_command =
-                    matches!(&command, HciCommand::ReadAclTxAudit);
-                let acl_runtime_snapshot_command =
-                    matches!(&command, HciCommand::ReadAclRuntimeSnapshot);
-                let cis_runtime_snapshot_command =
-                    matches!(&command, HciCommand::ReadCisRuntimeSnapshot);
-                let iso_audit_command =
+                let audit_command =
                     matches!(&command, HciCommand::ReadIsoTxAudit);
                 let route_state =
                     match process_worker_command(
@@ -477,37 +413,7 @@ fn run_loop(
                         return HciWorkerExit::Faulted(fault);
                     }
                 }
-                if acl_audit_command {
-                    if let Err(fault) = report_tx
-                        .try_send(HciReport::AclTxAudit(
-                            engine.acl_credit_snapshot(),
-                        ))
-                        .map_err(map_report_error)
-                    {
-                        return HciWorkerExit::Faulted(fault);
-                    }
-                }
-                if acl_runtime_snapshot_command {
-                    if let Err(fault) = report_tx
-                        .try_send(HciReport::AclRuntimeSnapshot(
-                            engine.acl_runtime_snapshot(),
-                        ))
-                        .map_err(map_report_error)
-                    {
-                        return HciWorkerExit::Faulted(fault);
-                    }
-                }
-                if cis_runtime_snapshot_command {
-                    if let Err(fault) = report_tx
-                        .try_send(HciReport::CisRuntimeSnapshot(
-                            engine.cis_runtime_snapshot(),
-                        ))
-                        .map_err(map_report_error)
-                    {
-                        return HciWorkerExit::Faulted(fault);
-                    }
-                }
-                if iso_audit_command {
+                if audit_command {
                     if let Err(fault) = report_tx
                         .try_send(HciReport::IsoTxAudit(
                             engine.iso_credit_snapshot(),
@@ -695,12 +601,6 @@ fn process_command(
         HciCommand::ReadControllerIdentity => {
             engine.begin_controller_identity_probe()
         }
-        HciCommand::ReadAclRssiProbe { connection } => {
-            engine.begin_acl_rssi_probe(connection)
-        }
-        HciCommand::ReadAclLlFeaturesProbe { connection } => {
-            engine.begin_acl_ll_features_probe(connection)
-        }
         HciCommand::ConfigureControllerPrivacy(config) => {
             engine.begin_controller_privacy(config)
         }
@@ -722,10 +622,7 @@ fn process_command(
         HciCommand::EnsureCisHostFeature => {
             engine.begin_cis_host_feature()
         }
-        HciCommand::ReadAclTxAudit
-        | HciCommand::ReadAclRuntimeSnapshot
-        | HciCommand::ReadCisRuntimeSnapshot
-        | HciCommand::ReadIsoTxAudit => Ok(()),
+        HciCommand::ReadIsoTxAudit => Ok(()),
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
         }
@@ -903,18 +800,6 @@ fn publish_state_transitions(
     if let Some(identity) = engine.take_controller_identity_result() {
         report_tx
             .try_send(HciReport::ControllerIdentity(identity))
-            .map_err(map_report_error)?;
-    }
-
-    if let Some(result) = engine.take_acl_rssi_probe_result() {
-        report_tx
-            .try_send(HciReport::AclRssiProbe(result))
-            .map_err(map_report_error)?;
-    }
-
-    if let Some(result) = engine.take_acl_ll_features_probe_result() {
-        report_tx
-            .try_send(HciReport::AclLlFeaturesProbe(result))
             .map_err(map_report_error)?;
     }
 
