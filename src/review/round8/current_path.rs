@@ -60,7 +60,10 @@ use crate::{
             },
             },
             interface::report::HciReport,
-            iso::credit::IsoCreditSnapshot,
+            iso::{
+                cig_cis::CisRuntimeSnapshot,
+                credit::IsoCreditSnapshot,
+            },
         },
     },
     platform::firmware::{
@@ -1631,6 +1634,47 @@ impl CurrentPathControlDriver {
             })
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    pub(crate) fn read_cis_runtime_snapshot(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<CisRuntimeSnapshot, String> {
+        stack
+            .control()
+            .try_read_cis_runtime_snapshot()
+            .map_err(|error| {
+                format!("CIS runtime snapshot query rejected: {error:?}")
+            })?;
+
+        let deadline = Instant::now() + AUDIT_TIMEOUT;
+        loop {
+            match stack.reports().try_recv() {
+                Ok(HciReport::CisRuntimeSnapshot(snapshot)) => {
+                    return Ok(snapshot);
+                }
+                Ok(report) => {
+                    process_report(
+                        stack,
+                        &mut self.control,
+                        &mut self.condition,
+                        self.scope,
+                        &mut self.timers,
+                        &mut self.binding,
+                        report,
+                    )?;
+                }
+                Err(RecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Err("CIS runtime snapshot query timed out".into());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(RecvError::Disconnected) => {
+                    return Err("HCI report lane disconnected".into());
+                }
+            }
+        }
     }
 
     pub(crate) fn probe_controller_rssi(

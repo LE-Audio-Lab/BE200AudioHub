@@ -28,6 +28,7 @@ use crate::{
                     CigConfig, CigConfigError, CigConfigureAction, CigConfigureState,
                     CigConfigureTransaction, CisCreateAction, CisCreateConfigError,
                     CisCreateRequest, CisCreateState, CisCreateTransaction, CisRef,
+                    CisRuntimeRecord, CisRuntimeSnapshot,
                 },
                 credit::{IsoCreditAudit, IsoCreditFault, IsoCreditSnapshot},
                 feature::{
@@ -934,6 +935,43 @@ impl HciEngine {
         self.device
             .cis_link(entry.link.connection_handle)
             .map(|_| entry.link.connection_handle)
+    }
+
+    pub fn cis_runtime_snapshot(&self) -> CisRuntimeSnapshot {
+        let (cig_id, established) = match &self.cis_create_state {
+            CisCreateState::Ready {
+                cig_id,
+                established,
+            } => (*cig_id, established.as_slice()),
+            CisCreateState::Failed(failure) => {
+                (failure.cig_id, failure.established.as_slice())
+            }
+            _ => return CisRuntimeSnapshot::default(),
+        };
+
+        CisRuntimeSnapshot {
+            entries: established
+                .iter()
+                .filter_map(|entry| {
+                    let handle = entry.link.connection_handle;
+                    self.device.cis_link(handle)?;
+                    Some(CisRuntimeRecord {
+                        cis: CisRef {
+                            cig_id,
+                            cis_id: entry.cis_id,
+                        },
+                        connection_handle: handle,
+                        acl: entry.acl,
+                        input_path_ready: self.device
+                            .iso_data_path(
+                                handle,
+                                IsoDataPathDirection::Input as u8,
+                            )
+                            .is_some(),
+                    })
+                })
+                .collect(),
+        }
     }
 
     pub fn acl_credit_snapshot(&self) -> AclCreditSnapshot {
@@ -4999,6 +5037,64 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cis_runtime_snapshot_exposes_live_handle_and_path_state() {
+        let (mut engine, rx) = engine(64);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let acl = engine.connection_set_snapshot().connections[0].token();
+
+        engine.begin_cig_configuration(CigConfig {
+            cig_id: 1,
+            sdu_interval_c_to_p: 10_000,
+            sdu_interval_p_to_c: 10_000,
+            worst_case_sca: 0,
+            packing: 0,
+            framing: 0,
+            max_transport_latency_c_to_p: 22,
+            max_transport_latency_p_to_c: 22,
+            cis: vec![crate::plane::l1_hci::iso::cig_cis::CisConfig {
+                cis_id: 2,
+                max_sdu_c_to_p: 100,
+                max_sdu_p_to_c: 0,
+                phy_c_to_p: 2,
+                phy_p_to_c: 2,
+                rtn_c_to_p: 3,
+                rtn_p_to_c: 0,
+            }],
+        }).unwrap();
+        let opcode = command_opcode(rx.try_recv().unwrap());
+        engine.ingest(complete(opcode, 0, &[1, 1, 0x01, 0x09])).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine.begin_cis_creation(CisCreateRequest {
+            cig_id: 1,
+            bindings: vec![crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
+                cis_id: 2,
+                acl,
+            }],
+        }).unwrap();
+        let create = command_opcode(rx.try_recv().unwrap());
+        engine.ingest(command_status(create, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine.ingest(cis_established(0x0901, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let snapshot = engine.cis_runtime_snapshot();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].cis, CisRef { cig_id: 1, cis_id: 2 });
+        assert_eq!(snapshot.entries[0].connection_handle, 0x0901);
+        assert_eq!(snapshot.entries[0].acl, acl);
+        assert!(!snapshot.entries[0].input_path_ready);
     }
 
     #[test]

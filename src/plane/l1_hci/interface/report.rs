@@ -19,7 +19,10 @@ use crate::{
             ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
         },
         iso::{
-            cig_cis::{CigConfigureState, CisCreateState, SemanticCisCreateState},
+            cig_cis::{
+                CigConfigureState, CisCreateState, CisRuntimeSnapshot,
+                SemanticCisCreateState,
+            },
             credit::IsoCreditSnapshot,
             feature::CisHostFeatureState,
             lifecycle::{
@@ -51,6 +54,7 @@ pub enum HciReport {
     CisHostFeatureState(CisHostFeatureState),
     AclTxAudit(AclCreditSnapshot),
     AclRuntimeSnapshot(AclRuntimeSnapshot),
+    CisRuntimeSnapshot(CisRuntimeSnapshot),
     IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),

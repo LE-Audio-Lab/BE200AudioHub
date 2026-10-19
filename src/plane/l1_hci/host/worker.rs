@@ -163,6 +163,8 @@ fn run_loop(
                         matches!(&command, HciCommand::ReadAclTxAudit);
                     let acl_runtime_snapshot_command =
                         matches!(&command, HciCommand::ReadAclRuntimeSnapshot);
+                    let cis_runtime_snapshot_command =
+                        matches!(&command, HciCommand::ReadCisRuntimeSnapshot);
                     let iso_audit_command =
                         matches!(&command, HciCommand::ReadIsoTxAudit);
 
@@ -207,6 +209,16 @@ fn run_loop(
                         if let Err(fault) = report_tx
                             .try_send(HciReport::AclRuntimeSnapshot(
                                 engine.acl_runtime_snapshot(),
+                            ))
+                            .map_err(map_report_error)
+                        {
+                            return HciWorkerExit::Faulted(fault);
+                        }
+                    }
+                    if cis_runtime_snapshot_command {
+                        if let Err(fault) = report_tx
+                            .try_send(HciReport::CisRuntimeSnapshot(
+                                engine.cis_runtime_snapshot(),
                             ))
                             .map_err(map_report_error)
                         {
@@ -438,6 +450,8 @@ fn run_loop(
                     matches!(&command, HciCommand::ReadAclTxAudit);
                 let acl_runtime_snapshot_command =
                     matches!(&command, HciCommand::ReadAclRuntimeSnapshot);
+                let cis_runtime_snapshot_command =
+                    matches!(&command, HciCommand::ReadCisRuntimeSnapshot);
                 let iso_audit_command =
                     matches!(&command, HciCommand::ReadIsoTxAudit);
                 let route_state =
@@ -477,6 +491,16 @@ fn run_loop(
                     if let Err(fault) = report_tx
                         .try_send(HciReport::AclRuntimeSnapshot(
                             engine.acl_runtime_snapshot(),
+                        ))
+                        .map_err(map_report_error)
+                    {
+                        return HciWorkerExit::Faulted(fault);
+                    }
+                }
+                if cis_runtime_snapshot_command {
+                    if let Err(fault) = report_tx
+                        .try_send(HciReport::CisRuntimeSnapshot(
+                            engine.cis_runtime_snapshot(),
                         ))
                         .map_err(map_report_error)
                     {
@@ -700,6 +724,7 @@ fn process_command(
         }
         HciCommand::ReadAclTxAudit
         | HciCommand::ReadAclRuntimeSnapshot
+        | HciCommand::ReadCisRuntimeSnapshot
         | HciCommand::ReadIsoTxAudit => Ok(()),
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)

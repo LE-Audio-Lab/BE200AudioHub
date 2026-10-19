@@ -160,6 +160,19 @@ pub struct CisRef {
     pub cis_id: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CisRuntimeRecord {
+    pub cis: CisRef,
+    pub connection_handle: u16,
+    pub acl: ConnectionToken,
+    pub input_path_ready: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CisRuntimeSnapshot {
+    pub entries: Vec<CisRuntimeRecord>,
+}
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CisCreateRequest {

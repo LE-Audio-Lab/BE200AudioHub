@@ -37,6 +37,7 @@ pub enum HciCommand {
     EnsureCisHostFeature,
     ReadAclTxAudit,
     ReadAclRuntimeSnapshot,
+    ReadCisRuntimeSnapshot,
     ReadIsoTxAudit,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
@@ -204,6 +205,14 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::ReadAclRuntimeSnapshot)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_cis_runtime_snapshot(
+        &self,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadCisRuntimeSnapshot)
             .map_err(map_send_error)
     }
 
