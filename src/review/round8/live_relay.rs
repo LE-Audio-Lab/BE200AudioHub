@@ -117,6 +117,7 @@ pub struct LiveRelayConfig {
     pub sanitize_rx_flow_control_ab: bool,
     pub acl_rx_liveness_ab: bool,
     pub acl_rx_keepalive_ab: bool,
+    pub acl_in_depth_2_ab: bool,
     pub final_model: Option<FinalModel>,
 }
 
@@ -185,6 +186,7 @@ pub fn parse_live_relay_args(
     let mut sanitize_rx_flow_control_ab = false;
     let mut acl_rx_liveness_ab = false;
     let mut acl_rx_keepalive_ab = false;
+    let mut acl_in_depth_2_ab = false;
     let mut final_model = None;
     let mut confirmed = false;
     let mut index = 0usize;
@@ -299,6 +301,15 @@ pub fn parse_live_relay_args(
                 acl_rx_keepalive_ab = true;
                 index += 1;
             }
+            "--acl-in-depth-2-ab" => {
+                if acl_in_depth_2_ab {
+                    return Err(
+                        "--acl-in-depth-2-ab specified more than once".into(),
+                    );
+                }
+                acl_in_depth_2_ab = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -321,6 +332,12 @@ pub fn parse_live_relay_args(
         return Err(
             "--acl-rx-liveness-ab and --acl-rx-keepalive-ab are mutually exclusive"
                 .into(),
+        );
+    }
+
+    if acl_in_depth_2_ab && final_model.is_none() {
+        return Err(
+            "--acl-in-depth-2-ab requires --final-model".into(),
         );
     }
 
@@ -385,6 +402,7 @@ pub fn parse_live_relay_args(
         sanitize_rx_flow_control_ab,
         acl_rx_liveness_ab,
         acl_rx_keepalive_ab,
+        acl_in_depth_2_ab,
         final_model,
     })
 }
@@ -1078,6 +1096,11 @@ pub fn execute_final_model(
     let mut hci_config = HciStackConfig::default();
     hci_config.sanitize_rx_flow_control_on_attach =
         config.sanitize_rx_flow_control_ab;
+    hci_config.acl_rx_read_depth = if config.acl_in_depth_2_ab {
+        2
+    } else {
+        1
+    };
     let stack = spawn_be200_hci_stack(hci_config);
     let mut driver = match CurrentPathControlDriver::new_with_review_profile(
         plan,
@@ -1560,6 +1583,7 @@ mod tests {
         assert!(!config.sanitize_rx_flow_control_ab);
         assert!(!config.acl_rx_liveness_ab);
         assert!(!config.acl_rx_keepalive_ab);
+        assert!(!config.acl_in_depth_2_ab);
         assert_eq!(config.final_model, None);
     }
 
@@ -1650,6 +1674,32 @@ mod tests {
         let config = parse_live_relay_args(&value).unwrap();
         assert_eq!(config.final_model, Some(FinalModel::AclOnly));
         assert!(config.sanitize_rx_flow_control_ab);
+    }
+
+    #[test]
+    fn parser_allows_acl_in_depth_two_with_final_model() {
+        let mut value = args();
+        let seconds = value
+            .iter()
+            .position(|arg| arg == "--seconds")
+            .unwrap();
+        value.drain(seconds..=seconds + 1);
+        value.push("--final-model".into());
+        value.push("acl-only".into());
+        value.push("--acl-in-depth-2-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert_eq!(config.final_model, Some(FinalModel::AclOnly));
+        assert!(config.acl_in_depth_2_ab);
+    }
+
+    #[test]
+    fn parser_rejects_acl_in_depth_two_without_final_model() {
+        let mut value = args();
+        value.push("--acl-in-depth-2-ab".into());
+
+        let error = parse_live_relay_args(&value).unwrap_err();
+        assert!(error.contains("requires --final-model"));
     }
 
     #[test]

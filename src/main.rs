@@ -75,6 +75,10 @@ fn main() {
                     }
                 );
                 println!(
+                    "USB ACL Bulk-IN outstanding read depth: {}",
+                    if config.acl_in_depth_2_ab { 2 } else { 1 }
+                );
+                println!(
                     "Probe policy: pre-run + every 5 s Read ASE on BOTH ears; ACL runtime snapshot at every checkpoint."
                 );
 
