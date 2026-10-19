@@ -21,6 +21,7 @@ use crate::{
     },
     plane::{
         l1_control::{
+            discovery::audio::parse_ase_status_compat,
             engine::{
                 facade::ControlPlane,
                 machine::ControlTimer,
@@ -44,7 +45,10 @@ use crate::{
                 credit::AclCreditSnapshot,
                 security::StoredLeKeyMaterial,
             },
-            gatt::transaction::{GattReport, GattValueEvent},
+            gatt::transaction::{
+                GattOperation, GattReport, GattRequest, GattResult,
+                GattValueEvent,
+            },
             host::stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
@@ -81,6 +85,9 @@ const AUDIT_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_CLEANUP_GATT_TRACE: usize = 16;
 const MAX_CLEANUP_GATT_VALUE_PREFIX: usize = 24;
+const RELEASE_TIMEOUT_READBACK_TIMEOUT: Duration = Duration::from_secs(2);
+const RELEASE_TIMEOUT_READBACK_LEFT_ID: u64 = u64::MAX - 1;
+const RELEASE_TIMEOUT_READBACK_RIGHT_ID: u64 = u64::MAX - 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentPathConfig {
@@ -235,6 +242,29 @@ enum CleanupAseAclAuditResult {
 struct CleanupAseAclAudit {
     side: AudioSide,
     result: CleanupAseAclAuditResult,
+}
+
+#[derive(Debug)]
+enum CleanupAseReadbackResult {
+    Status {
+        ase_id: u8,
+        state: u8,
+    },
+    ValueParseFailed {
+        value: Vec<u8>,
+        error: String,
+    },
+    GattFailed(String),
+    TimedOut,
+}
+
+#[derive(Debug)]
+struct CleanupAseReadbackDiagnostic {
+    side: AudioSide,
+    connection_handle: u16,
+    attribute_handle: u16,
+    result: CleanupAseReadbackResult,
+    post_probe_acl: CleanupAseAclAuditResult,
 }
 
 impl TimerBook {
@@ -458,6 +488,33 @@ fn capture_cleanup_gatt_report(
     };
 
     match report {
+        GattReport::Complete {
+            request_id,
+            connection,
+            result,
+        } => {
+            push_cleanup_gatt_trace(
+                trace,
+                format!(
+                    "complete conn=0x{:04x}/g{} request={} result={result:?}",
+                    connection.connection_handle,
+                    connection.generation,
+                    request_id,
+                ),
+            );
+        }
+        GattReport::Failed(failure) => {
+            push_cleanup_gatt_trace(
+                trace,
+                format!(
+                    "failed conn=0x{:04x}/g{} request={} kind={:?}",
+                    failure.connection.connection_handle,
+                    failure.connection.generation,
+                    failure.request_id,
+                    failure.kind,
+                ),
+            );
+        }
         GattReport::Value(event) => {
             let (kind, connection, attribute_handle, value) = match event {
                 GattValueEvent::Notification {
@@ -518,6 +575,144 @@ fn capture_cleanup_gatt_report(
     }
 }
 
+fn release_timeout_readback_request_id(side: AudioSide) -> u64 {
+    match side {
+        AudioSide::Left => RELEASE_TIMEOUT_READBACK_LEFT_ID,
+        AudioSide::Right => RELEASE_TIMEOUT_READBACK_RIGHT_ID,
+    }
+}
+
+fn probe_release_timeout_ase_readback(
+    stack: &HciStack,
+    control: &mut ControlPlane,
+    condition: &mut Condition,
+    scope: ConditionScope,
+    timers: &mut TimerBook,
+    binding: &mut Option<StreamBinding>,
+    cleanup_gatt_trace: &mut Vec<String>,
+    side: AudioSide,
+) -> Result<(u16, u16, CleanupAseReadbackResult), String> {
+    let prepared = control
+        .prepared_ase_for_review(side)
+        .ok_or_else(|| {
+            format!("Release timeout readback has no prepared ASE for {side:?}")
+        })?;
+    let connection = prepared.sink.connection;
+    let attribute_handle = prepared.sink.ase_value_handle;
+    let request_id = release_timeout_readback_request_id(side);
+
+    stack
+        .control()
+        .try_begin_gatt(GattRequest {
+            request_id,
+            connection,
+            operation: GattOperation::ReadValue {
+                attribute_handle,
+            },
+        })
+        .map_err(|error| {
+            format!(
+                "Release timeout ASE readback query rejected for {side:?}: {error:?}"
+            )
+        })?;
+
+    let deadline = Instant::now() + RELEASE_TIMEOUT_READBACK_TIMEOUT;
+    let mut deferred = Vec::new();
+
+    let result = loop {
+        match stack.reports().try_recv() {
+            Ok(HciReport::Gatt(GattReport::Complete {
+                request_id: actual_request_id,
+                connection: actual_connection,
+                result:
+                    GattResult::Value {
+                        attribute_handle: actual_handle,
+                        value,
+                    },
+            })) if actual_request_id == request_id
+                && actual_connection == connection
+                && actual_handle == attribute_handle =>
+            {
+                break match parse_ase_status_compat(&value) {
+                    Ok(status) => CleanupAseReadbackResult::Status {
+                        ase_id: status.ase_id,
+                        state: status.state.0,
+                    },
+                    Err(error) => {
+                        CleanupAseReadbackResult::ValueParseFailed {
+                            value,
+                            error: format!("{error:?}"),
+                        }
+                    }
+                };
+            }
+            Ok(HciReport::Gatt(GattReport::Complete {
+                request_id: actual_request_id,
+                connection: actual_connection,
+                result,
+            })) if actual_request_id == request_id
+                && actual_connection == connection =>
+            {
+                break CleanupAseReadbackResult::GattFailed(format!(
+                    "unexpected result: {result:?}"
+                ));
+            }
+            Ok(HciReport::Gatt(GattReport::Failed(failure)))
+                if failure.request_id == request_id
+                    && failure.connection == connection =>
+            {
+                break CleanupAseReadbackResult::GattFailed(format!(
+                    "{:?}",
+                    failure.kind,
+                ));
+            }
+            Ok(HciReport::Gatt(GattReport::BearerPoisoned {
+                connection: actual_connection,
+                request_id: actual_request_id,
+            })) if actual_request_id == request_id
+                && actual_connection == connection =>
+            {
+                break CleanupAseReadbackResult::GattFailed(
+                    "bearer poisoned".into(),
+                );
+            }
+            Ok(report) => {
+                capture_cleanup_gatt_report(
+                    &report,
+                    cleanup_gatt_trace,
+                );
+                deferred.push(report);
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    break CleanupAseReadbackResult::TimedOut;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err("HCI report lane disconnected".into())
+            }
+        }
+    };
+
+    // Preserve reliable report ordering without letting a late Release
+    // notification trigger teardown actions while the diagnostic read is
+    // still in flight.
+    for report in deferred {
+        process_report(
+            stack,
+            control,
+            condition,
+            scope,
+            timers,
+            binding,
+            report,
+        )?;
+    }
+
+    Ok((connection.connection_handle, attribute_handle, result))
+}
+
 fn drive_until(
     stack: &HciStack,
     control: &mut ControlPlane,
@@ -526,6 +721,7 @@ fn drive_until(
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
     cleanup_acl_audits: &mut Vec<CleanupAseAclAudit>,
+    cleanup_ase_readbacks: &mut Vec<CleanupAseReadbackDiagnostic>,
     cleanup_gatt_trace: &mut Vec<String>,
     target: DriveTarget,
 ) -> Result<(), String> {
@@ -585,6 +781,39 @@ fn drive_until(
                     side,
                     result,
                 });
+
+                let (
+                    connection_handle,
+                    attribute_handle,
+                    readback_result,
+                ) = probe_release_timeout_ase_readback(
+                    stack,
+                    control,
+                    condition,
+                    scope,
+                    timers,
+                    binding,
+                    cleanup_gatt_trace,
+                    side,
+                )?;
+                let post_probe_acl = read_acl_audit_before_cleanup(
+                    stack,
+                    control,
+                    condition,
+                    scope,
+                    timers,
+                    binding,
+                    cleanup_gatt_trace,
+                )?;
+                cleanup_ase_readbacks.push(
+                    CleanupAseReadbackDiagnostic {
+                        side,
+                        connection_handle,
+                        attribute_handle,
+                        result: readback_result,
+                        post_probe_acl,
+                    },
+                );
             }
 
             process_timer(
@@ -762,6 +991,78 @@ fn format_cleanup_acl_audits(
     format!("{baseline_text} | {entries}")
 }
 
+fn format_cleanup_ase_readbacks(
+    readbacks: &[CleanupAseReadbackDiagnostic],
+    pre_audits: &[CleanupAseAclAudit],
+) -> String {
+    readbacks
+        .iter()
+        .map(|readback| {
+            let result = match &readback.result {
+                CleanupAseReadbackResult::Status {
+                    ase_id,
+                    state,
+                } => format!(
+                    "status(ase_id={ase_id}, state=0x{state:02x})"
+                ),
+                CleanupAseReadbackResult::ValueParseFailed {
+                    value,
+                    error,
+                } => format!(
+                    "parse-failed(value={value:02x?}, error={error})"
+                ),
+                CleanupAseReadbackResult::GattFailed(error) => {
+                    format!("gatt-failed({error})")
+                }
+                CleanupAseReadbackResult::TimedOut => {
+                    "timeout".to_string()
+                }
+            };
+
+            let probe_delta = pre_audits
+                .iter()
+                .find(|audit| audit.side == readback.side)
+                .and_then(|audit| match (
+                    &audit.result,
+                    &readback.post_probe_acl,
+                ) {
+                    (
+                        CleanupAseAclAuditResult::Snapshot(before),
+                        CleanupAseAclAuditResult::Snapshot(after),
+                    ) => Some(format!(
+                        " probe_delta_host_submit={} probe_delta_ncp_complete={} probe_delta_mailbox={} probe_delta_usb_submit={} probe_delta_usb_complete={} probe_delta_acl_rx={} probe_delta_att_pdus={}",
+                        after.audit_total_submitted
+                            .saturating_sub(before.audit_total_submitted),
+                        after.audit_total_completed
+                            .saturating_sub(before.audit_total_completed),
+                        after.transport_mailbox_enqueued
+                            .saturating_sub(before.transport_mailbox_enqueued),
+                        after.transport_usb_submitted
+                            .saturating_sub(before.transport_usb_submitted),
+                        after.transport_usb_completed
+                            .saturating_sub(before.transport_usb_completed),
+                        after.controller_acl_rx_packets
+                            .saturating_sub(before.controller_acl_rx_packets),
+                        after.att_pdus_drained
+                            .saturating_sub(before.att_pdus_drained),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            format!(
+                "{:?}: conn=0x{:04x} ase_handle=0x{:04x} result={}{}",
+                readback.side,
+                readback.connection_handle,
+                readback.attribute_handle,
+                result,
+                probe_delta,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn read_iso_audit(
     stack: &HciStack,
     control: &mut ControlPlane,
@@ -855,6 +1156,7 @@ pub(crate) struct CurrentPathControlDriver {
     binding: Option<StreamBinding>,
     cleanup_acl_baseline: Option<CleanupAseAclAuditResult>,
     cleanup_acl_audits: Vec<CleanupAseAclAudit>,
+    cleanup_ase_readbacks: Vec<CleanupAseReadbackDiagnostic>,
     cleanup_gatt_trace: Vec<String>,
 }
 
@@ -887,6 +1189,7 @@ impl CurrentPathControlDriver {
             binding: None,
             cleanup_acl_baseline: None,
             cleanup_acl_audits: Vec::new(),
+            cleanup_ase_readbacks: Vec::new(),
             cleanup_gatt_trace: Vec::new(),
         })
     }
@@ -919,6 +1222,7 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_ase_readbacks,
             &mut self.cleanup_gatt_trace,
             DriveTarget::StreamReadyUnbound,
         )?;
@@ -951,6 +1255,7 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_ase_readbacks,
             &mut self.cleanup_gatt_trace,
             DriveTarget::StreamBound,
         )?;
@@ -1050,6 +1355,7 @@ impl CurrentPathControlDriver {
         group_release_ab: bool,
     ) -> Result<(), String> {
         self.cleanup_acl_audits.clear();
+        self.cleanup_ase_readbacks.clear();
         self.cleanup_gatt_trace.clear();
 
         let mut baseline_trace = Vec::new();
@@ -1101,6 +1407,7 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_ase_readbacks,
             &mut self.cleanup_gatt_trace,
             DriveTarget::Idle,
         );
@@ -1117,8 +1424,16 @@ impl CurrentPathControlDriver {
                 } else {
                     self.cleanup_gatt_trace.join(" || ")
                 };
+                let readbacks = if self.cleanup_ase_readbacks.is_empty() {
+                    "none".to_string()
+                } else {
+                    format_cleanup_ase_readbacks(
+                        &self.cleanup_ase_readbacks,
+                        &self.cleanup_acl_audits,
+                    )
+                };
                 Err(format!(
-                    "{error}; pre-cleanup ACL audits: {}; teardown GATT RX trace: {gatt_trace}",
+                    "{error}; pre-cleanup ACL audits: {}; release-timeout ASE readback: {readbacks}; teardown GATT RX trace: {gatt_trace}",
                     format_cleanup_acl_audits(
                         baseline,
                         &self.cleanup_acl_audits,
@@ -1329,6 +1644,58 @@ mod tests {
             "notification conn=0x0801/g9 handle=0x0046 len=4"
         ));
         assert!(trace[0].contains("prefix=[01, 02, 03, 04]"));
+    }
+
+
+    #[test]
+    fn release_timeout_readback_format_includes_status_and_probe_delta() {
+        let before = AclCreditSnapshot {
+            bumble_pending: 0,
+            audit_in_flight: 0,
+            audit_limit: Some(6),
+            controller_acl_rx_packets: 10,
+            att_pdus_drained: 10,
+            gatt_value_events: 3,
+            audit_total_submitted: 20,
+            audit_total_completed: 20,
+            audit_total_retired: 0,
+            transport_mailbox_enqueued: 20,
+            transport_usb_submitted: 20,
+            transport_usb_completed: 20,
+            recent_att_writes: [None; 4],
+        };
+        let after = AclCreditSnapshot {
+            audit_total_submitted: 21,
+            audit_total_completed: 21,
+            transport_mailbox_enqueued: 21,
+            transport_usb_submitted: 21,
+            transport_usb_completed: 21,
+            controller_acl_rx_packets: 11,
+            att_pdus_drained: 11,
+            ..before
+        };
+        let text = format_cleanup_ase_readbacks(
+            &[CleanupAseReadbackDiagnostic {
+                side: AudioSide::Right,
+                connection_handle: 0x0800,
+                attribute_handle: 0x0046,
+                result: CleanupAseReadbackResult::Status {
+                    ase_id: 1,
+                    state: 0x06,
+                },
+                post_probe_acl: CleanupAseAclAuditResult::Snapshot(after),
+            }],
+            &[CleanupAseAclAudit {
+                side: AudioSide::Right,
+                result: CleanupAseAclAuditResult::Snapshot(before),
+            }],
+        );
+
+        assert!(text.contains(
+            "Right: conn=0x0800 ase_handle=0x0046 result=status(ase_id=1, state=0x06)"
+        ));
+        assert!(text.contains("probe_delta_host_submit=1"));
+        assert!(text.contains("probe_delta_acl_rx=1"));
     }
 
 }

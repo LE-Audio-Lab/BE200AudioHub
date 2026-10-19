@@ -31,6 +31,13 @@ impl ControlPlane {
         self.machine.condition_update()
     }
 
+    pub(crate) fn prepared_ase_for_review(
+        &self,
+        side: crate::plane::l1_control::interface::stream::AudioSide,
+    ) -> Option<crate::plane::l1_control::ascs::operation::PreparedAseControl> {
+        self.machine.prepared_ase(side).cloned()
+    }
+
     /// Review/HIL-only A/B entry point. Core StopControl intentionally
     /// remains on the serial product path until HIL evidence promotes this.
     pub(crate) fn begin_group_release_teardown_for_review(
