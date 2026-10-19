@@ -5,7 +5,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
         Arc,
     },
@@ -262,8 +262,125 @@ pub struct LivePcmWorkerExit {
     pub bridge: MediaBridgeTelemetrySnapshot,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LivePcmWorkerSnapshot {
+    pub pcm: LivePcmStats,
+    pub bridge_submitted_intervals: u64,
+    pub bridge_dropped_backpressure_intervals: u64,
+    pub bridge_fallback_intervals: u64,
+    pub bridge_skipped_intervals: u64,
+    pub bridge_stale_frames_dropped: u64,
+    pub pcm_fill_frames: usize,
+}
+
+#[derive(Default)]
+struct LivePcmWorkerTelemetry {
+    intervals_consumed: AtomicU64,
+    source_intervals_skipped: AtomicU64,
+    keepalive_intervals: AtomicU64,
+    pcm_frames_read: AtomicU64,
+    pcm_underflow_frames: AtomicU64,
+    startup_trim_frames: AtomicU64,
+    gradual_drift_trim_frames: AtomicU64,
+    emergency_drift_trim_frames: AtomicU64,
+    bridge_submitted_intervals: AtomicU64,
+    bridge_dropped_backpressure_intervals: AtomicU64,
+    bridge_fallback_intervals: AtomicU64,
+    bridge_skipped_intervals: AtomicU64,
+    bridge_stale_frames_dropped: AtomicU64,
+    pcm_fill_frames: AtomicUsize,
+}
+
+impl LivePcmWorkerTelemetry {
+    fn publish(&self, runtime: &LivePcmIsoRuntime) {
+        let pcm = runtime.stats();
+        let bridge = runtime.bridge_telemetry();
+
+        self.intervals_consumed
+            .store(pcm.intervals_consumed, Ordering::Relaxed);
+        self.source_intervals_skipped
+            .store(pcm.source_intervals_skipped, Ordering::Relaxed);
+        self.keepalive_intervals
+            .store(pcm.keepalive_intervals, Ordering::Relaxed);
+        self.pcm_frames_read
+            .store(pcm.pcm_frames_read, Ordering::Relaxed);
+        self.pcm_underflow_frames
+            .store(pcm.pcm_underflow_frames, Ordering::Relaxed);
+        self.startup_trim_frames
+            .store(pcm.startup_trim_frames, Ordering::Relaxed);
+        self.gradual_drift_trim_frames
+            .store(pcm.gradual_drift_trim_frames, Ordering::Relaxed);
+        self.emergency_drift_trim_frames
+            .store(pcm.emergency_drift_trim_frames, Ordering::Relaxed);
+        self.bridge_submitted_intervals
+            .store(bridge.submitted_intervals, Ordering::Relaxed);
+        self.bridge_dropped_backpressure_intervals.store(
+            bridge.dropped_backpressure_intervals,
+            Ordering::Relaxed,
+        );
+        self.bridge_fallback_intervals
+            .store(bridge.fallback_intervals, Ordering::Relaxed);
+        self.bridge_skipped_intervals
+            .store(bridge.skipped_intervals, Ordering::Relaxed);
+        self.bridge_stale_frames_dropped
+            .store(bridge.stale_frames_dropped, Ordering::Relaxed);
+        self.pcm_fill_frames
+            .store(runtime.pcm_fill_frames(), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LivePcmWorkerSnapshot {
+        LivePcmWorkerSnapshot {
+            pcm: LivePcmStats {
+                intervals_consumed: self
+                    .intervals_consumed
+                    .load(Ordering::Relaxed),
+                source_intervals_skipped: self
+                    .source_intervals_skipped
+                    .load(Ordering::Relaxed),
+                keepalive_intervals: self
+                    .keepalive_intervals
+                    .load(Ordering::Relaxed),
+                pcm_frames_read: self
+                    .pcm_frames_read
+                    .load(Ordering::Relaxed),
+                pcm_underflow_frames: self
+                    .pcm_underflow_frames
+                    .load(Ordering::Relaxed),
+                startup_trim_frames: self
+                    .startup_trim_frames
+                    .load(Ordering::Relaxed),
+                gradual_drift_trim_frames: self
+                    .gradual_drift_trim_frames
+                    .load(Ordering::Relaxed),
+                emergency_drift_trim_frames: self
+                    .emergency_drift_trim_frames
+                    .load(Ordering::Relaxed),
+            },
+            bridge_submitted_intervals: self
+                .bridge_submitted_intervals
+                .load(Ordering::Relaxed),
+            bridge_dropped_backpressure_intervals: self
+                .bridge_dropped_backpressure_intervals
+                .load(Ordering::Relaxed),
+            bridge_fallback_intervals: self
+                .bridge_fallback_intervals
+                .load(Ordering::Relaxed),
+            bridge_skipped_intervals: self
+                .bridge_skipped_intervals
+                .load(Ordering::Relaxed),
+            bridge_stale_frames_dropped: self
+                .bridge_stale_frames_dropped
+                .load(Ordering::Relaxed),
+            pcm_fill_frames: self
+                .pcm_fill_frames
+                .load(Ordering::Relaxed),
+        }
+    }
+}
+
 pub struct LivePcmIsoWorker {
     stop: Arc<AtomicBool>,
+    telemetry: Arc<LivePcmWorkerTelemetry>,
     join: Option<thread::JoinHandle<Result<LivePcmWorkerExit, LivePcmError>>>,
 }
 
@@ -275,6 +392,8 @@ impl LivePcmIsoWorker {
     ) -> Result<Self, LivePcmError> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let telemetry = Arc::new(LivePcmWorkerTelemetry::default());
+        let thread_telemetry = Arc::clone(&telemetry);
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
         let join = thread::Builder::new()
@@ -295,6 +414,7 @@ impl LivePcmIsoWorker {
                 };
 
                 runtime.arm_source();
+                thread_telemetry.publish(&runtime);
                 let _ = startup_tx.send(Ok(()));
 
                 while !thread_stop.load(Ordering::Acquire) {
@@ -315,11 +435,14 @@ impl LivePcmIsoWorker {
                                 thread::yield_now();
                             }
                         }
-                        LivePcmStep::Interval { .. } => {}
+                        LivePcmStep::Interval { .. } => {
+                            thread_telemetry.publish(&runtime);
+                        }
                     }
                 }
 
                 runtime.disable_source();
+                thread_telemetry.publish(&runtime);
                 Ok(LivePcmWorkerExit {
                     pcm: runtime.stats(),
                     bridge: runtime.bridge_telemetry(),
@@ -330,6 +453,7 @@ impl LivePcmIsoWorker {
         match startup_rx.recv() {
             Ok(Ok(())) => Ok(Self {
                 stop,
+                telemetry,
                 join: Some(join),
             }),
             Ok(Err(error)) => {
@@ -341,6 +465,10 @@ impl LivePcmIsoWorker {
                 Err(LivePcmError::StartupChannelClosed)
             }
         }
+    }
+
+    pub fn snapshot(&self) -> LivePcmWorkerSnapshot {
+        self.telemetry.snapshot()
     }
 
     pub fn shutdown(
@@ -470,6 +598,35 @@ mod tests {
         assert_eq!(group.left.len(), 100);
         assert_eq!(group.right.len(), 100);
         assert_eq!(runtime.pcm_fill_frames(), 480);
+    }
+
+    #[test]
+    fn worker_telemetry_snapshot_mirrors_runtime_without_owning_time() {
+        let (boundary, producer) = PcmRelayBoundary::relay_defaults();
+        let (control, _ingress, _reports, _ports) =
+            hci_mailbox_with_iso(1, 1, 1, 4);
+        let mut runtime = LivePcmIsoRuntime::new(
+            binding(),
+            boundary,
+            EPOCH_US,
+            control.logical_iso_tx(),
+        )
+        .unwrap();
+        runtime.arm_source();
+
+        let frames = vec![[0.2, -0.2]; 960];
+        assert_eq!(producer.push(&frames, false).written_frames, 960);
+        runtime.on_wake(EPOCH_US).unwrap();
+
+        let telemetry = LivePcmWorkerTelemetry::default();
+        telemetry.publish(&runtime);
+        let snapshot = telemetry.snapshot();
+
+        assert_eq!(snapshot.pcm.intervals_consumed, 1);
+        assert_eq!(snapshot.pcm.pcm_frames_read, 480);
+        assert_eq!(snapshot.bridge_submitted_intervals, 1);
+        assert_eq!(snapshot.bridge_dropped_backpressure_intervals, 0);
+        assert_eq!(snapshot.pcm_fill_frames, 480);
     }
 
     #[test]

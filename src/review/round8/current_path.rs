@@ -28,7 +28,7 @@ use crate::{
             },
             interface::{
                 command::ControlIntent,
-                condition::ControlState,
+                condition::{ControlConditionUpdate, ControlState},
                 dispatch::{
                     dispatch_control_action, ControlDispatchEffect,
                 },
@@ -679,6 +679,10 @@ impl CurrentPathControlDriver {
         }
 
         Ok(binding)
+    }
+
+    pub(crate) fn control_status(&self) -> ControlConditionUpdate {
+        self.condition.control_status()
     }
 
     pub(crate) fn iso_audit(

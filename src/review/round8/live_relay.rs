@@ -28,7 +28,10 @@ use crate::{
             iso::credit::IsoCreditSnapshot,
         },
         l1_media::{
-            live::{LivePcmIsoWorker, LivePcmWorkerExit},
+            live::{
+                LivePcmIsoWorker, LivePcmWorkerExit,
+                LivePcmWorkerSnapshot,
+            },
             pcm::relay_boundary::PcmRelayBoundary,
             source::process_loopback::{
                 ProcessLoopbackSource, ProcessLoopbackSourceStats,
@@ -50,7 +53,7 @@ const DEFAULT_LIVE_SECONDS: u64 = 10;
 const MAX_LIVE_SECONDS: u64 = 120;
 const DEFAULT_LONGEVITY_SECONDS: u64 = 300;
 const MAX_LONGEVITY_SECONDS: u64 = 86_400;
-const LONGEVITY_HEARTBEAT_SECONDS: u64 = 30;
+const LONGEVITY_HEARTBEAT_STEPS: u64 = 10;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,45 +211,186 @@ pub fn parse_live_relay_args(
     })
 }
 
+fn percentage(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64 * 100.0
+    }
+}
+
+fn iso_host_gap(
+    before: &IsoCreditSnapshot,
+    after: &IsoCreditSnapshot,
+) -> i128 {
+    let submitted = after
+        .total_submitted
+        .saturating_sub(before.total_submitted) as i128;
+    let completed = after
+        .total_completed
+        .saturating_sub(before.total_completed) as i128;
+    let in_flight_delta =
+        after.in_flight as i128 - before.in_flight as i128;
+    submitted - completed - in_flight_delta
+}
+
+fn print_longevity_snapshot(
+    step: u64,
+    duration: Duration,
+    source_before: ProcessLoopbackSourceStats,
+    source_after: ProcessLoopbackSourceStats,
+    media_before: LivePcmWorkerSnapshot,
+    media_after: LivePcmWorkerSnapshot,
+    iso_before: &IsoCreditSnapshot,
+    iso_after: &IsoCreditSnapshot,
+    audit_origin: &IsoCreditSnapshot,
+    control: crate::plane::l1_control::interface::condition::ControlConditionUpdate,
+) {
+    let percent = step as f64
+        / LONGEVITY_HEARTBEAT_STEPS as f64
+        * 100.0;
+    let elapsed_seconds = duration.as_secs_f64()
+        * step as f64
+        / LONGEVITY_HEARTBEAT_STEPS as f64;
+
+    let source_captured = source_after
+        .captured_frames
+        .saturating_sub(source_before.captured_frames);
+    let source_dropped = source_after
+        .dropped_frames
+        .saturating_sub(source_before.dropped_frames);
+
+    let media_intervals = media_after
+        .pcm
+        .intervals_consumed
+        .saturating_sub(media_before.pcm.intervals_consumed);
+    let underflow_frames = media_after
+        .pcm
+        .pcm_underflow_frames
+        .saturating_sub(media_before.pcm.pcm_underflow_frames);
+    let media_requested_frames =
+        media_intervals.saturating_mul(480);
+
+    let bridge_submitted = media_after
+        .bridge_submitted_intervals
+        .saturating_sub(media_before.bridge_submitted_intervals);
+    let bridge_dropped = media_after
+        .bridge_dropped_backpressure_intervals
+        .saturating_sub(
+            media_before.bridge_dropped_backpressure_intervals,
+        );
+    let bridge_attempts =
+        bridge_submitted.saturating_add(bridge_dropped);
+
+    let iso_submitted = iso_after
+        .total_submitted
+        .saturating_sub(iso_before.total_submitted);
+    let iso_gap = iso_host_gap(iso_before, iso_after);
+    let iso_gap_rate = if iso_submitted == 0 {
+        0.0
+    } else {
+        iso_gap as f64 / iso_submitted as f64 * 100.0
+    };
+
+    let total_submitted = iso_after
+        .total_submitted
+        .saturating_sub(audit_origin.total_submitted);
+    let total_completed = iso_after
+        .total_completed
+        .saturating_sub(audit_origin.total_completed);
+
+    println!(
+        "[longevity] elapsed {:.0}/{:.0} s ({:.1}%)",
+        elapsed_seconds,
+        duration.as_secs_f64(),
+        percent,
+    );
+    println!(
+        "  state: control={:?} stream={:?} capture_frames={} media_intervals={} pcm_fill={} hci_submitted={} hci_completed={} hci_in_flight={}",
+        control.state,
+        control.stream_id,
+        source_after.captured_frames,
+        media_after.pcm.intervals_consumed,
+        media_after.pcm_fill_frames,
+        total_submitted,
+        total_completed,
+        iso_after.in_flight,
+    );
+    println!(
+        "  loss[{}-{}%]: pcm_drop={}/{} ({:.5}%) underflow={}/{} ({:.5}%) bridge_drop={}/{} ({:.5}%) iso_host_gap={:+}/{} ({:+.5}%)",
+        (step - 1) * 10,
+        step * 10,
+        source_dropped,
+        source_captured,
+        percentage(source_dropped, source_captured),
+        underflow_frames,
+        media_requested_frames,
+        percentage(underflow_frames, media_requested_frames),
+        bridge_dropped,
+        bridge_attempts,
+        percentage(bridge_dropped, bridge_attempts),
+        iso_gap,
+        iso_submitted,
+        iso_gap_rate,
+    );
+}
+
 fn wait_live_duration(
     duration: Duration,
     longevity_test: bool,
-) {
+    source: &ProcessLoopbackSource,
+    media: &LivePcmIsoWorker,
+    stack: &HciStack,
+    driver: &mut CurrentPathControlDriver,
+    audit_origin: &IsoCreditSnapshot,
+) -> Result<(), String> {
     if !longevity_test {
         thread::sleep(duration);
-        return;
+        return Ok(());
     }
 
     let started = Instant::now();
-    let heartbeat = Duration::from_secs(
-        LONGEVITY_HEARTBEAT_SECONDS,
-    );
+    let mut source_before = source.stats();
+    let mut media_before = media.snapshot();
+    let mut iso_before = audit_origin.clone();
 
-    loop {
+    for step in 1..=LONGEVITY_HEARTBEAT_STEPS {
+        let target_nanos = duration
+            .as_nanos()
+            .saturating_mul(step as u128)
+            / LONGEVITY_HEARTBEAT_STEPS as u128;
+        let target = Duration::from_nanos(
+            u64::try_from(target_nanos).unwrap_or(u64::MAX),
+        );
         let elapsed = started.elapsed();
-        if elapsed >= duration {
-            break;
+        if elapsed < target {
+            thread::sleep(target - elapsed);
         }
 
-        let remaining = duration.saturating_sub(elapsed);
-        thread::sleep(remaining.min(heartbeat));
+        let source_after = source.stats();
+        let media_after = media.snapshot();
+        let iso_after = driver.iso_audit(stack)?;
+        let control = driver.control_status();
 
-        let elapsed = started.elapsed().min(duration);
-        let elapsed_seconds = elapsed.as_secs_f64();
-        let total_seconds = duration.as_secs_f64();
-        let percent = if total_seconds > 0.0 {
-            elapsed_seconds / total_seconds * 100.0
-        } else {
-            100.0
-        };
-
-        println!(
-            "[longevity] elapsed {:.0}/{:.0} s ({:.1}%)",
-            elapsed_seconds,
-            total_seconds,
-            percent,
+        print_longevity_snapshot(
+            step,
+            duration,
+            source_before,
+            source_after,
+            media_before,
+            media_after,
+            &iso_before,
+            &iso_after,
+            audit_origin,
+            control,
         );
+
+        source_before = source_after;
+        media_before = media_after;
+        iso_before = iso_after;
     }
+
+    Ok(())
 }
 
 fn run_live_media(
@@ -289,7 +433,15 @@ fn run_live_media(
             }
         };
 
-    wait_live_duration(duration, longevity_test);
+    let wait_result = wait_live_duration(
+        duration,
+        longevity_test,
+        &source,
+        &media,
+        stack,
+        &mut driver,
+        &audit_before,
+    );
 
     let source_result = source.shutdown();
     let media_result = media.shutdown();
@@ -308,6 +460,7 @@ fn run_live_media(
     })?;
     let audit_after = audit_after_result?;
     stop_result?;
+    wait_result?;
 
     Ok(LiveRelayMediaResult {
         source: source_stats,
@@ -451,6 +604,29 @@ mod tests {
         let config = parse_live_relay_args(&value).unwrap();
         assert!(config.longevity_test);
         assert_eq!(config.live_duration, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn iso_host_gap_conserves_submitted_completed_and_in_flight() {
+        let before = IsoCreditSnapshot {
+            total_submitted: 100,
+            total_completed: 98,
+            in_flight: 2,
+            ..IsoCreditSnapshot::default()
+        };
+        let after = IsoCreditSnapshot {
+            total_submitted: 160,
+            total_completed: 157,
+            in_flight: 3,
+            ..IsoCreditSnapshot::default()
+        };
+        assert_eq!(iso_host_gap(&before, &after), 0);
+    }
+
+    #[test]
+    fn percentage_handles_zero_denominator() {
+        assert_eq!(percentage(0, 0), 0.0);
+        assert_eq!(percentage(1, 4), 25.0);
     }
 
     #[test]
