@@ -1532,6 +1532,62 @@
         )
     }
 
+    fn drive_graceful_release_gate(
+        machine: &mut ControlMachine,
+        side: AudioSide,
+        actions: Vec<ControlAction>,
+    ) -> Vec<ControlAction> {
+        use crate::plane::l1_hci::gatt::transaction::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let write = only_begin_gatt(&actions);
+        assert!(matches!(
+            write.operation,
+            GattOperation::WriteRequest {
+                attribute_handle: 0x0043,
+                ..
+            }
+        ));
+
+        let _ = complete_gatt(
+            machine,
+            &write,
+            GattResult::WriteComplete {
+                attribute_handle: 0x0043,
+                with_response: true,
+            },
+        );
+
+        assert!(machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0043,
+                        value: release_cp_success_bytes(machine, side),
+                    },
+                ),
+            ))
+            .unwrap()
+            .is_empty());
+
+        machine
+            .on_hci_report(&HciReport::Gatt(
+                GattReport::Value(
+                    GattValueEvent::Notification {
+                        connection: write.connection,
+                        attribute_handle: 0x0046,
+                        value: vec![
+                            machine.planned_sink(side).unwrap().ase_id,
+                            AseState::RELEASING.0,
+                        ],
+                    },
+                ),
+            ))
+            .unwrap()
+    }
+
     #[test]
     fn create_cis_success_uses_only_semantic_cis_refs() {
         let mut machine = drive_to_enabled();
@@ -2449,7 +2505,7 @@
             ControlAction::RemoveCig { .. }
         )));
 
-        let actions = drive_rollback_release(
+        let actions = drive_graceful_release_gate(
             &mut machine,
             AudioSide::Right,
             actions,
@@ -2467,7 +2523,7 @@
             ControlAction::RemoveCig { .. }
         )));
 
-        let actions = drive_rollback_release(
+        let actions = drive_graceful_release_gate(
             &mut machine,
             AudioSide::Left,
             actions,

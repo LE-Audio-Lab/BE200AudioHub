@@ -5,9 +5,10 @@
 //! Failure rollback keeps the established fail-closed
 //! route -> path -> CIS -> ASE Release -> CIG -> ACL/privacy ordering.
 //! Normal Stop uses a distinct graceful policy:
-//! route -> ASE Release -> path -> CIS -> CIG -> ACL/privacy.
-//! This mirrors the product stop semantics used by the AOSP LE Audio client,
-//! where a Streaming ASE is released before its ISO path/CIS is torn down.
+//! route -> Release gate(RELEASING) -> path -> CIS -> CIG -> ACL/privacy.
+//! This mirrors the product stop semantics used by the AOSP LE Audio client:
+//! a Streaming ASE entering RELEASING is the pivot for ISO path/CIS teardown;
+//! terminal Idle/Codec Configured may follow after transport retirement.
 
 use super::*;
 
@@ -21,13 +22,26 @@ impl ControlMachine {
             .expect("rollback ASE release requires prepared control")
             .clone();
         let ase_id = prepared.sink.ase_id;
-        let mut machine = AseOperationMachine::new_with_states(
-            prepared,
-            AseOperation::Release(vec![ase_id]),
-            AseState::RELEASING,
-            AseState::IDLE,
-            self.next_gatt_request_id,
-        );
+        let operation = AseOperation::Release(vec![ase_id]);
+        let mut machine = if self.failure.is_none() {
+            // Graceful Stop must pivot on RELEASING while the ISO path/CIS
+            // are still live. Waiting for terminal IDLE here deadlocks peers
+            // that only finish Release after transport teardown.
+            AseOperationMachine::new_notification_gate(
+                prepared,
+                operation,
+                AseState::RELEASING,
+                self.next_gatt_request_id,
+            )
+        } else {
+            AseOperationMachine::new_with_states(
+                prepared,
+                operation,
+                AseState::RELEASING,
+                AseState::IDLE,
+                self.next_gatt_request_id,
+            )
+        };
         let action = match machine.start() {
             Ok(action) => action,
             Err(failure) => {
@@ -154,14 +168,26 @@ impl ControlMachine {
             AseOperationAction::Await
             | AseOperationAction::Ignored => Ok(actions),
             AseOperationAction::Complete(status) => {
-                if status.state != AseState::IDLE {
+                let valid = if self.failure.is_none() {
+                    status.state == AseState::RELEASING
+                } else {
+                    matches!(
+                        status.state,
+                        AseState::IDLE | AseState::CODEC_CONFIGURED
+                    )
+                };
+                if !valid {
                     self.rollback.cleanup_failures.push(
                         ControlCleanupFailure::AseRelease {
                             side,
                             failure:
                                 AseOperationFailure::ReadbackStateMismatch {
                                     ase_id: status.ase_id,
-                                    expected_state: AseState::IDLE.0,
+                                    expected_state: if self.failure.is_none() {
+                                        AseState::RELEASING.0
+                                    } else {
+                                        AseState::IDLE.0
+                                    },
                                     actual_state: status.state.0,
                                 },
                         },

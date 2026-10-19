@@ -360,3 +360,32 @@ other ASCS operations but treats Codec Configured as an additional valid
 terminal readback for Release. The HIL-3 failure itself was still a timeout
 before readback; this compatibility fix closes the adjacent caching gap before
 the next longevity run.
+
+
+### HIL-4 — graceful Release must pivot on RELEASING
+
+A second 300-second longevity run kept the live data plane healthy through the
+full window, but normal Stop again ended with dual `CleanupAse` timeouts.
+
+The previous HIL-3 fix corrected command ordering but still modeled Release as
+one synchronous operation that had to reach terminal Idle/Codec Configured
+before ISO path/CIS teardown. AOSP's LE Audio state machine does not do that.
+
+For a Streaming Sink ASE, AOSP uses:
+
+```text
+Release
+  -> ASE notification: RELEASING
+  -> Remove ISO data path
+  -> Disconnect CIS
+  -> terminal ASE state: Idle or cached Codec Configured
+```
+
+Therefore `RELEASING` is the graceful-stop transport teardown pivot, not the
+terminal completion of Release.
+
+BE200AudioHub now gives graceful Stop a notification-gated Release operation:
+ATT/Control-Point success plus an ASE RELEASING notification is sufficient to
+advance into ISO path/CIS cleanup. Other ASCS operations retain strict readback
+verification, and failure rollback keeps its existing terminal Release
+readback after transport retirement.
