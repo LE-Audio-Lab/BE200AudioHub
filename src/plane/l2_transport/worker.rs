@@ -400,6 +400,7 @@ mod tests {
         let tx = TransportTx {
             tx: raw_tx,
             cancel: CancellationToken::new(),
+            audit: Arc::new(TransportTxAudit::default()),
         };
         tx.try_send(HostPacket::Acl(vec![1])).unwrap();
         assert_eq!(
