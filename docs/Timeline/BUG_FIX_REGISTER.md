@@ -306,16 +306,23 @@ full Core/Lifecycle runtime                  NOT YET INTEGRATED
 
 See [Round7.md](./Round7.md) for the full chronology, claim boundary, HIL command and next-chat handoff point.
 
-## 12. Round 8 / Post-Round8 live relay + recovery
+## 12. Round 8 / Structural + live-relay baseline
 
 | ID | Symptom / wrong assumption | Root cause / correction | Verification / status |
 |---|---|---|---|
-| **R8R-01** | Windows Process Loopback setup reached B3P but `ActivateAudioInterfaceAsync` failed with `E_ILLEGAL_METHOD_CALL` | Hand-written completion handler did not expose `IAgileObject`; add agile COM QI support | **FIXED**; two consecutive 10 s live HIL PASS |
-| **R8R-02** | First 300 s longevity run reached 100% data window but normal Stop timed out releasing both ASEs | Normal Stop had inherited failure-rollback ordering. Split graceful route→Release→path→CIS→CIG from fail-closed failure rollback | **PARTIAL CORRECTION**; timeout persisted, leading to deeper state-machine diagnosis |
-| **R8R-03** | Even after Release moved before path/CIS, Stop still waited for terminal Idle/Codec Configured before transport teardown | AOSP uses ASE `RELEASING` as the pivot for Remove Data Path / Disconnect CIS | **FIXED MODEL** in `96cf90a5`; did not by itself eliminate 30 s timeout |
-| **R8R-04** | Release operation depended on ATT Write Response, and 30 s teardown showed `write_complete=false` on both ears | ASCS Control Point should use Write Without Response; map product ASCS ops to `GattOperation::WriteCommand`, while retaining semantic CP/ASE gates | **FIXED / reference-aligned** in `85300c88`; 30 s failure moved to `write_complete=true, cp_success=false, notified=None` |
-| **R8R-05** | `CleanupAse` timeout hid which Release gate actually stalled | Cleanup timer expired before the equally-budgeted inner GATT timer and erased transaction detail | **FIXED DIAGNOSTICS**; `AseOperationGateSnapshot` now preserves phase/pending/write/CP/ASE state |
-| **R8R-06** | 10%-heartbeat was suspected of causing teardown failure through active IsoTxAudit/report draining | 30 s **normal mode without longevity polling** reproduced the same Release failure | **EXONERATED**; observer path is not the root cause |
-| **R8R-07** | Local WriteCommand completion was initially tempting to treat as proof that ASCS Release reached the controller | Bumble L2CAP/ACL send can enqueue above controller credits; local GATT completion is not actual HCI submit proof | **OPEN DIAGNOSTIC**; `d1fb532c` + `084fa605` expose Bumble pending vs actual ACL in-flight. Next HIL pending |
-| **R8R-08** | Ctrl+C killed the only userspace Host while BE200/peer state survived; following runs repeatedly failed member visibility until BE200 was power-cycled | Resetless next-generation attach trusted an unknown controller state; userspace Host/controller ownership can split-brain after abnormal death | **CONFIRMED OPEN DEFECT**; implement graceful Ctrl+C + durable DIRTY/CLEAN ownership marker + conditional HCI Reset/reinit + supervisor |
-| **R8R-09** | Some 30 s live runs show isolated 480-frame PCM underflows although drop/bridge/ISO conservation remain clean | Negative drift / scheduling gap is not yet corrected; current drift guard primarily handles positive accumulation | **OPEN Wave-2**; separate from teardown failure |
+| **R8R-01** | Windows Process Loopback activation failed with `E_ILLEGAL_METHOD_CALL` | Hand-written completion handler did not expose `IAgileObject`; add agile COM QI support | **FIXED**; two consecutive 10 s live HIL PASS |
+| **R8R-02** | First 300 s longevity run reached 100% data window but normal Stop timed out releasing both ASEs | Normal Stop had inherited failure-rollback ordering. Split graceful route→Release→path→CIS→CIG from fail-closed failure rollback | **PARTIAL CORRECTION** in `742eb75c`; data window proven, teardown handed open to Round9 |
+| **R8R-03** | Release terminal readback was treated as IDLE-only | Peer may cache codec state after Release; accept terminal `CODEC_CONFIGURED` for Release as well | **FIXED** in `a48b2a54`; regression covered |
+| **R8R-04** | Long-run telemetry was too coarse to localize media/ISO degradation | Add ten equal longevity checkpoints and per-window PCM/bridge/ISO conservation snapshots | **ADDED** in `a11efdff`; observer causality investigated and exonerated in Round9 |
+
+## 13. Round 9 / Teardown + recovery + ACL boundary
+
+| ID | Symptom / wrong assumption | Root cause / correction | Verification / status |
+|---|---|---|---|
+| **R9R-01** | Ctrl+C killed the sole userspace Host while BE200/peer state survived; following launches repeatedly failed member visibility until BE200 power-cycle | Resetless next-generation attach trusted an unknown controller state; userspace Host/controller ownership can split-brain after abnormal death | **CONFIRMED OPEN DEFECT**; graceful Ctrl+C + durable DIRTY/CLEAN marker + conditional HCI Reset/reinit + supervisor required |
+| **R9R-02** | Graceful Stop waited for terminal Idle/Codec Configured before ISO path/CIS teardown | Reference choreography uses ASE `RELEASING` as the transport-teardown pivot | **FIXED MODEL** in `96cf90a5`; did not alone eliminate 30 s failure |
+| **R9R-03** | `CleanupAse` timeout hid which Release gate stalled | Cleanup timer expired before the equally-budgeted inner GATT timer and erased transaction detail | **FIXED DIAGNOSTICS**; `AseOperationGateSnapshot` preserves phase/pending/write/CP/ASE state |
+| **R9R-04** | 10%-heartbeat was suspected of causing teardown failure through active IsoTxAudit/report draining | 30 s **normal mode without longevity polling** reproduced the same failure | **EXONERATED**; observer path is not root cause |
+| **R9R-05** | Release depended on ATT Write Response and 30 s teardown showed `write_complete=false` | ASCS Control Point should use Write Without Response; map product ASCS ops to `GattOperation::WriteCommand` while retaining CP/ASE semantic gates | **FIXED / reference-aligned** in `85300c88`; failure moved to `write_complete=true, cp_success=false, notified=None` |
+| **R9R-06** | Local WriteCommand completion could be mistaken for proof the packet reached BE200 | Bumble L2CAP/ACL can queue above the actual HCI submit boundary | **OPEN DIAGNOSTIC**; `d1fb532c` + `084fa605` expose Bumble pending vs actual ACL in-flight; next HIL pending |
+| **R9R-07** | Some 30 s live runs show isolated 480-frame PCM underflows while drop/bridge/ISO conservation remain clean | Negative drift / scheduling gap is not yet corrected; current drift guard primarily handles positive accumulation | **OPEN Wave-2**; independent from teardown failure |

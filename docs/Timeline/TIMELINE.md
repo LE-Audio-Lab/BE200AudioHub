@@ -507,40 +507,96 @@ The new HIL still reuses sealed Review-2D setup/teardown as an oracle; full Core
 
 This chat migration is **not** the Round7 engineering boundary. The next chat continues Round7 from the valid-LC3 First Sound HIL.
 
-## 12. Round 8 / V2 structural closure + live product-path HIL
+## 12. Round 8 / V2 structural closure + live relay baseline
 
-Round8 structural/ownership refactor 已封板；当前 `round8` CLI namespace
-继续承载 current-path / live-relay HIL，不代表结构重构仍在进行。
+Round8 is **CLOSED**. It completed the ownership refactor and then proved the
+first real Windows live-audio product path.
 
-### 12.1 Real HIL progression
+### 12.1 Structural closure
+
+```text
+L0 Core
+L1 Control
+L1 Media
+L1 HCI
+L2 Transport
+L3 Platform
+```
+
+The frozen route/clock/credit invariants from Round7 were preserved while
+Control was decomposed into durable model, operation progress, reducers,
+discovery/planning/ASCS and interface boundaries.
+
+### 12.2 Real HIL progression
 
 ```text
 Round7 valid-LC3 First Sound            REAL HIL PASS
 Round8 current-path First Sound         REAL HIL PASS
 Windows live Process Loopback           REAL HIL PASS ×2 @10 s
 300 s longevity data window             reached 300/300 s
-30 s live data plane                    clean Host ISO conservation
-30 s graceful Stop                      FAIL — dual ASE Release gate
 ```
 
-Live path:
+Round8 also fixed the initial Process Loopback `E_ILLEGAL_METHOD_CALL` by
+making the activation completion handler agile, added longevity mode, and added
+10%-interval runtime snapshots.
+
+### 12.3 Round8 teardown handoff
+
+The first five-minute run proved the data window but failed during graceful
+Stop with dual ASE cleanup timeout. Before Round8 closed:
 
 ```text
-Windows apps
-→ sacrificial physical render endpoint
-→ Process Loopback
-→ bounded PCM relay
-→ LC3
-→ StreamClock / IsoTxBridge
-→ logical HCI ISO
-→ BE200
-→ Buds3 Pro
+742eb75c  separate graceful Stop from failure rollback ordering
+a48b2a54  accept cached Codec Configured after ASE Release
+a11efdff  add longevity runtime snapshots
 ```
 
-### 12.2 Current teardown evidence
+The long-session teardown defect remained open and became the opening problem
+of Round9.
 
-The current authoritative 30 s failure, after ASCS Control Point was aligned to
-Write Without Response, is:
+See [Round8.md](./Round8.md).
+
+## 13. Round 9 / long-session teardown + crash recovery + ACL boundary
+
+Round9 is **ACTIVE**. The CLI still uses the `round8 live-relay` namespace;
+that command name does not define the Engineering Round.
+
+### 13.1 Dirty-controller recovery defect
+
+Ctrl+C during an active session killed the sole userspace Host while BE200/peer
+state survived. Subsequent resetless launches repeatedly failed member
+visibility until the BE200 was power-cycled.
+
+Frozen recovery direction:
+
+```text
+CLEAN previous generation
+→ resetless attach
+
+DIRTY / UNKNOWN previous generation
+→ HCI Reset + full Host reinitialization
+```
+
+A graceful Ctrl+C path, durable DIRTY/CLEAN ownership marker and supervisor are
+Wave-1 work.
+
+### 13.2 Teardown state-machine corrections
+
+```text
+96cf90a5  graceful Release pivots on ASE RELEASING
+41742199  expose Release gate timeout state
+2672f75a  attach gate snapshot to ASE operation
+30a8589c  test import fix
+85300c88  use Write Command for ASCS Control Point
+87c3352c  align ASCS write-command tests
+```
+
+The 10%-longevity observer path was exonerated: a 30 s **normal** run reproduced
+the same failure.
+
+### 13.3 Current authoritative failure
+
+After Write Without Response alignment:
 
 ```text
 AseReleaseGateTimeout {
@@ -555,63 +611,42 @@ AseReleaseGateTimeout {
 }
 ```
 
-This means local WriteCommand completion occurred, but no CP SUCCESS and no ASE
-state notification were observed on either ear.
+Thus local WriteCommand completion occurred, but neither CP SUCCESS nor ASE
+state notification was observed on either ear.
 
-It does **not** yet prove the ACL packet crossed Bumble's waiting queue into
-actual HCI TX.
+### 13.4 Current lower-boundary diagnostic
 
-### 12.3 Current diagnostic boundary
-
-`d1fb532c` + `084fa605` add teardown ACL audit:
+`d1fb532c` + `084fa605` expose:
 
 ```text
 bumble_pending
 audit_in_flight
+audit_limit
 waiting_estimate = bumble_pending - audit_in_flight
 ```
 
-Next HIL classification:
+Next-HIL classification:
 
 ```text
 waiting_estimate > 0
   → blocked in Bumble Host ACL queue
 
 waiting_estimate == 0 && audit_in_flight > 0
-  → submitted to HCI, controller completion outstanding
+  → submitted to HCI; controller completion outstanding
 
 waiting_estimate == 0 && audit_in_flight == 0
-  → Host/controller TX retired; investigate response/peer layer
+  → Host/controller TX retired; inspect response/peer layer
 ```
 
-No real HIL output for this new ACL audit has been recorded yet.
+No real-hardware result from this new ACL audit exists yet.
 
-### 12.4 Crash recovery / user-space ownership
-
-Ctrl+C during an active live session reproduced a dirty-controller failure:
-subsequent resetless launches repeatedly hit
-`Discovery(MemberNotVisible { member_index: 0 })`; BE200 power cycle restored
-operation immediately.
-
-Product failsafe is therefore a Wave-1 requirement:
-
-```text
-CLEAN previous generation
-→ resetless attach
-
-DIRTY / UNKNOWN previous generation
-→ HCI Reset + full Host reinitialization
-```
-
-Normal Ctrl+C must request graceful Stop; only proven teardown may clear the
-durable ownership-dirty marker.
-
-### 12.5 Current next step
+### 13.5 Immediate next step
 
 Do not run another 300 s test yet.
 
-1. Start from a clean BE200/Buds state after the previous failed teardown.
+1. Start from a clean BE200/Buds state after any failed teardown.
 2. Run 30 s normal `round8 live-relay`.
-3. Capture the appended ACL teardown audit if Stop fails.
-4. Use the audit classification above to choose the next layer.
-5. Only after 30 s teardown is clean, return to 300 s longevity.
+3. Capture the ACL teardown audit if Stop fails.
+4. Choose the next layer from the classification above.
+
+See [Round9.md](./Round9.md).
