@@ -71,6 +71,7 @@ pub struct LiveRelayConfig {
     pub group_release_ab: bool,
     pub sanitize_rx_flow_control_ab: bool,
     pub acl_rx_liveness_ab: bool,
+    pub acl_rx_keepalive_ab: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +107,7 @@ pub fn parse_live_relay_args(
     let mut group_release_ab = false;
     let mut sanitize_rx_flow_control_ab = false;
     let mut acl_rx_liveness_ab = false;
+    let mut acl_rx_keepalive_ab = false;
     let mut confirmed = false;
     let mut index = 0usize;
 
@@ -192,6 +194,15 @@ pub fn parse_live_relay_args(
                 acl_rx_liveness_ab = true;
                 index += 1;
             }
+            "--acl-rx-keepalive-ab" => {
+                if acl_rx_keepalive_ab {
+                    return Err(
+                        "--acl-rx-keepalive-ab specified more than once".into(),
+                    );
+                }
+                acl_rx_keepalive_ab = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -208,6 +219,13 @@ pub fn parse_live_relay_args(
                 ))
             }
         }
+    }
+
+    if acl_rx_liveness_ab && acl_rx_keepalive_ab {
+        return Err(
+            "--acl-rx-liveness-ab and --acl-rx-keepalive-ab are mutually exclusive"
+                .into(),
+        );
     }
 
     if !confirmed {
@@ -248,6 +266,7 @@ pub fn parse_live_relay_args(
         group_release_ab,
         sanitize_rx_flow_control_ab,
         acl_rx_liveness_ab,
+        acl_rx_keepalive_ab,
     })
 }
 
@@ -446,6 +465,56 @@ fn wait_live_duration_with_acl_liveness(
     Ok(())
 }
 
+fn wait_live_duration_with_acl_keepalive(
+    duration: Duration,
+    source: &ProcessLoopbackSource,
+    media: &LivePcmIsoWorker,
+    stack: &HciStack,
+    driver: &mut CurrentPathControlDriver,
+    audit_origin: &IsoCreditSnapshot,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut target = Duration::from_secs(5);
+
+    while target < duration {
+        let elapsed = started.elapsed();
+        if elapsed < target {
+            thread::sleep(target - elapsed);
+        }
+
+        let label = format!(
+            "keepalive t={:.1}s",
+            started.elapsed().as_secs_f64(),
+        );
+        if run_acl_liveness_probe(&label, stack, driver)? {
+            return Err(format!(
+                "ACL RX keepalive A/B DEAD at {label}; ATT Read left pending by design, graceful GATT teardown must be skipped"
+            ));
+        }
+
+        let source_stats = source.stats();
+        let media_stats = media.snapshot();
+        let iso = driver.iso_audit(stack)?;
+        println!(
+            "[acl-keepalive]   media capture_frames={} intervals={} pcm_fill={} iso_submitted={} iso_completed={} iso_in_flight={}",
+            source_stats.captured_frames,
+            media_stats.pcm.intervals_consumed,
+            media_stats.pcm_fill_frames,
+            iso.total_submitted.saturating_sub(audit_origin.total_submitted),
+            iso.total_completed.saturating_sub(audit_origin.total_completed),
+            iso.in_flight,
+        );
+
+        target = target.saturating_add(Duration::from_secs(5));
+    }
+
+    let elapsed = started.elapsed();
+    if elapsed < duration {
+        thread::sleep(duration - elapsed);
+    }
+    Ok(())
+}
+
 fn wait_live_duration(
     duration: Duration,
     longevity_test: bool,
@@ -512,13 +581,14 @@ fn run_live_media(
     longevity_test: bool,
     group_release_ab: bool,
     acl_rx_liveness_ab: bool,
+    acl_rx_keepalive_ab: bool,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
 
-    if acl_rx_liveness_ab
+    if (acl_rx_liveness_ab || acl_rx_keepalive_ab)
         && run_acl_liveness_probe(
             "pre-media / route-bound",
             stack,
@@ -563,7 +633,16 @@ fn run_live_media(
             }
         };
 
-    let wait_result = if acl_rx_liveness_ab {
+    let wait_result = if acl_rx_keepalive_ab {
+        wait_live_duration_with_acl_keepalive(
+            duration,
+            &source,
+            &media,
+            stack,
+            &mut driver,
+            &audit_before,
+        )
+    } else if acl_rx_liveness_ab {
         wait_live_duration_with_acl_liveness(
             duration,
             &source,
@@ -593,10 +672,14 @@ fn run_live_media(
     let diagnostic_dead = wait_result
         .as_ref()
         .err()
-        .map(|error| error.starts_with("ACL RX liveness A/B DEAD"))
+        .map(|error| {
+            error.starts_with("ACL RX liveness A/B DEAD")
+                || error.starts_with("ACL RX keepalive A/B DEAD")
+        })
         .unwrap_or(false);
 
-    let post_media_liveness_dead = if acl_rx_liveness_ab
+    let post_media_liveness_dead = if (acl_rx_liveness_ab
+        || acl_rx_keepalive_ab)
         && !diagnostic_dead
         && audit_after_result.is_ok()
     {
@@ -691,6 +774,7 @@ pub fn execute_live_relay(
         config.longevity_test,
         config.group_release_ab,
         config.acl_rx_liveness_ab,
+        config.acl_rx_keepalive_ab,
     );
     let exit = stack.shutdown();
 
@@ -747,6 +831,26 @@ mod tests {
         assert!(!config.group_release_ab);
         assert!(!config.sanitize_rx_flow_control_ab);
         assert!(!config.acl_rx_liveness_ab);
+        assert!(!config.acl_rx_keepalive_ab);
+    }
+
+    #[test]
+    fn parser_enables_explicit_acl_rx_keepalive_ab() {
+        let mut value = args();
+        value.push("--acl-rx-keepalive-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.acl_rx_keepalive_ab);
+    }
+
+    #[test]
+    fn parser_rejects_both_acl_rx_probe_modes() {
+        let mut value = args();
+        value.push("--acl-rx-liveness-ab".into());
+        value.push("--acl-rx-keepalive-ab".into());
+
+        let error = parse_live_relay_args(&value).unwrap_err();
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]

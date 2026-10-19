@@ -54,7 +54,9 @@ fn main() {
             println!(
                 "ACL RX liveness probe: {}",
                 if config.acl_rx_liveness_ab {
-                    "A/B ON (ASE Read at pre-media + live checkpoints; aborts on first timeout)"
+                    "A/B ON (sparse ASE Read checkpoints; aborts on first timeout)"
+                } else if config.acl_rx_keepalive_ab {
+                    "KEEPALIVE A/B ON (ASE Read every 5 s)"
                 } else {
                     "off"
                 }
