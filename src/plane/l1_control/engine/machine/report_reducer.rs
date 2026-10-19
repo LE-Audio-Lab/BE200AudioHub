@@ -303,9 +303,12 @@ impl ControlMachine {
                 let plan = self.planned.iso_plan
                     .as_ref()
                     .expect("ConfiguringCig requires ISO plan");
-                if !cig_allocation_matches_plan(allocation, plan) {
-                    let expected_cis_ids =
-                        vec![plan.left.cis_id, plan.right.cis_id];
+                let expected_cis_ids = self.required_cis_ids();
+                if !cig_allocation_matches_plan(
+                    allocation,
+                    plan,
+                    &expected_cis_ids,
+                ) {
                     let actual_cis_ids = allocation
                         .cis
                         .iter()
@@ -381,11 +384,7 @@ impl ControlMachine {
                     *cig_id,
                     established_cis_ids,
                 ) {
-                    let plan = self.planned.iso_plan
-                        .as_ref()
-                        .expect("CreatingCis requires ISO plan");
-                    let mut expected =
-                        vec![plan.left.cis_id, plan.right.cis_id];
+                    let mut expected = self.required_cis_ids();
                     expected.sort_unstable();
                     let mut actual = established_cis_ids.clone();
                     actual.sort_unstable();

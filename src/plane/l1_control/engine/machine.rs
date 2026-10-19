@@ -401,6 +401,18 @@ pub enum ControlEvent {
 pub(crate) enum GracefulAseReleaseMode {
     Serial,
     Group,
+    Skip,
+}
+
+/// Review/HIL-only setup policy. Product remains the default and no Core
+/// command can select these variants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ReviewStreamProfile {
+    #[default]
+    Product,
+    CodecOnly,
+    SingleCisRight,
+    DualCisLowQos,
 }
 
 pub struct ControlMachine {
@@ -415,6 +427,7 @@ pub struct ControlMachine {
     ase_control_operation: AseControlOperation,
     streaming_operation: StreamingOperation,
     stream_route_operation: StreamRouteOperation,
+    review_profile: ReviewStreamProfile,
     failure: Option<ControlFailure>,
 }
 
@@ -433,12 +446,45 @@ impl ControlMachine {
             ase_control_operation: AseControlOperation::new(),
             streaming_operation: StreamingOperation::new(),
             stream_route_operation: StreamRouteOperation::new(),
+            review_profile: ReviewStreamProfile::Product,
             failure: None,
         })
     }
 
     pub fn phase(&self) -> ControlPhase {
         self.phase
+    }
+
+    pub(crate) fn set_review_stream_profile(
+        &mut self,
+        profile: ReviewStreamProfile,
+    ) -> Result<(), ControlFailure> {
+        if self.phase != ControlPhase::Idle {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+        self.review_profile = profile;
+        Ok(())
+    }
+
+    pub(crate) const fn review_stream_profile(
+        &self,
+    ) -> ReviewStreamProfile {
+        self.review_profile
+    }
+
+    pub(super) fn single_cis_right_profile(&self) -> bool {
+        self.review_profile == ReviewStreamProfile::SingleCisRight
+    }
+
+    pub(super) fn required_cis_ids(&self) -> Vec<u8> {
+        let Some(plan) = self.planned.iso_plan.as_ref() else {
+            return Vec::new();
+        };
+        if self.single_cis_right_profile() {
+            vec![plan.right.cis_id]
+        } else {
+            vec![plan.left.cis_id, plan.right.cis_id]
+        }
     }
 
     /// Stable observation projection for Core/RuntimeState readers.
@@ -624,9 +670,10 @@ impl ControlMachine {
 fn cig_allocation_matches_plan(
     allocation: &CigAllocation,
     plan: &StereoIsoPlan,
+    expected_cis_ids: &[u8],
 ) -> bool {
     if allocation.cig_id != plan.cig_id
-        || allocation.cis.len() != 2
+        || allocation.cis.len() != expected_cis_ids.len()
     {
         return false;
     }
@@ -638,8 +685,7 @@ fn cig_allocation_matches_plan(
         .collect::<Vec<_>>();
     actual.sort_unstable();
 
-    let mut expected =
-        vec![plan.left.cis_id, plan.right.cis_id];
+    let mut expected = expected_cis_ids.to_vec();
     expected.sort_unstable();
     actual == expected
 }

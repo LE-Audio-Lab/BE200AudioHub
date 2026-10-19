@@ -413,6 +413,43 @@ impl ControlMachine {
         )
     }
 
+    pub(crate) fn begin_emergency_teardown_for_review(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        if !matches!(
+            self.phase,
+            ControlPhase::CodecConfigured
+                | ControlPhase::StreamingReady
+                | ControlPhase::StreamBoundReady
+        ) {
+            return Err(ControlFailure::InvalidStartState(self.phase));
+        }
+
+        self.failure = None;
+        self.prepare_stream_route_rollback();
+        self.rollback.acl_queue = self.confirmed.connections
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        self.rollback.acl_current = None;
+        self.rollback.iso_path_queue =
+            self.cleanup_knowledge.iso_paths_may_exist.iter().copied().collect();
+        self.rollback.iso_path_current = None;
+        self.rollback.cis_queue =
+            self.confirmed.live_cis.iter().copied().collect();
+        self.rollback.cis_current = None;
+        self.rollback.ase_queue.clear();
+        self.rollback.ase_current = None;
+        self.rollback.ase_operation = None;
+        self.rollback.ase_group_operations = [None, None];
+        self.rollback.graceful_ase_release_mode =
+            GracefulAseReleaseMode::Skip;
+        self.rollback.cleanup_failures.clear();
+        self.phase = ControlPhase::RollingBack;
+        self.continue_rollback()
+    }
+
     pub(crate) fn begin_teardown_with_release_mode(
         &mut self,
         release_mode: GracefulAseReleaseMode,
@@ -570,6 +607,7 @@ impl ControlMachine {
                         return Ok(Vec::new());
                     }
                 }
+                GracefulAseReleaseMode::Skip => {}
             }
         }
 
