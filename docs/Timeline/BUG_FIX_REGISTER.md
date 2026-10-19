@@ -326,3 +326,16 @@ See [Round7.md](./Round7.md) for the full chronology, claim boundary, HIL comman
 | **R9R-05** | Release depended on ATT Write Response and 30 s teardown showed `write_complete=false` | ASCS Control Point should use Write Without Response; map product ASCS ops to `GattOperation::WriteCommand` while retaining CP/ASE semantic gates | **FIXED / reference-aligned** in `85300c88`; failure moved to `write_complete=true, cp_success=false, notified=None` |
 | **R9R-06** | Local WriteCommand completion could be mistaken for proof the packet reached BE200 | Bumble L2CAP/ACL can queue above the actual HCI submit boundary | **OPEN DIAGNOSTIC**; `d1fb532c` + `084fa605` expose Bumble pending vs actual ACL in-flight; next HIL pending |
 | **R9R-07** | Some 30 s live runs show isolated 480-frame PCM underflows while drop/bridge/ISO conservation remain clean | Negative drift / scheduling gap is not yet corrected; current drift guard primarily handles positive accumulation | **OPEN Wave-2**; independent from teardown failure |
+
+
+## 14. Round 10 / graceful-teardown investigation closure and cleanup
+
+| ID | Symptom / wrong assumption | Evidence / correction | Verification / status |
+|---|---|---|---|
+| **R10R-01** | Release timeout was still being treated as an isochronous teardown problem | Final `acl-only` model reproduced simultaneous dual-ATT death with no CIG/CIS/ISO/media. Host→controller ACL, NCP, HCI Event, RSSI and LL Remote Features remained live while Controller→Host HCI ACL data stopped | **LOCALIZED / ROOT CAUSE UNRESOLVED**; sampled transition in approximately `(20 s, 25 s]` |
+| **R10R-02** | Resetless attach may have inherited stale Controller→Host HCI flow-control state | Explicitly disabled Controller→Host flow control before connection creation; Model A failed at the same boundary | **FALSIFIED** |
+| **R10R-03** | One pending libusb ACL Bulk-IN read may leave a re-arm gap that wedges BE200 | Implemented depth-two A/B with two genuine outstanding reads; at failure both reads remained pending and no new ACL-IN completion arrived | **FALSIFIED** |
+| **R10R-04** | Round9 forensic/A-B code had become a large permanent cross-layer surface | Audited `96cf90a5..941092e3`; archived full tracked tree; removed Review profiles, final models, probe/report APIs, flow-control A/B, Bulk-IN depth A/B, cross-layer transport audit and related tests | **CLEANED** in `ca12d763` + `8176e635` |
+| **R10R-05** | Cleanup could accidentally remove unrelated product architecture | Compared post-cleanup active `src/` against pre-investigation baseline `a11efdff`; only three intentional files differ | **PASS** |
+| **R10R-06** | Cleanup could silently break deterministic behavior | Re-ran full locked software gate after cleanup | **408/408 tests PASS; check PASS; build PASS** |
+| **R10R-07** | Current ungraceful normal-Stop implementation could be mistaken for a finalized Round10 architecture decision | Round10 documentation records it only as current code state and explicitly defers the final teardown contract to the next chat | **DECISION DEFERRED** |

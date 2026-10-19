@@ -1,8 +1,8 @@
 # BE200AudioHub — 跨 Round 工程时间线 / Timeline
 
-> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–9 Review / product-path continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
+> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–10 Review / product-path continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 在 Review-2D real HIL 后封板，Round7 完成 product semantic/data path，Round8 完成 V2 structural + live-relay baseline，Round9 当前处理 long-session teardown / crash recovery / ACL boundary。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 在 Review-2D real HIL 后封板，Round7 完成 product semantic/data path，Round8 完成 V2 structural + live-relay baseline，Round9 完成 long-session teardown / ACL boundary investigation；Round10 完成 final falsification、investigation-code archive/deprecation，并把最终 teardown architecture decision 留给下一对话。
 
 ## 阅读入口
 
@@ -18,7 +18,7 @@
 | [Round6.md](./Round6.md) | Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部 chat migration 后继续完成 2D | Review-2A / 2B / 2C / 2D closure |
 | [Round7.md](./Round7.md) | Control semantic path、valid LC3 Media/Clock/Bridge、logical HCI ISO、First Sound | Round7 closure |
 | [Round8.md](./Round8.md) | V2 Structural / Ownership Refactor + Windows live relay + first longevity baseline | Round8 closure |
-| [Round9.md](./Round9.md) | Long-session teardown、crash recovery、ASCS/ACL lower-boundary diagnosis | **current handoff** |
+| [Round9.md](./Round9.md) | Long-session teardown、crash recovery、ASCS/ACL lower-boundary diagnosis | historical investigation state |\n| [Round10.md](./Round10.md) | Final falsification、deprecated snapshot、45-commit audit、investigation-code cleanup | **current handoff** |
 | [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）
@@ -653,3 +653,106 @@ Do not run another 300 s test yet.
 4. Choose the next layer from the classification above.
 
 See [Round9.md](./Round9.md).
+
+
+---
+
+## 12. Round 10 / Final falsification + investigation-code deprecation — 2026-10-20
+
+> Round10 records the tail of the Round9 teardown investigation because the source conversation is
+> not guaranteed to be available to the next chat. It intentionally does not freeze the final
+> teardown architecture decision.
+
+### Final HIL boundary
+
+The decisive control experiment removed all isochronous resources:
+
+```text
+dual encrypted ACL
++ dual GATT/ASCS to CodecConfigured
++ no CIG
++ no CIS
++ no ISO
++ no media
+```
+
+Both peer-facing ATT paths remained responsive through 20 s and timed out at the 25 s checkpoint.
+At the failure boundary:
+
+```text
+Host→Controller ACL/USB/NCP       LIVE
+Controller HCI Event-IN          LIVE
+connection handles / RSSI        LIVE
+LL Remote Features procedure     LIVE
+Controller→Host HCI ACL data     DEAD
+ATT/GATT                         DEAD
+```
+
+Therefore CIS/ISO was not a necessary trigger.
+
+Two further A/B tests were also falsified:
+
+```text
+explicit Controller→Host flow control OFF
+→ same failure
+
+ACL Bulk-IN outstanding reads: 1 → 2
+→ same failure
+→ two real pending libusb reads remained armed
+```
+
+The project stopped root-cause digging after this point.
+
+Current claim:
+
+> unresolved controller-global Host-facing HCI ACL RX cessation.
+
+### Investigation archive
+
+```text
+pre-investigation baseline: a11efdff
+full investigation tree:    941092e3
+archive commit:              b864cf1
+snapshot:
+deprecated/graceful-teardown-bug/
+BE200AudioHub-graceful-teardown-bug-941092e31756.zip
+```
+
+### Audit and cleanup
+
+The audit covered `96cf90a5..941092e3` (45 commits) and classified most late-Round9 additions as
+forensic or A/B scaffolding.
+
+Cleanup:
+
+```text
+ca12d763  cleanup(round10): retire graceful-teardown investigation code
+           +183 / -5482
+
+8176e635  cleanup(round10): remove obsolete transport forensic audit
+           -101
+```
+
+After cleanup, active `src/` differs from `a11efdff` only in:
+
+```text
+src/plane/l1_control/ascs/operation.rs
+src/plane/l1_control/engine/machine/rollback_flow.rs
+src/plane/l1_control/engine/machine/tests.rs
+```
+
+Post-cleanup deterministic gate:
+
+```text
+cargo test --workspace --locked   408 passed / 0 failed
+cargo check --workspace --locked  PASS
+cargo build --workspace --locked  PASS
+```
+
+### Decision boundary
+
+The active code currently uses ASCS Write Without Response and currently skips peer Release in normal
+product Stop. **Round10 does not promote that implementation fact into a final architecture
+decision.** The next chat must make that decision explicitly and only then update design docs.
+
+See [Round10.md](./Round10.md) for the authoritative handoff.

@@ -64,16 +64,16 @@ complete implementation remains recoverable from the snapshot and git history.
 | ACL Bulk-IN queue-depth generalization and depth-two A/B | `404e4738`, `941092e3` | Removed; active transport returned to depth 1 |
 | Cross-layer `TransportTxAudit` / forensic ACL snapshot plumbing | Round9 diagnostic series above | Removed entirely |
 
-## Promoted decisions
+## Active-code carryover after cleanup — architecture decision deferred
 
-Only two Round9 findings were promoted into active architecture:
+Round10 cleanup intentionally left only a very small code delta. The following describes the active implementation at the end of this conversation; it is **not** a finalized architecture decision. The next chat must explicitly decide the teardown contract before design docs are updated.\n\nTwo behaviors remain in active code:
 
 1. ASCS Control Point operations use ATT Write Command / Write Without Response.
    Generic ASCS Release support remains available for failure rollback.
 2. Product Stop is controller-clean and protocol-ungraceful by default. It does
    not depend on peer ASCS Release completion.
 
-The active product teardown order is:
+The current active-code teardown order is:
 
 ```text
 route unbind
@@ -99,3 +99,9 @@ baseline `a11efdff` leaves only three intentional code differences:
 
 All other Round9 investigation runtime code was deprecated rather than retained
 as dormant product complexity.
+
+
+## Handoff note
+
+Round10's final architecture decision is intentionally **not** recorded here. Read
+`docs/Timeline/Round10.md` and make that decision explicitly in the next conversation.
