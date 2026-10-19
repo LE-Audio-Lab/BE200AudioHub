@@ -61,6 +61,7 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     faults: u64,
     tx_audit: Arc<TransportTxAudit>,
     pending_read_ids: HashMap<TransferId, RxEndpoint>,
+    acl_rx_read_depth: usize,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -69,6 +70,16 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         hci_rx: S,
         tx_audit: Arc<TransportTxAudit>,
     ) -> Self {
+        Self::new_with_acl_rx_depth(backend, hci_rx, tx_audit, 1)
+    }
+
+    pub fn new_with_acl_rx_depth(
+        backend: B,
+        hci_rx: S,
+        tx_audit: Arc<TransportTxAudit>,
+        acl_rx_read_depth: usize,
+    ) -> Self {
+        assert!(acl_rx_read_depth > 0, "ACL RX read depth must be nonzero");
         Self {
             backend,
             state: ReactorState::Stopped,
@@ -81,6 +92,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             faults: 0,
             tx_audit,
             pending_read_ids: HashMap::new(),
+            acl_rx_read_depth,
         }
     }
 
@@ -111,7 +123,9 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         }
 
         self.arm_rx(RxEndpoint::Event)?;
-        self.arm_rx(RxEndpoint::Acl)?;
+        for _ in 0..self.acl_rx_read_depth {
+            self.arm_rx(RxEndpoint::Acl)?;
+        }
         self.state = ReactorState::Running;
         Ok(())
     }
@@ -272,6 +286,47 @@ mod tests {
         reactor.start().unwrap();
         assert!(reactor.backend.pending_read(RxEndpoint::Event));
         assert!(reactor.backend.pending_read(RxEndpoint::Acl));
+    }
+
+    #[test]
+    fn acl_rx_depth_two_keeps_two_reads_outstanding() {
+        let (tx, _rx) = mailbox::bounded(8);
+        let audit = Arc::new(TransportTxAudit::default());
+        let mut reactor = TransportReactor::new_with_acl_rx_depth(
+            TestBackend::default(),
+            tx,
+            audit.clone(),
+            2,
+        );
+        reactor.start().unwrap();
+
+        assert_eq!(
+            reactor.backend.pending_read_count(RxEndpoint::Event),
+            1
+        );
+        assert_eq!(
+            reactor.backend.pending_read_count(RxEndpoint::Acl),
+            2
+        );
+        let snapshot = audit.snapshot();
+        assert_eq!(snapshot.acl_read_arms, 2);
+        assert_eq!(snapshot.acl_read_completions, 0);
+
+        reactor
+            .backend
+            .inject_read(
+                RxEndpoint::Acl,
+                vec![0x00, 0x08, 0x00, 0x00],
+            )
+            .unwrap();
+        assert_eq!(reactor.step(), StepOutcome::PacketsDelivered(1));
+        assert_eq!(
+            reactor.backend.pending_read_count(RxEndpoint::Acl),
+            2
+        );
+        let snapshot = audit.snapshot();
+        assert_eq!(snapshot.acl_read_arms, 3);
+        assert_eq!(snapshot.acl_read_completions, 1);
     }
 
     #[test]

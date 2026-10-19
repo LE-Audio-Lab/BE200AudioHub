@@ -80,7 +80,7 @@ mod imp {
         next_id: u64,
         callback_order: Arc<AtomicU64>,
         pending: HashMap<TransferId, PendingTransfer>,
-        idle_reads: HashMap<RxEndpoint, PendingTransfer>,
+        idle_reads: HashMap<RxEndpoint, Vec<PendingTransfer>>,
         idle_writes: HashMap<TxEndpoint, Vec<PendingTransfer>>,
         attached: bool,
     }
@@ -148,12 +148,6 @@ mod imp {
             id
         }
 
-        fn has_pending_read(&self, endpoint: RxEndpoint) -> bool {
-            self.pending
-                .values()
-                .any(|pending| pending.state.kind == AsyncTransferKind::Read(endpoint))
-        }
-
         fn submit_read(
             &mut self,
             endpoint: RxEndpoint,
@@ -164,12 +158,12 @@ mod imp {
             if !self.attached {
                 return Err(BackendError::DeviceGone);
             }
-            if self.has_pending_read(endpoint) {
-                return Err(BackendError::AlreadyPending(endpoint));
-            }
-
             let id = self.allocate_id();
-            let mut reusable = if let Some(mut transfer) = self.idle_reads.remove(&endpoint) {
+            let mut reusable = if let Some(mut transfer) = self
+                .idle_reads
+                .get_mut(&endpoint)
+                .and_then(|pool| pool.pop())
+            {
                 debug_assert!(transfer.state.result().is_none());
                 transfer.state.id = id;
                 transfer.state.kind = AsyncTransferKind::Read(endpoint);
@@ -362,8 +356,10 @@ mod imp {
             match kind {
                 AsyncTransferKind::Read(endpoint) => {
                     debug_assert!(pending.state.result().is_none());
-                    let old = self.idle_reads.insert(endpoint, pending);
-                    debug_assert!(old.is_none(), "duplicate idle read transfer slot");
+                    self.idle_reads
+                        .entry(endpoint)
+                        .or_default()
+                        .push(pending);
                 }
                 AsyncTransferKind::Write(endpoint) => {
                     let pool = self.idle_writes.entry(endpoint).or_default();
@@ -415,8 +411,10 @@ mod imp {
                 self.reclaim_completed_without_delivery();
             }
 
-            for (_, idle) in self.idle_reads.drain() {
-                unsafe { idle.reclaim() };
+            for (_, pool) in self.idle_reads.drain() {
+                for idle in pool {
+                    unsafe { idle.reclaim() };
+                }
             }
             for (_, pool) in self.idle_writes.drain() {
                 for idle in pool {

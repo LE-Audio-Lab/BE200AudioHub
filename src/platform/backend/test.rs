@@ -15,7 +15,7 @@ pub struct RecordedWrite {
 pub struct TestBackend {
     next_id: u64,
     attached: bool,
-    pending_reads: HashMap<RxEndpoint, TransferId>,
+    pending_reads: HashMap<RxEndpoint, VecDeque<TransferId>>,
     pending_writes: HashMap<TransferId, RecordedWrite>,
     completions: CompletionQueue,
     write_log: VecDeque<RecordedWrite>,
@@ -36,7 +36,14 @@ impl Default for TestBackend {
 
 impl TestBackend {
     pub fn pending_read(&self, endpoint: RxEndpoint) -> bool {
-        self.pending_reads.contains_key(&endpoint)
+        self.pending_read_count(endpoint) != 0
+    }
+
+    pub fn pending_read_count(&self, endpoint: RxEndpoint) -> usize {
+        self.pending_reads
+            .get(&endpoint)
+            .map(VecDeque::len)
+            .unwrap_or(0)
     }
 
     pub fn inject_read(
@@ -44,10 +51,16 @@ impl TestBackend {
         endpoint: RxEndpoint,
         bytes: Vec<u8>,
     ) -> Result<(), BackendError> {
-        let id = self
+        let queue = self
             .pending_reads
-            .remove(&endpoint)
+            .get_mut(&endpoint)
             .ok_or(BackendError::NotPending(endpoint))?;
+        let id = queue
+            .pop_front()
+            .ok_or(BackendError::NotPending(endpoint))?;
+        if queue.is_empty() {
+            self.pending_reads.remove(&endpoint);
+        }
         self.completions.push(TransferCompletion::Read {
             id,
             endpoint,
@@ -60,10 +73,16 @@ impl TestBackend {
         &mut self,
         endpoint: RxEndpoint,
     ) -> Result<(), BackendError> {
-        let id = self
+        let queue = self
             .pending_reads
-            .remove(&endpoint)
+            .get_mut(&endpoint)
             .ok_or(BackendError::NotPending(endpoint))?;
+        let id = queue
+            .pop_front()
+            .ok_or(BackendError::NotPending(endpoint))?;
+        if queue.is_empty() {
+            self.pending_reads.remove(&endpoint);
+        }
         self.completions
             .push(TransferCompletion::Cancelled { id });
         Ok(())
@@ -105,11 +124,11 @@ impl DeviceBackend for TestBackend {
         if !self.attached {
             return Err(BackendError::DeviceGone);
         }
-        if self.pending_reads.contains_key(&endpoint) {
-            return Err(BackendError::AlreadyPending(endpoint));
-        }
         let id = self.allocate_id();
-        self.pending_reads.insert(endpoint, id);
+        self.pending_reads
+            .entry(endpoint)
+            .or_default()
+            .push_back(id);
         Ok(id)
     }
 
@@ -137,9 +156,11 @@ impl DeviceBackend for TestBackend {
     }
 
     fn cancel_all(&mut self) {
-        for (_, id) in self.pending_reads.drain() {
-            self.completions
-                .push(TransferCompletion::Cancelled { id });
+        for (_, mut ids) in self.pending_reads.drain() {
+            while let Some(id) = ids.pop_front() {
+                self.completions
+                    .push(TransferCompletion::Cancelled { id });
+            }
         }
         for (id, _) in self.pending_writes.drain() {
             self.completions
@@ -171,6 +192,26 @@ mod tests {
         assert!(backend.pending_read(RxEndpoint::Event));
         assert!(!backend.pending_read(RxEndpoint::Acl));
 
+        assert!(matches!(
+            backend.next_completion(),
+            Some(TransferCompletion::Read {
+                endpoint: RxEndpoint::Acl,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn same_rx_endpoint_can_queue_two_pending_reads() {
+        let mut backend = TestBackend::default();
+        backend.arm_read(RxEndpoint::Acl).unwrap();
+        backend.arm_read(RxEndpoint::Acl).unwrap();
+        assert_eq!(backend.pending_read_count(RxEndpoint::Acl), 2);
+
+        backend
+            .inject_read(RxEndpoint::Acl, vec![0xaa])
+            .unwrap();
+        assert_eq!(backend.pending_read_count(RxEndpoint::Acl), 1);
         assert!(matches!(
             backend.next_completion(),
             Some(TransferCompletion::Read {

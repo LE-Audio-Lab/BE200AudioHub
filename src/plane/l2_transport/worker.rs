@@ -123,6 +123,25 @@ where
     F: FnOnce() -> Result<B, BackendError> + Send + 'static,
     S: ControllerPacketSink + Send + 'static,
 {
+    spawn_transport_worker_with_sink_and_acl_rx_depth(
+        factory,
+        tx_capacity,
+        hci_sink,
+        1,
+    )
+}
+
+pub fn spawn_transport_worker_with_sink_and_acl_rx_depth<B, F, S>(
+    factory: F,
+    tx_capacity: usize,
+    hci_sink: S,
+    acl_rx_read_depth: usize,
+) -> (TransportTx, TransportWorkerJoin)
+where
+    B: DeviceBackend + 'static,
+    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
+    S: ControllerPacketSink + Send + 'static,
+{
     let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
@@ -139,8 +158,12 @@ where
                 }
             };
 
-            let mut reactor =
-                TransportReactor::new(backend, hci_sink, worker_audit);
+            let mut reactor = TransportReactor::new_with_acl_rx_depth(
+                backend,
+                hci_sink,
+                worker_audit,
+                acl_rx_read_depth,
+            );
             if let Err(fault) = reactor.start() {
                 return TransportWorkerExit::Faulted(fault);
             }
