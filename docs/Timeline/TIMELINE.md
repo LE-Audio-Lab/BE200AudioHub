@@ -1,8 +1,8 @@
 # BE200AudioHub — 跨 Round 工程时间线 / Timeline
 
-> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–6 Review continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
+> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–9 Review / product-path continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 跨越一次 chat migration，最终在 §24 Review-2D real HIL 后封板，Round7 从 Control semantic migration 开始。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 在 Review-2D real HIL 后封板，Round7 完成 product semantic/data path，Round8 完成 V2 structural + live-relay baseline，Round9 当前处理 long-session teardown / crash recovery / ACL boundary。
 
 ## 阅读入口
 
@@ -16,6 +16,9 @@
 | [Round4.md](./Round4.md) | Codec/QoS/CIG/CIS 全控制面；三次 R5.2-B HIL | R4.1–R5.2-B |
 | [Round5.md](./Round5.md) | R5.3 First Sound、Experiment sealed、Review-1 Runtime/Async Transport | R5.3 / Review-1 |
 | [Round6.md](./Round6.md) | Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部 chat migration 后继续完成 2D | Review-2A / 2B / 2C / 2D closure |
+| [Round7.md](./Round7.md) | Control semantic path、valid LC3 Media/Clock/Bridge、logical HCI ISO、First Sound | Round7 closure |
+| [Round8.md](./Round8.md) | V2 Structural / Ownership Refactor + Windows live relay + first longevity baseline | Round8 closure |
+| [Round9.md](./Round9.md) | Long-session teardown、crash recovery、ASCS/ACL lower-boundary diagnosis | **current handoff** |
 | [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）

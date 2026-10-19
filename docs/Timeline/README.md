@@ -58,8 +58,10 @@
 | **Review-2C ACL / L2CAP / ATT / GATT** | **Software + HIL PASS** |
 | **Review-2D CIG / CIS / ISO Host** | **Software + HIL PASS** |
 | **Round7 Control semantic path** | **Software PASS** |
-| **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software + real First Sound HIL PASS** |\n| **Round8 V2 Structural / Ownership Refactor** | **Software CLOSED** |
-| **Post-Round8 Windows live relay** | **Real HIL PASS ×2 @10 s；300 s data window reached 100%；30 s graceful teardown currently FAIL / under active diagnosis** |
+| **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software + real First Sound HIL PASS** |
+| **Round8 V2 Structural / Ownership Refactor** | **Software CLOSED** |
+| **Round8 Windows live relay / first longevity baseline** | **Real HIL PASS ×2 @10 s；300 s data window reached 100%；full-session teardown handed open to Round9** |
+| **Round9 long-session teardown / recovery** | **ACTIVE；30 s graceful teardown FAIL，ACL lower-boundary audit ready for next HIL** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
@@ -67,7 +69,7 @@ Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Re
 
 ## 新 Round 维护规则
 
-1. **原文单独存档**：新阶段以 Round5.md、Round6.md 追加，不覆盖此前 Round 原文。
+1. **原文单独存档**：新阶段以独立 RoundN.md 追加，不覆盖此前 Round 原文。
 2. **状态由 HIL 更新**：更新 TIMELINE、BUG_FIX_REGISTER、README 时写明测试证据和 commit；旧文档中的历史计划不要悄悄改写。
 3. **Bug/Fix 分离**：明确每次失败的原始现象、错误码、控制层级、根因证据、做过的错误尝试、最终修复、修复后的测试；不能把“清理 UNCONFIRMED”包装为 PASS。
 4. **能力层级严格区分**：Intel HCI 支持 ISO ≠ Set CIG ≠ CIS Established ≠ 可用 ISO Data Path ≠ 实际可听 First Sound。
@@ -76,7 +78,7 @@ Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Re
 
 ## Review continuation
 
-Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Review-1 的历史截止点；当前状态以 [Round6.md](./Round6.md) 与 [TIMELINE.md](./TIMELINE.md) 为准。
+Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Review-1 的历史截止点；当前状态以 [Round9.md](./Round9.md) 与 [TIMELINE.md](./TIMELINE.md) 为准。
 
 当前最短阅读顺序：
 

@@ -1,8 +1,8 @@
-# BE200AudioHub — Round 1–6 Bug / Fix / Quirk Register
+# BE200AudioHub — Round 1–9 Bug / Fix / Quirk Register
 
-> 活动总账：Round1–4 历史 Experiment + Round5–6 Review continuation。源文可查 [Round1](./Round1.md)–[Round6](./Round6.md)；Round1–4 原文全量汇编仍见 [AllRounds](./AllRounds.md)。
+> 活动总账：Round1–4 历史 Experiment + Round5–9 Review / product-path continuation。源文可查 [Round1](./Round1.md)–[Round9](./Round9.md)；Round1–4 原文全量汇编仍见 [AllRounds](./AllRounds.md)。
 >
-> **证据原则**：HIL = 真实 BE200/B3P 或工具执行器实际结果；Code = 编译或字节/单元级；Review = 静态审查；Hypothesis = 未经证实或后来被推翻；Open = 尚未解决。Experiment historical baselines 与当前 Review baselines 分开记录。Round6 已完成 Review-2A/2B software + HIL；当前软件 gate 为 151/151 tests、cargo check/build PASS。
+> **证据原则**：HIL = 真实 BE200/B3P 或工具执行器实际结果；Code = 编译或字节/单元级；Review = 静态审查；Hypothesis = 未经证实或后来被推翻；Open = 尚未解决。Experiment historical baselines 与当前 Review baselines 分开记录。当前 Round9 deterministic gate 为 410/410 tests、cargo check/build PASS；真实硬件的 30 s graceful teardown 仍 FAIL，ACL lower-boundary audit 等待下一次 HIL。
 >
 > 每项 ID 是本归档新增的检索编号，不代表仓库 Issue ID。一个问题若经历数次失败，会保留中间失败和最终解法，避免只留下“修好了”。
 
