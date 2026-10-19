@@ -24,7 +24,9 @@ use crate::{
             discovery::audio::parse_ase_status_compat,
             engine::{
                 facade::ControlPlane,
-                machine::ControlTimer,
+                machine::{
+                    ControlPhase, ControlTimer, ReviewStreamProfile,
+                },
                 step::ControlStep,
             },
             interface::{
@@ -540,18 +542,23 @@ fn process_timer(
 
 #[derive(Clone, Copy)]
 enum DriveTarget {
+    Phase(ControlPhase),
     StreamReadyUnbound,
     StreamBound,
     Idle,
 }
 
 fn target_reached(
+    control_plane: &ControlPlane,
     condition: &Condition,
     binding: Option<StreamBinding>,
     target: DriveTarget,
 ) -> bool {
     let control = condition.control_status();
     match target {
+        DriveTarget::Phase(phase) => {
+            control_plane.phase_for_review() == phase
+        }
         DriveTarget::StreamReadyUnbound => {
             control.state == ControlState::StreamReady
                 && control.stream_id.is_none()
@@ -817,7 +824,7 @@ fn drive_until(
     let deadline = Instant::now() + CONTROL_DRIVE_DEADLINE;
 
     loop {
-        if target_reached(condition, *binding, target) {
+        if target_reached(control, condition, *binding, target) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -839,7 +846,7 @@ fn drive_until(
                         binding, report,
                     )?;
                     progressed = true;
-                    if target_reached(condition, *binding, target) {
+                    if target_reached(control, condition, *binding, target) {
                         return Ok(());
                     }
                 }
@@ -910,7 +917,7 @@ fn drive_until(
                 timer,
             )?;
             progressed = true;
-            if target_reached(condition, *binding, target) {
+            if target_reached(control, condition, *binding, target) {
                 return Ok(());
             }
         }
@@ -1263,6 +1270,18 @@ impl CurrentPathControlDriver {
         plan: ControlSetPlan,
         connect_timeout: Duration,
     ) -> Result<Self, String> {
+        Self::new_with_review_profile(
+            plan,
+            connect_timeout,
+            ReviewStreamProfile::Product,
+        )
+    }
+
+    pub(crate) fn new_with_review_profile(
+        plan: ControlSetPlan,
+        connect_timeout: Duration,
+        review_profile: ReviewStreamProfile,
+    ) -> Result<Self, String> {
         let lifecycle = LifecycleSnapshot {
             generation: PRODUCT_GENERATION,
             session_id: Some(PRODUCT_SESSION_ID),
@@ -1274,9 +1293,14 @@ impl CurrentPathControlDriver {
             PRODUCT_SESSION_ID,
         );
         let condition = Condition::new(lifecycle);
-        let control = ControlPlane::new(plan)
+        let mut control = ControlPlane::new(plan)
             .map_err(|error| {
                 format!("Control plan rejected: {error:?}")
+            })?;
+        control
+            .set_review_stream_profile(review_profile)
+            .map_err(|error| {
+                format!("Review stream profile rejected: {error:?}")
             })?;
 
         Ok(Self {
@@ -1293,10 +1317,11 @@ impl CurrentPathControlDriver {
         })
     }
 
-    pub(crate) fn start_and_bind(
+    fn start_control_to(
         &mut self,
         stack: &HciStack,
-    ) -> Result<StreamBinding, String> {
+        target: DriveTarget,
+    ) -> Result<(), String> {
         let start = execute_control(
             &self.condition,
             &mut self.control,
@@ -1323,6 +1348,36 @@ impl CurrentPathControlDriver {
             &mut self.cleanup_acl_audits,
             &mut self.cleanup_ase_readbacks,
             &mut self.cleanup_gatt_trace,
+            target,
+        )
+    }
+
+    pub(crate) fn start_to_codec_configured(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<(), String> {
+        self.start_control_to(
+            stack,
+            DriveTarget::Phase(ControlPhase::CodecConfigured),
+        )
+    }
+
+    pub(crate) fn start_to_streaming_ready(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<(), String> {
+        self.start_control_to(
+            stack,
+            DriveTarget::Phase(ControlPhase::StreamingReady),
+        )
+    }
+
+    pub(crate) fn start_and_bind(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<StreamBinding, String> {
+        self.start_control_to(
+            stack,
             DriveTarget::StreamReadyUnbound,
         )?;
 
@@ -1375,6 +1430,43 @@ impl CurrentPathControlDriver {
         }
 
         Ok(binding)
+    }
+
+    pub(crate) fn emergency_stop_for_review(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<(), String> {
+        let step = self
+            .control
+            .begin_emergency_teardown_for_review()
+            .map_err(|error| {
+                format!("Review emergency teardown failed to start: {error:?}")
+            })?;
+        apply_and_continue(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            step,
+        )?;
+        drive_until(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            &mut self.cleanup_acl_audits,
+            &mut self.cleanup_ase_readbacks,
+            &mut self.cleanup_gatt_trace,
+            DriveTarget::Idle,
+        )
+    }
+
+    pub(crate) fn phase_for_review(&self) -> ControlPhase {
+        self.control.phase_for_review()
     }
 
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
