@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     sync::Arc,
 };
 
@@ -60,7 +60,7 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     tx_packets: u64,
     faults: u64,
     tx_audit: Arc<TransportTxAudit>,
-    pending_read_ids: BTreeMap<TransferId, RxEndpoint>,
+    pending_read_ids: HashMap<TransferId, RxEndpoint>,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -80,7 +80,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             tx_packets: 0,
             faults: 0,
             tx_audit,
-            pending_read_ids: BTreeMap::new(),
+            pending_read_ids: HashMap::new(),
         }
     }
 

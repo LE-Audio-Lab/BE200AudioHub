@@ -1864,6 +1864,12 @@ mod tests {
                 transport_mailbox_enqueued: 22,
                 transport_usb_submitted: 22,
                 transport_usb_completed: 22,
+                transport_event_read_arms: 1,
+                transport_event_read_completions: 0,
+                transport_event_read_cancelled: 0,
+                transport_acl_read_arms: 1,
+                transport_acl_read_completions: 0,
+                transport_acl_read_cancelled: 0,
                 recent_att_writes: [None; 4],
                         },
                     ),
@@ -1878,10 +1884,10 @@ mod tests {
         );
 
         assert!(text.contains(
-            "baseline: bumble_pending=0 audit_in_flight=0 waiting_estimate=0 limit=Some(6) acl_rx=10 att_pdus=5 gatt_values=3 host_submit=20 ncp_complete=20 host_retired=0 mailbox=20 usb_submit=20 usb_complete=20 att_writes=[none]"
+            "baseline: bumble_pending=0 audit_in_flight=0 waiting_estimate=0 limit=Some(6) acl_rx=10 att_pdus=5 gatt_values=3 host_submit=20 ncp_complete=20 host_retired=0 mailbox=20 usb_submit=20 usb_complete=20 event_usb_read=1/0/cancelled:0 pending:1 acl_usb_read=1/0/cancelled:0 pending:1 att_writes=[none]"
         ));
         assert!(text.contains(
-            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6) acl_rx=12 att_pdus=7 gatt_values=4 host_submit=22 ncp_complete=22 host_retired=0 mailbox=22 usb_submit=22 usb_complete=22 att_writes=[none] delta_acl_rx=2 delta_att_pdus=2 delta_gatt_values=1 delta_host_submit=2 delta_ncp_complete=2 delta_host_retired=0 delta_mailbox=2 delta_usb_submit=2 delta_usb_complete=2"
+            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6) acl_rx=12 att_pdus=7 gatt_values=4 host_submit=22 ncp_complete=22 host_retired=0 mailbox=22 usb_submit=22 usb_complete=22 event_usb_read=1/0/cancelled:0 pending:1 acl_usb_read=1/0/cancelled:0 pending:1 att_writes=[none] delta_acl_rx=2 delta_att_pdus=2 delta_gatt_values=1 delta_host_submit=2 delta_ncp_complete=2 delta_host_retired=0 delta_mailbox=2 delta_usb_submit=2 delta_usb_complete=2"
         ));
         assert!(text.contains("Left: unavailable(query timed out)"));
     }
