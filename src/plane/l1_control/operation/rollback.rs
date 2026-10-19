@@ -3,7 +3,9 @@ use crate::{
     plane::{
         l1_control::{
             ascs::operation::AseOperationMachine,
-            engine::machine::ControlCleanupFailure,
+            engine::machine::{
+                ControlCleanupFailure, GracefulAseReleaseMode,
+            },
             interface::stream::AudioSide,
         },
         l1_hci::{
@@ -31,6 +33,8 @@ pub(crate) struct RollbackOperation {
     pub(crate) ase_queue: Vec<AudioSide>,
     pub(crate) ase_current: Option<AudioSide>,
     pub(crate) ase_operation: Option<AseOperationMachine>,
+    pub(crate) graceful_ase_release_mode: GracefulAseReleaseMode,
+    pub(crate) ase_group_operations: [Option<AseOperationMachine>; 2],
 }
 
 impl RollbackOperation {
@@ -49,6 +53,8 @@ impl RollbackOperation {
             ase_queue: Vec::new(),
             ase_current: None,
             ase_operation: None,
+            graceful_ase_release_mode: GracefulAseReleaseMode::Serial,
+            ase_group_operations: [None, None],
         }
     }
 }

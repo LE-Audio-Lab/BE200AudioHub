@@ -56,7 +56,9 @@ use crate::{
                 StoredEncryptionState,
             },
         },
-        gatt::transaction::{GattReport, GattRequest, GattRequestId},
+        gatt::transaction::{
+            GattReport, GattRequest, GattRequestId, GattValueEvent,
+        },
     },
 };
 
@@ -391,6 +393,14 @@ pub enum ControlFailure {
 pub enum ControlEvent {
     DiscoveryWindowElapsed,
     TimerExpired(ControlTimer),
+}
+
+/// Product Stop defaults to Serial. Group is an explicit Review/HIL A/B mode
+/// that fans Release out to all active members before waiting for RELEASING.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GracefulAseReleaseMode {
+    Serial,
+    Group,
 }
 
 pub struct ControlMachine {

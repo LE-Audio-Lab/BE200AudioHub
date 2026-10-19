@@ -31,6 +31,17 @@ impl ControlPlane {
         self.machine.condition_update()
     }
 
+    /// Review/HIL-only A/B entry point. Core StopControl intentionally
+    /// remains on the serial product path until HIL evidence promotes this.
+    pub(crate) fn begin_group_release_teardown_for_review(
+        &mut self,
+    ) -> Result<ControlStep, ControlFailure> {
+        let actions = self.machine.begin_teardown_with_release_mode(
+            crate::plane::l1_control::engine::machine::GracefulAseReleaseMode::Group,
+        )?;
+        Ok(self.finish_step(actions))
+    }
+
     pub fn handle_intent(
         &mut self,
         intent: ControlIntent,

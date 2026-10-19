@@ -803,6 +803,12 @@ impl ControlMachine {
             (
                 ControlPhase::RollingBack,
                 HciReport::Gatt(report),
+            ) if self.has_group_rollback_ase_operation() => {
+                self.on_group_rollback_ase_gatt_report(report)
+            }
+            (
+                ControlPhase::RollingBack,
+                HciReport::Gatt(report),
             ) if self.rollback.ase_operation.is_some() => {
                 self.on_rollback_ase_gatt_report(report)
             }

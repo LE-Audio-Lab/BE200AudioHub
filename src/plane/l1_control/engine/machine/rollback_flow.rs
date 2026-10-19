@@ -13,6 +13,191 @@
 use super::*;
 
 impl ControlMachine {
+    fn gatt_report_connection(report: &GattReport) -> ConnectionToken {
+        match report {
+            GattReport::Complete { connection, .. }
+            | GattReport::BearerPoisoned { connection, .. }
+            | GattReport::LateResponseDropped { connection, .. }
+            | GattReport::UnexpectedPdu { connection, .. } => *connection,
+            GattReport::Failed(failure) => failure.connection,
+            GattReport::Value(
+                GattValueEvent::Notification { connection, .. }
+                | GattValueEvent::Indication { connection, .. },
+            ) => *connection,
+        }
+    }
+
+    pub(super) fn has_group_rollback_ase_operation(&self) -> bool {
+        self.rollback
+            .ase_group_operations
+            .iter()
+            .any(Option::is_some)
+    }
+
+    pub(super) fn group_rollback_side_for_request(
+        &self,
+        member_index: usize,
+        request_id: GattRequestId,
+    ) -> Option<AudioSide> {
+        [AudioSide::Left, AudioSide::Right]
+            .into_iter()
+            .find(|side| {
+                self.rollback.ase_group_operations[side_index(*side)]
+                    .as_ref()
+                    .and_then(AseOperationMachine::pending_request_id)
+                    == Some(request_id)
+                    && self
+                        .planned_sink(*side)
+                        .ok()
+                        .map(|sink| sink.member_index)
+                        == Some(member_index)
+            })
+    }
+
+    fn start_graceful_group_ase_releases(
+        &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let sides = std::mem::take(&mut self.rollback.ase_queue);
+        let mut actions = Vec::new();
+
+        for side in sides {
+            let prepared = self.confirmed.prepared_ases[side_index(side)]
+                .as_ref()
+                .expect("group Release requires prepared control")
+                .clone();
+            let ase_id = prepared.sink.ase_id;
+            let mut machine = AseOperationMachine::new_notification_gate(
+                prepared,
+                AseOperation::Release(vec![ase_id]),
+                AseState::RELEASING,
+                self.next_gatt_request_id,
+            );
+            let action = match machine.start() {
+                Ok(action) => action,
+                Err(failure) => {
+                    self.rollback.cleanup_failures.push(
+                        ControlCleanupFailure::AseRelease {
+                            side,
+                            failure,
+                        },
+                    );
+                    continue;
+                }
+            };
+
+            self.next_gatt_request_id = machine.next_request_id();
+            self.rollback.ase_group_operations[side_index(side)] =
+                Some(machine);
+            actions.push(ControlAction::ArmTimer(
+                ControlTimer::CleanupAse { side },
+            ));
+            actions.extend(
+                self.translate_rollback_ase_action(
+                    side,
+                    None,
+                    action,
+                )?,
+            );
+        }
+
+        if self.has_group_rollback_ase_operation() {
+            Ok(actions)
+        } else {
+            actions.extend(self.continue_rollback()?);
+            Ok(actions)
+        }
+    }
+
+    pub(super) fn on_group_rollback_ase_gatt_report(
+        &mut self,
+        report: &GattReport,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        let connection = Self::gatt_report_connection(report);
+        let mut side = None;
+        for candidate in [AudioSide::Left, AudioSide::Right] {
+            if self.rollback.ase_group_operations[side_index(candidate)]
+                .is_some()
+                && self.planned_sink(candidate)?.connection == connection
+            {
+                side = Some(candidate);
+                break;
+            }
+        }
+        let Some(side) = side else {
+            return Ok(Vec::new());
+        };
+
+        let index = side_index(side);
+        let mut machine = self.rollback.ase_group_operations[index]
+            .take()
+            .expect("group rollback report requires active operation");
+        let pending_before = machine.pending_request_id();
+        let outcome = machine.on_gatt_report(report);
+        let pending_after = machine.pending_request_id();
+        self.next_gatt_request_id = machine.next_request_id();
+        let completed_request = if pending_before.is_some()
+            && pending_before != pending_after
+        {
+            pending_before
+        } else {
+            None
+        };
+
+        match outcome {
+            Ok(AseOperationAction::Ignored) => {
+                self.rollback.ase_group_operations[index] =
+                    Some(machine);
+                Ok(Vec::new())
+            }
+            Ok(AseOperationAction::Await) => {
+                self.rollback.ase_group_operations[index] =
+                    Some(machine);
+                self.disarm_gatt_request(side, completed_request)
+            }
+            Ok(action @ AseOperationAction::BeginGatt(_)) => {
+                self.rollback.ase_group_operations[index] =
+                    Some(machine);
+                self.translate_rollback_ase_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Ok(action @ AseOperationAction::Complete(_)) => {
+                self.translate_rollback_ase_action(
+                    side,
+                    completed_request,
+                    action,
+                )
+            }
+            Err(failure) => {
+                self.rollback.cleanup_failures.push(
+                    ControlCleanupFailure::AseRelease {
+                        side,
+                        failure,
+                    },
+                );
+                let mut actions =
+                    self.disarm_gatt_request(side, completed_request)?;
+                if let Some(request_id) = pending_after {
+                    actions.push(ControlAction::CancelGatt {
+                        connection: self.planned_sink(side)?.connection,
+                        request_id,
+                    });
+                    actions.extend(self.disarm_gatt_request(
+                        side,
+                        Some(request_id),
+                    )?);
+                }
+                actions.push(ControlAction::DisarmTimer(
+                    ControlTimer::CleanupAse { side },
+                ));
+                actions.extend(self.continue_rollback()?);
+                Ok(actions)
+            }
+        }
+    }
+
     pub(super) fn start_rollback_ase_release(
         &mut self,
         side: AudioSide,
@@ -223,6 +408,15 @@ impl ControlMachine {
     pub fn begin_teardown(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
+        self.begin_teardown_with_release_mode(
+            GracefulAseReleaseMode::Serial,
+        )
+    }
+
+    pub(crate) fn begin_teardown_with_release_mode(
+        &mut self,
+        release_mode: GracefulAseReleaseMode,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
         if self.phase != ControlPhase::StreamBoundReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
         }
@@ -252,6 +446,8 @@ impl ControlMachine {
         }
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
+        self.rollback.ase_group_operations = [None, None];
+        self.rollback.graceful_ase_release_mode = release_mode;
         self.rollback.cleanup_failures.clear();
 
         self.phase = ControlPhase::RollingBack;
@@ -277,6 +473,9 @@ impl ControlMachine {
         self.rollback.ase_queue.clear();
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
+        self.rollback.ase_group_operations = [None, None];
+        self.rollback.graceful_ase_release_mode =
+            GracefulAseReleaseMode::Serial;
         self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
         self.continue_rollback()
@@ -311,6 +510,9 @@ impl ControlMachine {
         }
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
+        self.rollback.ase_group_operations = [None, None];
+        self.rollback.graceful_ase_release_mode =
+            GracefulAseReleaseMode::Serial;
 
         self.rollback.cleanup_failures.clear();
         self.phase = ControlPhase::RollingBack;
@@ -349,13 +551,25 @@ impl ControlMachine {
         // ISO path/CIS. Failure rollback deliberately does the opposite:
         // fail-closed transport retirement comes first.
         if normal_teardown {
-            if self.rollback.ase_current.is_none() {
-                if let Some(side) = self.rollback.ase_queue.pop() {
-                    return self.start_rollback_ase_release(side);
+            match self.rollback.graceful_ase_release_mode {
+                GracefulAseReleaseMode::Serial => {
+                    if self.rollback.ase_current.is_none() {
+                        if let Some(side) = self.rollback.ase_queue.pop() {
+                            return self.start_rollback_ase_release(side);
+                        }
+                    }
+                    if self.rollback.ase_current.is_some() {
+                        return Ok(Vec::new());
+                    }
                 }
-            }
-            if self.rollback.ase_current.is_some() {
-                return Ok(Vec::new());
+                GracefulAseReleaseMode::Group => {
+                    if !self.rollback.ase_queue.is_empty() {
+                        return self.start_graceful_group_ase_releases();
+                    }
+                    if self.has_group_rollback_ase_operation() {
+                        return Ok(Vec::new());
+                    }
+                }
             }
         }
 

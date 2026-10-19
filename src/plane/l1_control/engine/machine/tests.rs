@@ -3135,6 +3135,144 @@
     }
 
     #[test]
+    fn group_release_ab_fans_out_both_ases_before_waiting_for_releasing() {
+        use crate::plane::l1_hci::gatt::transaction::{
+            GattOperation, GattResult, GattValueEvent,
+        };
+
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Bound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        let actions = machine
+            .begin_teardown_with_release_mode(
+                GracefulAseReleaseMode::Group,
+            )
+            .unwrap();
+        assert!(matches!(
+            actions.first(),
+            Some(ControlAction::UnbindStreamRoute { .. })
+        ));
+
+        let actions = machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Unbound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                    was_bound: true,
+                },
+            ))
+            .unwrap();
+
+        let writes = actions
+            .iter()
+            .filter_map(|action| match action {
+                ControlAction::BeginGatt(request) => Some(request.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|request| matches!(
+            request.operation,
+            GattOperation::WriteCommand {
+                attribute_handle: 0x0043,
+                ..
+            }
+        )));
+        assert!(actions.contains(&ControlAction::ArmTimer(
+            ControlTimer::CleanupAse {
+                side: AudioSide::Left,
+            },
+        )));
+        assert!(actions.contains(&ControlAction::ArmTimer(
+            ControlTimer::CleanupAse {
+                side: AudioSide::Right,
+            },
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            ControlAction::RemoveIsoPathByRef { .. }
+                | ControlAction::DisconnectCisByRef { .. }
+        )));
+
+        let left_connection =
+            machine.planned_sink(AudioSide::Left).unwrap().connection;
+        let right_connection =
+            machine.planned_sink(AudioSide::Right).unwrap().connection;
+        let left = writes
+            .iter()
+            .find(|request| request.connection == left_connection)
+            .unwrap()
+            .clone();
+        let right = writes
+            .iter()
+            .find(|request| request.connection == right_connection)
+            .unwrap()
+            .clone();
+
+        for (side, write, should_start_transport_cleanup) in [
+            (AudioSide::Right, right, false),
+            (AudioSide::Left, left, true),
+        ] {
+            let _ = complete_gatt(
+                &mut machine,
+                &write,
+                GattResult::WriteComplete {
+                    attribute_handle: 0x0043,
+                    with_response: false,
+                },
+            );
+            assert!(machine
+                .on_hci_report(&HciReport::Gatt(
+                    GattReport::Value(
+                        GattValueEvent::Notification {
+                            connection: write.connection,
+                            attribute_handle: 0x0043,
+                            value: release_cp_success_bytes(
+                                &machine,
+                                side,
+                            ),
+                        },
+                    ),
+                ))
+                .unwrap()
+                .is_empty());
+
+            let actions = machine
+                .on_hci_report(&HciReport::Gatt(
+                    GattReport::Value(
+                        GattValueEvent::Notification {
+                            connection: write.connection,
+                            attribute_handle: 0x0046,
+                            value: vec![
+                                machine.planned_sink(side).unwrap().ase_id,
+                                AseState::RELEASING.0,
+                            ],
+                        },
+                    ),
+                ))
+                .unwrap();
+
+            assert_eq!(
+                actions.iter().any(|action| matches!(
+                    action,
+                    ControlAction::RemoveIsoPathByRef { .. }
+                )),
+                should_start_transport_cleanup,
+            );
+        }
+    }
+
+    #[test]
     fn cleanup_ase_timeout_preserves_release_gate_diagnostics() {
         let mut machine = drive_to_streaming_ready();
         machine
