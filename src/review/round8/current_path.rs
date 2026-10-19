@@ -33,7 +33,7 @@ use crate::{
                     dispatch_control_action, ControlDispatchEffect,
                 },
                 report::ControlLowerReport,
-                stream::StreamBinding,
+                stream::{AudioSide, StreamBinding},
             },
             model::set_plan::{
                 ControlMemberPlan, ControlSetPlan,
@@ -220,6 +220,18 @@ pub(crate) fn control_plan(material: &ReviewBondMaterial) -> ControlSetPlan {
 struct TimerBook {
     connect_timeout: Duration,
     entries: Vec<(ControlTimer, Instant)>,
+}
+
+#[derive(Debug)]
+enum CleanupAseAclAuditResult {
+    Snapshot(AclCreditSnapshot),
+    Unavailable(String),
+}
+
+#[derive(Debug)]
+struct CleanupAseAclAudit {
+    side: AudioSide,
+    result: CleanupAseAclAuditResult,
 }
 
 impl TimerBook {
@@ -434,6 +446,7 @@ fn drive_until(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cleanup_acl_audits: &mut Vec<CleanupAseAclAudit>,
     target: DriveTarget,
 ) -> Result<(), String> {
     let deadline = Instant::now() + CONTROL_DRIVE_DEADLINE;
@@ -467,6 +480,21 @@ fn drive_until(
         }
 
         while let Some(timer) = timers.pop_expired() {
+            if let ControlTimer::CleanupAse { side } = timer {
+                // Capture ACL state before this timeout is reduced into
+                // transport/CIS/ACL cleanup. The audit command enters the same
+                // reliable HCI control lane before any cleanup commands emitted
+                // by process_timer(), so later disconnect flushes cannot erase
+                // the evidence we are trying to classify.
+                let result = read_acl_audit_before_cleanup(
+                    stack, control, condition, scope, timers, binding,
+                )?;
+                cleanup_acl_audits.push(CleanupAseAclAudit {
+                    side,
+                    result,
+                });
+            }
+
             process_timer(
                 stack, control, condition, scope, timers, binding,
                 timer,
@@ -483,28 +511,40 @@ fn drive_until(
     }
 }
 
-pub(crate) fn read_acl_audit_diagnostic(
+fn read_acl_audit_before_cleanup(
     stack: &HciStack,
-) -> Result<AclCreditSnapshot, String> {
-    stack
-        .control()
-        .try_read_acl_tx_audit()
-        .map_err(|error| {
-            format!("ACL audit query rejected: {error:?}")
-        })?;
+    control: &mut ControlPlane,
+    condition: &mut Condition,
+    scope: ConditionScope,
+    timers: &mut TimerBook,
+    binding: &mut Option<StreamBinding>,
+) -> Result<CleanupAseAclAuditResult, String> {
+    if let Err(error) = stack.control().try_read_acl_tx_audit() {
+        return Ok(CleanupAseAclAuditResult::Unavailable(format!(
+            "query rejected: {error:?}"
+        )));
+    }
 
     let deadline = Instant::now() + AUDIT_TIMEOUT;
     loop {
         match stack.reports().try_recv() {
-            Ok(HciReport::AclTxAudit(snapshot)) => return Ok(snapshot),
-            Ok(_) => {
-                // Teardown has already failed when this diagnostic is used.
-                // Preserve HCI worker progress but do not feed further reports
-                // into a terminal Control generation.
+            Ok(HciReport::AclTxAudit(snapshot)) => {
+                return Ok(CleanupAseAclAuditResult::Snapshot(snapshot))
+            }
+            Ok(report) => {
+                // This is a live pre-cleanup probe, not a terminal dump.
+                // Forward every other reliable HCI report so a late CP/ASE
+                // notification cannot be swallowed by diagnostics.
+                process_report(
+                    stack, control, condition, scope, timers, binding,
+                    report,
+                )?;
             }
             Err(RecvError::Empty) => {
                 if Instant::now() >= deadline {
-                    return Err("ACL audit query timed out".into());
+                    return Ok(CleanupAseAclAuditResult::Unavailable(
+                        "query timed out".into(),
+                    ));
                 }
                 thread::sleep(Duration::from_millis(1));
             }
@@ -513,6 +553,28 @@ pub(crate) fn read_acl_audit_diagnostic(
             }
         }
     }
+}
+
+fn format_cleanup_acl_audits(
+    audits: &[CleanupAseAclAudit],
+) -> String {
+    audits
+        .iter()
+        .map(|audit| match &audit.result {
+            CleanupAseAclAuditResult::Snapshot(snapshot) => format!(
+                "{:?}: bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?}",
+                audit.side,
+                snapshot.bumble_pending,
+                snapshot.audit_in_flight,
+                (*snapshot).waiting_estimate(),
+                snapshot.audit_limit,
+            ),
+            CleanupAseAclAuditResult::Unavailable(error) => {
+                format!("{:?}: unavailable({error})", audit.side)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn read_iso_audit(
@@ -606,6 +668,7 @@ pub(crate) struct CurrentPathControlDriver {
     scope: ConditionScope,
     timers: TimerBook,
     binding: Option<StreamBinding>,
+    cleanup_acl_audits: Vec<CleanupAseAclAudit>,
 }
 
 impl CurrentPathControlDriver {
@@ -635,6 +698,7 @@ impl CurrentPathControlDriver {
             scope,
             timers: TimerBook::new(connect_timeout),
             binding: None,
+            cleanup_acl_audits: Vec::new(),
         })
     }
 
@@ -665,6 +729,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cleanup_acl_audits,
             DriveTarget::StreamReadyUnbound,
         )?;
 
@@ -695,6 +760,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cleanup_acl_audits,
             DriveTarget::StreamBound,
         )?;
 
@@ -777,6 +843,8 @@ impl CurrentPathControlDriver {
         &mut self,
         stack: &HciStack,
     ) -> Result<(), String> {
+        self.cleanup_acl_audits.clear();
+
         let stop = execute_control(
             &self.condition,
             &mut self.control,
@@ -792,15 +860,25 @@ impl CurrentPathControlDriver {
             &mut self.binding,
             stop.control_step,
         )?;
-        drive_until(
+        let result = drive_until(
             stack,
             &mut self.control,
             &mut self.condition,
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cleanup_acl_audits,
             DriveTarget::Idle,
-        )
+        );
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if self.cleanup_acl_audits.is_empty() => Err(error),
+            Err(error) => Err(format!(
+                "{error}; pre-cleanup ACL audits: {}",
+                format_cleanup_acl_audits(&self.cleanup_acl_audits),
+            )),
+        }
     }
 }
 
@@ -921,5 +999,32 @@ mod tests {
         let mut value = args();
         value.pop();
         assert!(parse_current_path_args(&value).is_err());
+    }
+
+    #[test]
+    fn pre_cleanup_acl_audit_format_keeps_side_and_boundary_state() {
+        let text = format_cleanup_acl_audits(&[
+            CleanupAseAclAudit {
+                side: AudioSide::Right,
+                result: CleanupAseAclAuditResult::Snapshot(
+                    AclCreditSnapshot {
+                        bumble_pending: 2,
+                        audit_in_flight: 1,
+                        audit_limit: Some(6),
+                    },
+                ),
+            },
+            CleanupAseAclAudit {
+                side: AudioSide::Left,
+                result: CleanupAseAclAuditResult::Unavailable(
+                    "query timed out".into(),
+                ),
+            },
+        ]);
+
+        assert!(text.contains(
+            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6)"
+        ));
+        assert!(text.contains("Left: unavailable(query timed out)"));
     }
 }
