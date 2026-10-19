@@ -53,6 +53,7 @@ pub struct QueueHostTransport {
     observations: VecDeque<HciObservation>,
     suppress_command_complete_once: BTreeSet<u16>,
     fault: Option<LinkFault>,
+    acl_rx_packets: u64,
 }
 
 impl QueueHostTransport {
@@ -63,6 +64,7 @@ impl QueueHostTransport {
             observations: VecDeque::new(),
             suppress_command_complete_once: BTreeSet::new(),
             fault: None,
+            acl_rx_packets: 0,
         }
     }
 
@@ -92,6 +94,10 @@ impl QueueHostTransport {
         let parsed = HciPacket::from_bytes(&h4)
             .map_err(|_| LinkFault::InvalidControllerPacket)?;
 
+        if packet_type == HCI_ACL_DATA_PACKET {
+            self.acl_rx_packets = self.acl_rx_packets.saturating_add(1);
+        }
+
         let suppress = matches!(
             self.observations.back(),
             Some(HciObservation::CommandComplete { opcode, .. })
@@ -106,6 +112,10 @@ impl QueueHostTransport {
 
     pub fn take_fault(&mut self) -> Option<LinkFault> {
         self.fault.take()
+    }
+
+    pub fn acl_rx_packets(&self) -> u64 {
+        self.acl_rx_packets
     }
 
     pub fn take_observations(&mut self) -> Vec<HciObservation> {
@@ -436,6 +446,27 @@ mod tests {
                 status: 0x0c,
             }]
         );
+    }
+
+    #[test]
+    fn valid_controller_acl_ingest_counts_rx_after_parse() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        let packet = AclDataPacket {
+            connection_handle: 0x0800,
+            pb_flag: 0b10,
+            bc_flag: 0,
+            data_total_length: 4,
+            data: vec![0, 0, 4, 0],
+        }
+        .to_bytes();
+
+        link.ingest(ControllerPacket::Acl(packet[1..].to_vec()))
+            .unwrap();
+
+        assert_eq!(link.acl_rx_packets(), 1);
+        assert_eq!(link.drain_host_events(0).len(), 1);
     }
 
     #[test]

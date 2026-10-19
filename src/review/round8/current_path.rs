@@ -44,6 +44,7 @@ use crate::{
                 credit::AclCreditSnapshot,
                 security::StoredLeKeyMaterial,
             },
+            gatt::transaction::{GattReport, GattValueEvent},
             host::stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
@@ -78,6 +79,8 @@ const PRODUCT_STREAM_ID: StreamId = StreamId(11);
 const CONTROL_DRIVE_DEADLINE: Duration = Duration::from_secs(90);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_CLEANUP_GATT_TRACE: usize = 16;
+const MAX_CLEANUP_GATT_VALUE_PREFIX: usize = 24;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentPathConfig {
@@ -439,6 +442,82 @@ fn target_reached(
     }
 }
 
+fn push_cleanup_gatt_trace(trace: &mut Vec<String>, entry: String) {
+    if trace.len() >= MAX_CLEANUP_GATT_TRACE {
+        trace.remove(0);
+    }
+    trace.push(entry);
+}
+
+fn capture_cleanup_gatt_report(
+    report: &HciReport,
+    trace: &mut Vec<String>,
+) {
+    let HciReport::Gatt(report) = report else {
+        return;
+    };
+
+    match report {
+        GattReport::Value(event) => {
+            let (kind, connection, attribute_handle, value) = match event {
+                GattValueEvent::Notification {
+                    connection,
+                    attribute_handle,
+                    value,
+                } => ("notification", connection, attribute_handle, value),
+                GattValueEvent::Indication {
+                    connection,
+                    attribute_handle,
+                    value,
+                } => ("indication", connection, attribute_handle, value),
+            };
+            let prefix_len = value.len().min(MAX_CLEANUP_GATT_VALUE_PREFIX);
+            push_cleanup_gatt_trace(
+                trace,
+                format!(
+                    "{kind} conn=0x{:04x}/g{} handle=0x{:04x} len={} prefix={:02x?}",
+                    connection.connection_handle,
+                    connection.generation,
+                    attribute_handle,
+                    value.len(),
+                    &value[..prefix_len],
+                ),
+            );
+        }
+        GattReport::LateResponseDropped {
+            connection,
+            request_id,
+            opcode,
+        } => {
+            push_cleanup_gatt_trace(
+                trace,
+                format!(
+                    "late-response conn=0x{:04x}/g{} request={} opcode=0x{:02x}",
+                    connection.connection_handle,
+                    connection.generation,
+                    request_id,
+                    opcode,
+                ),
+            );
+        }
+        GattReport::UnexpectedPdu {
+            connection,
+            opcode,
+        } => {
+            push_cleanup_gatt_trace(
+                trace,
+                format!(
+                    "unexpected-pdu conn=0x{:04x}/g{} opcode=0x{:02x}",
+                    connection.connection_handle,
+                    connection.generation,
+                    opcode,
+                ),
+            );
+        }
+        _ => {}
+    }
+}
+
 fn drive_until(
     stack: &HciStack,
     control: &mut ControlPlane,
@@ -447,6 +526,7 @@ fn drive_until(
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
     cleanup_acl_audits: &mut Vec<CleanupAseAclAudit>,
+    cleanup_gatt_trace: &mut Vec<String>,
     target: DriveTarget,
 ) -> Result<(), String> {
     let deadline = Instant::now() + CONTROL_DRIVE_DEADLINE;
@@ -463,6 +543,12 @@ fn drive_until(
         loop {
             match stack.reports().try_recv() {
                 Ok(report) => {
+                    if matches!(target, DriveTarget::Idle) {
+                        capture_cleanup_gatt_report(
+                            &report,
+                            cleanup_gatt_trace,
+                        );
+                    }
                     process_report(
                         stack, control, condition, scope, timers,
                         binding, report,
@@ -487,7 +573,13 @@ fn drive_until(
                 // by process_timer(), so later disconnect flushes cannot erase
                 // the evidence we are trying to classify.
                 let result = read_acl_audit_before_cleanup(
-                    stack, control, condition, scope, timers, binding,
+                    stack,
+                    control,
+                    condition,
+                    scope,
+                    timers,
+                    binding,
+                    cleanup_gatt_trace,
                 )?;
                 cleanup_acl_audits.push(CleanupAseAclAudit {
                     side,
@@ -518,6 +610,7 @@ fn read_acl_audit_before_cleanup(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cleanup_gatt_trace: &mut Vec<String>,
 ) -> Result<CleanupAseAclAuditResult, String> {
     if let Err(error) = stack.control().try_read_acl_tx_audit() {
         return Ok(CleanupAseAclAuditResult::Unavailable(format!(
@@ -535,6 +628,10 @@ fn read_acl_audit_before_cleanup(
                 // This is a live pre-cleanup probe, not a terminal dump.
                 // Forward every other reliable HCI report so a late CP/ASE
                 // notification cannot be swallowed by diagnostics.
+                capture_cleanup_gatt_report(
+                    &report,
+                    cleanup_gatt_trace,
+                );
                 process_report(
                     stack, control, condition, scope, timers, binding,
                     report,
@@ -555,26 +652,70 @@ fn read_acl_audit_before_cleanup(
     }
 }
 
+fn format_acl_snapshot(snapshot: AclCreditSnapshot) -> String {
+    format!(
+        "bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?} acl_rx={} att_pdus={} gatt_values={}",
+        snapshot.bumble_pending,
+        snapshot.audit_in_flight,
+        snapshot.waiting_estimate(),
+        snapshot.audit_limit,
+        snapshot.controller_acl_rx_packets,
+        snapshot.att_pdus_drained,
+        snapshot.gatt_value_events,
+    )
+}
+
 fn format_cleanup_acl_audits(
+    baseline: &CleanupAseAclAuditResult,
     audits: &[CleanupAseAclAudit],
 ) -> String {
-    audits
+    let mut previous = match baseline {
+        CleanupAseAclAuditResult::Snapshot(snapshot) => Some(*snapshot),
+        CleanupAseAclAuditResult::Unavailable(_) => None,
+    };
+
+    let baseline_text = match baseline {
+        CleanupAseAclAuditResult::Snapshot(snapshot) => {
+            format!("baseline: {}", format_acl_snapshot(*snapshot))
+        }
+        CleanupAseAclAuditResult::Unavailable(error) => {
+            format!("baseline: unavailable({error})")
+        }
+    };
+
+    let entries = audits
         .iter()
         .map(|audit| match &audit.result {
-            CleanupAseAclAuditResult::Snapshot(snapshot) => format!(
-                "{:?}: bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?}",
-                audit.side,
-                snapshot.bumble_pending,
-                snapshot.audit_in_flight,
-                (*snapshot).waiting_estimate(),
-                snapshot.audit_limit,
-            ),
+            CleanupAseAclAuditResult::Snapshot(snapshot) => {
+                let interval = previous
+                    .map(|before| {
+                        format!(
+                            " delta_acl_rx={} delta_att_pdus={} delta_gatt_values={}",
+                            snapshot.controller_acl_rx_packets
+                                .saturating_sub(before.controller_acl_rx_packets),
+                            snapshot.att_pdus_drained
+                                .saturating_sub(before.att_pdus_drained),
+                            snapshot.gatt_value_events
+                                .saturating_sub(before.gatt_value_events),
+                        )
+                    })
+                    .unwrap_or_default();
+                previous = Some(*snapshot);
+                format!(
+                    "{:?}: {}{}",
+                    audit.side,
+                    format_acl_snapshot(*snapshot),
+                    interval,
+                )
+            }
             CleanupAseAclAuditResult::Unavailable(error) => {
                 format!("{:?}: unavailable({error})", audit.side)
             }
         })
         .collect::<Vec<_>>()
-        .join(" | ")
+        .join(" | ");
+
+    format!("{baseline_text} | {entries}")
 }
 
 fn read_iso_audit(
@@ -668,7 +809,9 @@ pub(crate) struct CurrentPathControlDriver {
     scope: ConditionScope,
     timers: TimerBook,
     binding: Option<StreamBinding>,
+    cleanup_acl_baseline: Option<CleanupAseAclAuditResult>,
     cleanup_acl_audits: Vec<CleanupAseAclAudit>,
+    cleanup_gatt_trace: Vec<String>,
 }
 
 impl CurrentPathControlDriver {
@@ -698,7 +841,9 @@ impl CurrentPathControlDriver {
             scope,
             timers: TimerBook::new(connect_timeout),
             binding: None,
+            cleanup_acl_baseline: None,
             cleanup_acl_audits: Vec::new(),
+            cleanup_gatt_trace: Vec::new(),
         })
     }
 
@@ -730,6 +875,7 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_gatt_trace,
             DriveTarget::StreamReadyUnbound,
         )?;
 
@@ -761,6 +907,7 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_gatt_trace,
             DriveTarget::StreamBound,
         )?;
 
@@ -844,6 +991,20 @@ impl CurrentPathControlDriver {
         stack: &HciStack,
     ) -> Result<(), String> {
         self.cleanup_acl_audits.clear();
+        self.cleanup_gatt_trace.clear();
+
+        let mut baseline_trace = Vec::new();
+        self.cleanup_acl_baseline = Some(
+            read_acl_audit_before_cleanup(
+                stack,
+                &mut self.control,
+                &mut self.condition,
+                self.scope,
+                &mut self.timers,
+                &mut self.binding,
+                &mut baseline_trace,
+            )?,
+        );
 
         let stop = execute_control(
             &self.condition,
@@ -868,16 +1029,30 @@ impl CurrentPathControlDriver {
             &mut self.timers,
             &mut self.binding,
             &mut self.cleanup_acl_audits,
+            &mut self.cleanup_gatt_trace,
             DriveTarget::Idle,
         );
 
         match result {
             Ok(()) => Ok(()),
             Err(error) if self.cleanup_acl_audits.is_empty() => Err(error),
-            Err(error) => Err(format!(
-                "{error}; pre-cleanup ACL audits: {}",
-                format_cleanup_acl_audits(&self.cleanup_acl_audits),
-            )),
+            Err(error) => {
+                let baseline = self.cleanup_acl_baseline
+                    .as_ref()
+                    .expect("stop always records ACL baseline");
+                let gatt_trace = if self.cleanup_gatt_trace.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.cleanup_gatt_trace.join(" || ")
+                };
+                Err(format!(
+                    "{error}; pre-cleanup ACL audits: {}; teardown GATT RX trace: {gatt_trace}",
+                    format_cleanup_acl_audits(
+                        baseline,
+                        &self.cleanup_acl_audits,
+                    ),
+                ))
+            },
         }
     }
 }
@@ -1003,28 +1178,71 @@ mod tests {
 
     #[test]
     fn pre_cleanup_acl_audit_format_keeps_side_and_boundary_state() {
-        let text = format_cleanup_acl_audits(&[
-            CleanupAseAclAudit {
-                side: AudioSide::Right,
-                result: CleanupAseAclAuditResult::Snapshot(
-                    AclCreditSnapshot {
-                        bumble_pending: 2,
-                        audit_in_flight: 1,
-                        audit_limit: Some(6),
-                    },
-                ),
+        let baseline = CleanupAseAclAuditResult::Snapshot(
+            AclCreditSnapshot {
+                bumble_pending: 0,
+                audit_in_flight: 0,
+                audit_limit: Some(6),
+                controller_acl_rx_packets: 10,
+                att_pdus_drained: 5,
+                gatt_value_events: 3,
             },
-            CleanupAseAclAudit {
-                side: AudioSide::Left,
-                result: CleanupAseAclAuditResult::Unavailable(
-                    "query timed out".into(),
-                ),
-            },
-        ]);
+        );
+        let text = format_cleanup_acl_audits(
+            &baseline,
+            &[
+                CleanupAseAclAudit {
+                    side: AudioSide::Right,
+                    result: CleanupAseAclAuditResult::Snapshot(
+                        AclCreditSnapshot {
+                            bumble_pending: 2,
+                            audit_in_flight: 1,
+                            audit_limit: Some(6),
+                            controller_acl_rx_packets: 12,
+                            att_pdus_drained: 7,
+                            gatt_value_events: 4,
+                        },
+                    ),
+                },
+                CleanupAseAclAudit {
+                    side: AudioSide::Left,
+                    result: CleanupAseAclAuditResult::Unavailable(
+                        "query timed out".into(),
+                    ),
+                },
+            ],
+        );
 
         assert!(text.contains(
-            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6)"
+            "baseline: bumble_pending=0 audit_in_flight=0 waiting_estimate=0 limit=Some(6) acl_rx=10 att_pdus=5 gatt_values=3"
+        ));
+        assert!(text.contains(
+            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6) acl_rx=12 att_pdus=7 gatt_values=4 delta_acl_rx=2 delta_att_pdus=2 delta_gatt_values=1"
         ));
         assert!(text.contains("Left: unavailable(query timed out)"));
     }
+
+    #[test]
+    fn cleanup_gatt_trace_is_bounded_and_records_value_metadata() {
+        let mut trace = Vec::new();
+        let report = HciReport::Gatt(GattReport::Value(
+            GattValueEvent::Notification {
+                connection: crate::plane::l1_hci::acl::connection::ConnectionToken {
+                    connection_handle: 0x0801,
+                    generation: 9,
+                },
+                attribute_handle: 0x0046,
+                value: vec![1, 2, 3, 4],
+            },
+        ));
+
+        capture_cleanup_gatt_report(&report, &mut trace);
+
+        assert_eq!(trace.len(), 1);
+        assert!(trace[0].contains(
+            "notification conn=0x0801/g9 handle=0x0046 len=4"
+        ));
+        assert!(trace[0].contains("prefix=[01, 02, 03, 04]"));
+    }
+
 }

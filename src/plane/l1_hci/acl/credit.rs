@@ -25,6 +25,12 @@ pub struct AclCreditSnapshot {
     pub bumble_pending: usize,
     pub audit_in_flight: usize,
     pub audit_limit: Option<usize>,
+    /// Controller->Host HCI ACL packets accepted by QueueHostTransport.
+    pub controller_acl_rx_packets: u64,
+    /// ATT PDUs drained from Bumble's per-connection inbox.
+    pub att_pdus_drained: u64,
+    /// ATT Handle Value Notification/Indication PDUs surfaced as GATT values.
+    pub gatt_value_events: u64,
 }
 
 impl AclCreditSnapshot {

@@ -228,6 +228,8 @@ pub struct HciEngine {
     gatt_mtus: BTreeMap<u16, u16>,
     gatt_poisoned: BTreeMap<u16, GattRequestId>,
     gatt_reports: VecDeque<GattReport>,
+    att_pdus_drained: u64,
+    gatt_value_events: u64,
     cig_configure_state: CigConfigureState,
     cig_configure_transaction: Option<CigConfigureTransaction>,
     cig_remove_state: CigRemoveState,
@@ -277,6 +279,8 @@ impl HciEngine {
             gatt_mtus: BTreeMap::new(),
             gatt_poisoned: BTreeMap::new(),
             gatt_reports: VecDeque::new(),
+            att_pdus_drained: 0,
+            gatt_value_events: 0,
             cig_configure_state: CigConfigureState::Idle,
             cig_configure_transaction: None,
             cig_remove_state: CigRemoveState::Idle,
@@ -758,6 +762,9 @@ impl HciEngine {
             bumble_pending: self.device.acl_packets_pending(),
             audit_in_flight: self.acl_credit_audit.in_flight(),
             audit_limit: self.acl_credit_audit.limit(),
+            controller_acl_rx_packets: self.link.acl_rx_packets(),
+            att_pdus_drained: self.att_pdus_drained,
+            gatt_value_events: self.gatt_value_events,
         }
     }
 
@@ -2448,11 +2455,15 @@ impl HciEngine {
 
         for (handle, connection) in connections {
             for pdu in self.device.take_inbox_on_handle(handle) {
+                self.att_pdus_drained =
+                    self.att_pdus_drained.saturating_add(1);
                 match pdu {
                     bumble_att::AttPdu::HandleValueNotification {
                         attribute_handle,
                         attribute_value,
                     } => {
+                        self.gatt_value_events =
+                            self.gatt_value_events.saturating_add(1);
                         self.push_gatt_report(GattReport::Value(
                             GattValueEvent::Notification {
                                 connection,
@@ -2465,6 +2476,8 @@ impl HciEngine {
                         attribute_handle,
                         attribute_value,
                     } => {
+                        self.gatt_value_events =
+                            self.gatt_value_events.saturating_add(1);
                         if !self.device.send_att_on_handle(
                             &mut self.link,
                             handle,
@@ -5503,6 +5516,7 @@ mod tests {
             establish_encrypted_test_acl(&mut engine, 0x0800, 1);
         let second =
             establish_encrypted_test_acl(&mut engine, 0x0801, 7);
+        let rx_before = engine.acl_credit_snapshot();
 
         engine
             .ingest(inbound_att(
@@ -5548,6 +5562,20 @@ mod tests {
                 }
             )] if *connection == second && value == &vec![3, 4]
         ));
+
+        let rx_after = engine.acl_credit_snapshot();
+        assert_eq!(
+            rx_after.controller_acl_rx_packets,
+            rx_before.controller_acl_rx_packets + 2
+        );
+        assert_eq!(
+            rx_after.att_pdus_drained,
+            rx_before.att_pdus_drained + 2
+        );
+        assert_eq!(
+            rx_after.gatt_value_events,
+            rx_before.gatt_value_events + 2
+        );
     }
 
     #[test]
