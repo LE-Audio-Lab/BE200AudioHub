@@ -422,6 +422,35 @@ fn run_acl_liveness_probe(
         println!(
             "[acl-liveness]   peer LL remote-features after ATT timeout: {peer_ll}"
         );
+
+        let left = driver.probe_ase_liveness(
+            stack,
+            AudioSide::Left,
+            ACL_LIVENESS_PROBE_TIMEOUT,
+        )?;
+        println!(
+            "[acl-liveness]   opposite-ear probe after Right death: {}",
+            left.summary(),
+        );
+
+        if left.timed_out() {
+            let left_controller = driver.probe_controller_rssi(
+                stack,
+                AudioSide::Left,
+                Duration::from_secs(2),
+            )?;
+            println!(
+                "[acl-liveness]   Left controller RSSI after ATT timeout: {left_controller}"
+            );
+            let left_peer_ll = driver.probe_peer_ll_features(
+                stack,
+                AudioSide::Left,
+                Duration::from_secs(3),
+            )?;
+            println!(
+                "[acl-liveness]   Left peer LL remote-features after ATT timeout: {left_peer_ll}"
+            );
+        }
     }
     Ok(probe.timed_out())
 }
