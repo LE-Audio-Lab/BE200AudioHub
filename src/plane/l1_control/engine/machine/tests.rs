@@ -2505,7 +2505,7 @@
             ControlAction::RemoveCig { .. }
         )));
 
-        let actions = drive_graceful_release_gate(
+        let actions = drive_rollback_release(
             &mut machine,
             AudioSide::Right,
             actions,
@@ -2523,7 +2523,7 @@
             ControlAction::RemoveCig { .. }
         )));
 
-        let actions = drive_graceful_release_gate(
+        let actions = drive_rollback_release(
             &mut machine,
             AudioSide::Left,
             actions,
@@ -3099,7 +3099,7 @@
                 | ControlAction::DisconnectCisByRef { .. }
         )));
 
-        let actions = drive_rollback_release(
+        let actions = drive_graceful_release_gate(
             &mut machine,
             AudioSide::Right,
             actions,
@@ -3118,7 +3118,7 @@
                 | ControlAction::DisconnectCisByRef { .. }
         )));
 
-        let actions = drive_rollback_release(
+        let actions = drive_graceful_release_gate(
             &mut machine,
             AudioSide::Left,
             actions,
