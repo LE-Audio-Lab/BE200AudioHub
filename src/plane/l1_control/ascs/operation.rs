@@ -97,6 +97,19 @@ impl AsePrepareMachine {
         self.pending_request_id
     }
 
+    pub fn gate_snapshot(&self) -> AseOperationGateSnapshot {
+        AseOperationGateSnapshot {
+            phase: self.phase,
+            pending_request_id: self.pending_request_id,
+            write_complete: self.write_complete,
+            cp_success: self.cp_success,
+            notified_state: self
+                .notified_status
+                .as_ref()
+                .map(|status| status.state),
+        }
+    }
+
     pub fn next_request_id(&self) -> GattRequestId {
         self.next_request_id
     }
@@ -412,6 +425,15 @@ pub enum AseOperationFailure {
 enum AseOperationCompletion {
     VerifiedReadback,
     NotificationGate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AseOperationGateSnapshot {
+    pub phase: AseOperationPhase,
+    pub pending_request_id: Option<GattRequestId>,
+    pub write_complete: bool,
+    pub cp_success: bool,
+    pub notified_state: Option<AseState>,
 }
 
 pub struct AseOperationMachine {

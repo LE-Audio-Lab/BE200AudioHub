@@ -485,13 +485,16 @@ impl ControlMachine {
             ) if self.phase == ControlPhase::RollingBack
                 && self.rollback.ase_current == Some(side) =>
             {
-                let pending = self.rollback.ase_operation
+                let gate = self.rollback.ase_operation
                     .as_ref()
-                    .and_then(|machine| machine.pending_request_id());
+                    .expect("CleanupAse timeout requires active ASE operation")
+                    .gate_snapshot();
+                let pending = gate.pending_request_id;
                 self.rollback.cleanup_failures.push(
-                    ControlCleanupFailure::Timeout(
-                        ControlTimer::CleanupAse { side },
-                    ),
+                    ControlCleanupFailure::AseReleaseGateTimeout {
+                        side,
+                        gate,
+                    },
                 );
                 self.rollback.ase_operation = None;
                 self.rollback.ase_current = None;

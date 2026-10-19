@@ -3134,6 +3134,59 @@
     }
 
     #[test]
+    fn cleanup_ase_timeout_preserves_release_gate_diagnostics() {
+        let mut machine = drive_to_streaming_ready();
+        machine
+            .begin_stream_handoff(SessionId(7), StreamId(11))
+            .unwrap();
+        machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Bound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                },
+            ))
+            .unwrap();
+
+        let _ = machine.begin_teardown().unwrap();
+        let _ = machine
+            .on_hci_report(&HciReport::StreamRouteState(
+                StreamRouteState::Unbound {
+                    session_id: SessionId(7),
+                    stream_id: StreamId(11),
+                    was_bound: true,
+                },
+            ))
+            .unwrap();
+
+        let error = machine
+            .on_event(ControlEvent::TimerExpired(
+                ControlTimer::CleanupAse {
+                    side: AudioSide::Right,
+                },
+            ))
+            .unwrap();
+
+        assert!(error.iter().any(|action| matches!(
+            action,
+            ControlAction::CancelGatt { .. }
+        )));
+        assert!(matches!(
+            machine.rollback.cleanup_failures.first(),
+            Some(ControlCleanupFailure::AseReleaseGateTimeout {
+                side: AudioSide::Right,
+                gate: AseOperationGateSnapshot {
+                    phase: AseOperationPhase::WaitingGates,
+                    pending_request_id: Some(_),
+                    write_complete: false,
+                    cp_success: false,
+                    notified_state: None,
+                },
+            })
+        ));
+    }
+
+    #[test]
     fn normal_teardown_returns_idle_after_graceful_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine

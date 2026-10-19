@@ -243,6 +243,10 @@ pub enum ControlCleanupFailure {
         side: AudioSide,
         failure: AseOperationFailure,
     },
+    AseReleaseGateTimeout {
+        side: AudioSide,
+        gate: AseOperationGateSnapshot,
+    },
     CigRemove(CigRemoveFailure),
     Disconnect(DisconnectFailure),
     Privacy(PrivacyFailure),
