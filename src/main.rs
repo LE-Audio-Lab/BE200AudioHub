@@ -67,6 +67,14 @@ fn main() {
                     }
                 }
                 println!(
+                    "Controller->Host ACL flow-control sanitize: {}",
+                    if config.sanitize_rx_flow_control_ab {
+                        "ON (explicit HCI Set Controller To Host Flow Control = OFF before any connection)"
+                    } else {
+                        "off (resetless inherited controller state)"
+                    }
+                );
+                println!(
                     "Probe policy: pre-run + every 5 s Read ASE on BOTH ears; ACL runtime snapshot at every checkpoint."
                 );
 

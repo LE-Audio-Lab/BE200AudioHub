@@ -332,12 +332,11 @@ pub fn parse_live_relay_args(
         }
         if longevity_test
             || group_release_ab
-            || sanitize_rx_flow_control_ab
             || acl_rx_liveness_ab
             || acl_rx_keepalive_ab
         {
             return Err(
-                "--final-model cannot be combined with longevity/group-release/sanitize/liveness A/B flags"
+                "--final-model cannot be combined with longevity/group-release/liveness A/B flags"
                     .into(),
             );
         }
@@ -1076,7 +1075,10 @@ pub fn execute_final_model(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let mut hci_config = HciStackConfig::default();
+    hci_config.sanitize_rx_flow_control_on_attach =
+        config.sanitize_rx_flow_control_ab;
+    let stack = spawn_be200_hci_stack(hci_config);
     let mut driver = match CurrentPathControlDriver::new_with_review_profile(
         plan,
         config.connect_timeout,
@@ -1631,6 +1633,23 @@ mod tests {
 
         let error = parse_live_relay_args(&value).unwrap_err();
         assert!(error.contains("--seconds is fixed"));
+    }
+
+    #[test]
+    fn parser_allows_rx_flow_control_sanitize_with_final_model() {
+        let mut value = args();
+        let seconds = value
+            .iter()
+            .position(|arg| arg == "--seconds")
+            .unwrap();
+        value.drain(seconds..=seconds + 1);
+        value.push("--final-model".into());
+        value.push("acl-only".into());
+        value.push("--sanitize-rx-flow-control-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert_eq!(config.final_model, Some(FinalModel::AclOnly));
+        assert!(config.sanitize_rx_flow_control_ab);
     }
 
     #[test]
