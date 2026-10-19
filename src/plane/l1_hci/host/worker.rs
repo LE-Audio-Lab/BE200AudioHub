@@ -76,10 +76,17 @@ impl HciWorkerJoin {
 pub(crate) fn spawn_hci_worker(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
+    sanitize_rx_flow_control_on_attach: bool,
 ) -> HciWorkerJoin {
     let join = thread::Builder::new()
         .name("HciHost".into())
-        .spawn(move || run_loop(ports, transport_tx))
+        .spawn(move || {
+            run_loop(
+                ports,
+                transport_tx,
+                sanitize_rx_flow_control_on_attach,
+            )
+        })
         .expect("failed to spawn HCI host worker");
 
     HciWorkerJoin { join }
@@ -88,6 +95,7 @@ pub(crate) fn spawn_hci_worker(
 fn run_loop(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
+    sanitize_rx_flow_control_on_attach: bool,
 ) -> HciWorkerExit {
     let HciWorkerPorts {
         control_rx,
@@ -97,7 +105,10 @@ fn run_loop(
         report_tx,
     } = ports;
 
-    let mut engine = HciEngine::new(transport_tx);
+    let mut engine = HciEngine::new_with_attach_policy(
+        transport_tx,
+        sanitize_rx_flow_control_on_attach,
+    );
     let mut last_attach_state = engine.attach_state();
     let mut last_scan_state = engine.passive_scan_state();
     let mut last_privacy_state = engine.controller_privacy_state().clone();

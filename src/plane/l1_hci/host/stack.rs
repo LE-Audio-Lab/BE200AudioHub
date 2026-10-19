@@ -21,6 +21,7 @@ pub struct HciStackConfig {
     pub control_inbox_capacity: usize,
     pub iso_data_inbox_capacity: usize,
     pub report_inbox_capacity: usize,
+    pub sanitize_rx_flow_control_on_attach: bool,
 }
 
 impl Default for HciStackConfig {
@@ -31,6 +32,7 @@ impl Default for HciStackConfig {
             control_inbox_capacity: 32,
             iso_data_inbox_capacity: 4,
             report_inbox_capacity: 64,
+            sanitize_rx_flow_control_on_attach: false,
         }
     }
 }
@@ -105,7 +107,11 @@ where
         ingress,
     );
 
-    let hci_join = spawn_hci_worker(ports, transport_tx.clone());
+    let hci_join = spawn_hci_worker(
+        ports,
+        transport_tx.clone(),
+        config.sanitize_rx_flow_control_on_attach,
+    );
 
     HciStack {
         control,
@@ -140,6 +146,7 @@ mod tests {
                 control_inbox_capacity: 4,
                 iso_data_inbox_capacity: 2,
                 report_inbox_capacity: 4,
+                sanitize_rx_flow_control_on_attach: false,
             },
         );
 
@@ -156,5 +163,6 @@ mod tests {
         assert!(config.control_inbox_capacity > 0);
         assert!(config.iso_data_inbox_capacity > 0);
         assert!(config.report_inbox_capacity > 0);
+        assert!(!config.sanitize_rx_flow_control_on_attach);
     }
 }

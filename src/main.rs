@@ -52,6 +52,14 @@ fn main() {
                 }
             );
             println!(
+                "Controller RX flow-control sanitize: {}",
+                if config.sanitize_rx_flow_control_ab {
+                    "A/B ON (explicit OFF before resetless attach)"
+                } else {
+                    "off (resetless baseline)"
+                }
+            );
+            println!(
                 "Teardown Release: {}",
                 if config.group_release_ab {
                     "GROUP A/B (all active members issued before waiting)"

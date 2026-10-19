@@ -66,6 +66,7 @@ pub struct LiveRelayConfig {
     pub live_duration: Duration,
     pub longevity_test: bool,
     pub group_release_ab: bool,
+    pub sanitize_rx_flow_control_ab: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +100,7 @@ pub fn parse_live_relay_args(
     let mut requested_live_seconds = None;
     let mut longevity_test = false;
     let mut group_release_ab = false;
+    let mut sanitize_rx_flow_control_ab = false;
     let mut confirmed = false;
     let mut index = 0usize;
 
@@ -166,6 +168,16 @@ pub fn parse_live_relay_args(
                 group_release_ab = true;
                 index += 1;
             }
+            "--sanitize-rx-flow-control-ab" => {
+                if sanitize_rx_flow_control_ab {
+                    return Err(
+                        "--sanitize-rx-flow-control-ab specified more than once"
+                            .into(),
+                    );
+                }
+                sanitize_rx_flow_control_ab = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -220,6 +232,7 @@ pub fn parse_live_relay_args(
         live_duration,
         longevity_test,
         group_release_ab,
+        sanitize_rx_flow_control_ab,
     })
 }
 
@@ -523,7 +536,10 @@ pub fn execute_live_relay(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let mut hci_config = HciStackConfig::default();
+    hci_config.sanitize_rx_flow_control_on_attach =
+        config.sanitize_rx_flow_control_ab;
+    let stack = spawn_be200_hci_stack(hci_config);
     let run = run_live_media(
         &stack,
         plan,
@@ -585,6 +601,16 @@ mod tests {
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
         assert!(!config.group_release_ab);
+        assert!(!config.sanitize_rx_flow_control_ab);
+    }
+
+    #[test]
+    fn parser_enables_explicit_rx_flow_control_sanitize_ab() {
+        let mut value = args();
+        value.push("--sanitize-rx-flow-control-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.sanitize_rx_flow_control_ab);
     }
 
     #[test]

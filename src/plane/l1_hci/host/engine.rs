@@ -4,6 +4,7 @@ use bumble_hci::{
     codes::{
         HCI_DISCONNECT_COMMAND,
         HCI_READ_BD_ADDR_COMMAND,
+        HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND,
         HCI_LE_CLEAR_FILTER_ACCEPT_LIST_COMMAND,
         HCI_LE_CREATE_CONNECTION_CANCEL_COMMAND,
         HCI_LE_ENABLE_ENCRYPTION_COMMAND,
@@ -142,6 +143,7 @@ pub enum EngineFault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalAttachState {
     Idle,
+    SanitizingRxFlowControl,
     Discovering,
     Ready,
     Failed(OperationalAttachFailure),
@@ -149,6 +151,8 @@ pub enum OperationalAttachState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalAttachFailure {
+    ControllerToHostFlowControlStatus(u8),
+    ControllerToHostFlowControlMalformed,
     SupportedCommandsStatus(u8),
     HostInitializationFailed,
 }
@@ -201,6 +205,7 @@ pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
     attach_state: OperationalAttachState,
+    sanitize_rx_flow_control_on_attach: bool,
     scan_state: PassiveScanState,
     scan_pending_opcode: Option<u16>,
     scan_accumulator: ScanAccumulator,
@@ -249,10 +254,18 @@ pub struct HciEngine {
 
 impl HciEngine {
     pub fn new(tx: TransportTx) -> Self {
+        Self::new_with_attach_policy(tx, false)
+    }
+
+    pub(crate) fn new_with_attach_policy(
+        tx: TransportTx,
+        sanitize_rx_flow_control_on_attach: bool,
+    ) -> Self {
         Self {
             device: Device::new(0),
             link: QueueHostTransport::new(tx),
             attach_state: OperationalAttachState::Idle,
+            sanitize_rx_flow_control_on_attach,
             scan_state: PassiveScanState::Idle,
             scan_pending_opcode: None,
             scan_accumulator: ScanAccumulator::default(),
@@ -1566,25 +1579,41 @@ impl HciEngine {
         })
     }
 
+    fn start_supported_commands_attach(
+        &mut self,
+    ) -> Result<(), EngineFault> {
+        self.link
+            .handle_command(0, Command::ReadLocalSupportedCommands);
+        self.check_link_fault()?;
+        self.attach_state = OperationalAttachState::Discovering;
+        Ok(())
+    }
+
     /// Attach to an already-operational controller without issuing HCI Reset.
     ///
-    /// Bumble Device already contains the asynchronous capability-discovery and
-    /// host-initialization completion chain. Kicking only Supported Commands is
-    /// enough for Device::poll() to schedule the remaining capability/event-mask/
-    /// buffer-size commands as completions arrive.
+    /// Product default remains resetless. Review/HIL can request one
+    /// idempotent controller-global hygiene command first: explicitly disable
+    /// Controller->Host flow control, then start the existing Bumble
+    /// capability/event-mask/buffer discovery chain.
     pub fn begin_operational_attach(&mut self) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Idle {
             return Ok(());
         }
 
-        self.link
-            .handle_command(0, Command::ReadLocalSupportedCommands);
-
-        if let Some(fault) = self.link.take_fault() {
-            return Err(EngineFault::Link(fault));
+        if !self.sanitize_rx_flow_control_on_attach {
+            return self.start_supported_commands_attach();
         }
 
-        self.attach_state = OperationalAttachState::Discovering;
+        let command = Command::SetControllerToHostFlowControl {
+            flow_control_enable: 0,
+        };
+        self.link.suppress_next_command_complete(
+            HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND,
+        );
+        self.link.handle_command(0, command);
+        self.check_link_fault()?;
+        self.attach_state =
+            OperationalAttachState::SanitizingRxFlowControl;
         Ok(())
     }
 
@@ -1648,6 +1677,7 @@ impl HciEngine {
 
     fn process_observations(&mut self) -> Result<(), EngineFault> {
         for observation in self.link.take_observations() {
+            self.process_attach_sanitize_observation(&observation)?;
             self.process_data_credit_observation(&observation)?;
             self.process_controller_identity_observation(&observation);
             self.process_privacy_observation(&observation)?;
@@ -1659,6 +1689,56 @@ impl HciEngine {
             self.process_cig_observation(&observation)?;
             self.process_scan_observation(&observation)?;
         }
+        Ok(())
+    }
+
+    fn process_attach_sanitize_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state
+            != OperationalAttachState::SanitizingRxFlowControl
+        {
+            return Ok(());
+        }
+
+        match observation {
+            HciObservation::CommandComplete {
+                opcode,
+                status,
+                ..
+            } if *opcode
+                == HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND =>
+            {
+                match status {
+                    Some(0) => self.start_supported_commands_attach()?,
+                    Some(status) => {
+                        self.attach_state = OperationalAttachState::Failed(
+                            OperationalAttachFailure::
+                                ControllerToHostFlowControlStatus(*status),
+                        );
+                    }
+                    None => {
+                        self.attach_state = OperationalAttachState::Failed(
+                            OperationalAttachFailure::
+                                ControllerToHostFlowControlMalformed,
+                        );
+                    }
+                }
+            }
+            HciObservation::CommandStatus { opcode, status }
+                if *opcode
+                    == HCI_SET_CONTROLLER_TO_HOST_FLOW_CONTROL_COMMAND
+                    && *status != 0 =>
+            {
+                self.attach_state = OperationalAttachState::Failed(
+                    OperationalAttachFailure::
+                        ControllerToHostFlowControlStatus(*status),
+                );
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 
@@ -3154,6 +3234,63 @@ mod tests {
         );
         assert!(engine.device().controller_ready());
         assert_eq!(engine.device().reset_status(), None);
+    }
+
+    #[test]
+    fn review_attach_can_disable_controller_to_host_flow_control_first() {
+        let (tx, rx) = TransportTx::test_channel(8);
+        let mut engine = HciEngine::new_with_attach_policy(tx, true);
+
+        engine.begin_operational_attach().unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            HostPacket::Command(vec![0x31, 0x0c, 0x01, 0x00])
+        );
+        assert_eq!(
+            engine.attach_state(),
+            OperationalAttachState::SanitizingRxFlowControl
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x31, 0x0c, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            HostPacket::Command(vec![0x02, 0x10, 0x00])
+        );
+        assert_eq!(
+            engine.attach_state(),
+            OperationalAttachState::Discovering
+        );
+        assert_eq!(engine.device().reset_status(), None);
+    }
+
+    #[test]
+    fn review_attach_surfaces_flow_control_disable_failure() {
+        let (tx, rx) = TransportTx::test_channel(8);
+        let mut engine = HciEngine::new_with_attach_policy(tx, true);
+
+        engine.begin_operational_attach().unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0e, 0x04, 0x01, 0x31, 0x0c, 0x0c,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.attach_state(),
+            OperationalAttachState::Failed(
+                OperationalAttachFailure::
+                    ControllerToHostFlowControlStatus(0x0c)
+            )
+        );
     }
 
     #[test]
