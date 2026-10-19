@@ -43,7 +43,8 @@ use crate::{
             fingerprint_bond_store, load_verified_bond_set,
         },
         round8::current_path::{
-            control_plan, CurrentPathControlDriver,
+            control_plan, read_acl_audit_diagnostic,
+            CurrentPathControlDriver,
         },
     },
 };

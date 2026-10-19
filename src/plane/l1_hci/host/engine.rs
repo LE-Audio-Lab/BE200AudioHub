@@ -62,7 +62,7 @@ use crate::{
                     FalConnectTransaction, FalConnectionState,
                     LeConnectionSetSnapshot, LeConnectionSnapshot,
                 },
-                credit::{AclCreditAudit, AclCreditFault},
+                credit::{AclCreditAudit, AclCreditFault, AclCreditSnapshot},
                 privacy::{
                     ControllerPrivacyState, PrivacyAction, PrivacyClearAction,
                     PrivacyClearTransaction, PrivacyConfigError,
