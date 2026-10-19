@@ -76,6 +76,17 @@ impl HciWorkerJoin {
 pub(crate) fn spawn_hci_worker(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
+) -> HciWorkerJoin {
+    spawn_hci_worker_with_attach_policy(
+        ports,
+        transport_tx,
+        false,
+    )
+}
+
+pub(crate) fn spawn_hci_worker_with_attach_policy(
+    ports: HciWorkerPorts,
+    transport_tx: TransportTx,
     sanitize_rx_flow_control_on_attach: bool,
 ) -> HciWorkerJoin {
     let join = thread::Builder::new()

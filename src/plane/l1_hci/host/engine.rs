@@ -808,7 +808,8 @@ impl HciEngine {
     pub fn condition_state(&self) -> HciConditionState {
         let state = match self.attach_state {
             OperationalAttachState::Idle => HciHostState::Detached,
-            OperationalAttachState::Discovering => HciHostState::Attaching,
+            OperationalAttachState::SanitizingRxFlowControl
+            | OperationalAttachState::Discovering => HciHostState::Attaching,
             OperationalAttachState::Ready => HciHostState::Ready,
             OperationalAttachState::Failed(_) => HciHostState::Faulted,
         };

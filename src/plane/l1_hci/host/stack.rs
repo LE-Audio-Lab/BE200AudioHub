@@ -12,7 +12,9 @@ use crate::{
     },
 };
 
-use super::worker::{spawn_hci_worker, HciWorkerExit, HciWorkerJoin};
+use super::worker::{
+    spawn_hci_worker_with_attach_policy, HciWorkerExit, HciWorkerJoin,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HciStackConfig {
@@ -107,7 +109,7 @@ where
         ingress,
     );
 
-    let hci_join = spawn_hci_worker(
+    let hci_join = spawn_hci_worker_with_attach_policy(
         ports,
         transport_tx.clone(),
         config.sanitize_rx_flow_control_on_attach,
