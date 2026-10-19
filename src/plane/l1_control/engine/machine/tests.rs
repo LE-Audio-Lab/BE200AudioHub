@@ -3412,9 +3412,17 @@ fn final_model_low_qos_changes_only_iso_reliability_budget() {
 
 #[test]
 fn final_model_single_cis_right_uses_only_right_after_codec() {
-    let mut machine = machine_at_codec_configured();
-    machine.review_profile = ReviewStreamProfile::SingleCisRight;
+    let mut machine = machine_at_codec_planned();
+    let actions = machine.begin_codec_configuration().unwrap();
+    let actions = drive_ase_prepare(&mut machine, actions);
+    let actions =
+        drive_config_codec(&mut machine, AudioSide::Left, actions);
+    let actions = drive_ase_prepare(&mut machine, actions);
+    let _ =
+        drive_config_codec(&mut machine, AudioSide::Right, actions);
+    assert_eq!(machine.phase(), ControlPhase::CodecConfigured);
 
+    machine.review_profile = ReviewStreamProfile::SingleCisRight;
     machine.plan_iso().unwrap();
     let plan = machine.planned.iso_plan().unwrap().clone();
     let actions = machine.begin_cig_configuration().unwrap();
