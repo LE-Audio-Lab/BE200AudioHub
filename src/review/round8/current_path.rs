@@ -88,6 +88,7 @@ const MAX_CLEANUP_GATT_VALUE_PREFIX: usize = 24;
 const RELEASE_TIMEOUT_READBACK_TIMEOUT: Duration = Duration::from_secs(2);
 const RELEASE_TIMEOUT_READBACK_LEFT_ID: u64 = u64::MAX - 1;
 const RELEASE_TIMEOUT_READBACK_RIGHT_ID: u64 = u64::MAX - 2;
+const LIVE_LIVENESS_REQUEST_ID_START: u64 = u64::MAX - 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentPathConfig {
@@ -256,6 +257,77 @@ enum CleanupAseReadbackResult {
     },
     GattFailed(String),
     TimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AseLivenessOutcome {
+    Responsive {
+        ase_id: u8,
+        state: u8,
+    },
+    ParseFailed {
+        value: Vec<u8>,
+        error: String,
+    },
+    GattFailed(String),
+    TimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AseLivenessProbe {
+    pub(crate) side: AudioSide,
+    pub(crate) connection_handle: u16,
+    pub(crate) attribute_handle: u16,
+    pub(crate) outcome: AseLivenessOutcome,
+    pub(crate) before: AclCreditSnapshot,
+    pub(crate) after: AclCreditSnapshot,
+}
+
+impl AseLivenessProbe {
+    pub(crate) fn timed_out(&self) -> bool {
+        matches!(self.outcome, AseLivenessOutcome::TimedOut)
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let outcome = match &self.outcome {
+            AseLivenessOutcome::Responsive { ase_id, state } => {
+                format!("responsive(ase_id={ase_id}, state=0x{state:02x})")
+            }
+            AseLivenessOutcome::ParseFailed { value, error } => {
+                format!(
+                    "parse-failed(value={value:02x?}, error={error})"
+                )
+            }
+            AseLivenessOutcome::GattFailed(error) => {
+                format!("gatt-failed({error})")
+            }
+            AseLivenessOutcome::TimedOut => "timeout".into(),
+        };
+
+        format!(
+            "{:?} conn=0x{:04x} ase_handle=0x{:04x} result={} delta_host_submit={} delta_ncp_complete={} delta_mailbox={} delta_usb_submit={} delta_usb_complete={} delta_acl_rx={} delta_att_pdus={} delta_gatt_values={}",
+            self.side,
+            self.connection_handle,
+            self.attribute_handle,
+            outcome,
+            self.after.audit_total_submitted
+                .saturating_sub(self.before.audit_total_submitted),
+            self.after.audit_total_completed
+                .saturating_sub(self.before.audit_total_completed),
+            self.after.transport_mailbox_enqueued
+                .saturating_sub(self.before.transport_mailbox_enqueued),
+            self.after.transport_usb_submitted
+                .saturating_sub(self.before.transport_usb_submitted),
+            self.after.transport_usb_completed
+                .saturating_sub(self.before.transport_usb_completed),
+            self.after.controller_acl_rx_packets
+                .saturating_sub(self.before.controller_acl_rx_packets),
+            self.after.att_pdus_drained
+                .saturating_sub(self.before.att_pdus_drained),
+            self.after.gatt_value_events
+                .saturating_sub(self.before.gatt_value_events),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -1158,6 +1230,7 @@ pub(crate) struct CurrentPathControlDriver {
     cleanup_acl_audits: Vec<CleanupAseAclAudit>,
     cleanup_ase_readbacks: Vec<CleanupAseReadbackDiagnostic>,
     cleanup_gatt_trace: Vec<String>,
+    next_liveness_request_id: u64,
 }
 
 impl CurrentPathControlDriver {
@@ -1191,6 +1264,7 @@ impl CurrentPathControlDriver {
             cleanup_acl_audits: Vec::new(),
             cleanup_ase_readbacks: Vec::new(),
             cleanup_gatt_trace: Vec::new(),
+            next_liveness_request_id: LIVE_LIVENESS_REQUEST_ID_START,
         })
     }
 
@@ -1280,6 +1354,173 @@ impl CurrentPathControlDriver {
 
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
         self.condition.control_status()
+    }
+
+    /// Review/HIL-only ATT liveness read. A timeout deliberately leaves the
+    /// GATT transaction pending; callers must stop this diagnostic run rather
+    /// than continue protocol work, because cancelling would poison the fixed
+    /// ATT bearer and contaminate subsequent evidence.
+    pub(crate) fn probe_ase_liveness(
+        &mut self,
+        stack: &HciStack,
+        side: AudioSide,
+        timeout: Duration,
+    ) -> Result<AseLivenessProbe, String> {
+        let prepared = self
+            .control
+            .prepared_ase_for_review(side)
+            .ok_or_else(|| {
+                format!(
+                    "ASE liveness probe has no prepared control for {side:?}"
+                )
+            })?;
+        let connection = prepared.sink.connection;
+        let attribute_handle = prepared.sink.ase_value_handle;
+        let request_id = self.next_liveness_request_id;
+        self.next_liveness_request_id = self
+            .next_liveness_request_id
+            .checked_sub(1)
+            .ok_or_else(|| {
+                "ASE liveness request ID space exhausted".to_string()
+            })?;
+
+        let mut trace = Vec::new();
+        let before = match read_acl_audit_before_cleanup(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            &mut trace,
+        )? {
+            CleanupAseAclAuditResult::Snapshot(snapshot) => snapshot,
+            CleanupAseAclAuditResult::Unavailable(error) => {
+                return Err(format!(
+                    "ASE liveness pre-audit unavailable: {error}"
+                ));
+            }
+        };
+
+        stack
+            .control()
+            .try_begin_gatt(GattRequest {
+                request_id,
+                connection,
+                operation: GattOperation::ReadValue {
+                    attribute_handle,
+                },
+            })
+            .map_err(|error| {
+                format!(
+                    "ASE liveness ReadValue dispatch failed for {side:?}: {error:?}"
+                )
+            })?;
+
+        let deadline = Instant::now() + timeout;
+        let outcome = loop {
+            match stack.reports().try_recv() {
+                Ok(HciReport::Gatt(GattReport::Complete {
+                    request_id: actual_request_id,
+                    connection: actual_connection,
+                    result:
+                        GattResult::Value {
+                            attribute_handle: actual_handle,
+                            value,
+                        },
+                })) if actual_request_id == request_id
+                    && actual_connection == connection
+                    && actual_handle == attribute_handle =>
+                {
+                    break match parse_ase_status_compat(&value) {
+                        Ok(status) => AseLivenessOutcome::Responsive {
+                            ase_id: status.ase_id,
+                            state: status.state.0,
+                        },
+                        Err(error) => AseLivenessOutcome::ParseFailed {
+                            value,
+                            error: format!("{error:?}"),
+                        },
+                    };
+                }
+                Ok(HciReport::Gatt(GattReport::Complete {
+                    request_id: actual_request_id,
+                    connection: actual_connection,
+                    result,
+                })) if actual_request_id == request_id
+                    && actual_connection == connection =>
+                {
+                    break AseLivenessOutcome::GattFailed(format!(
+                        "unexpected result: {result:?}"
+                    ));
+                }
+                Ok(HciReport::Gatt(GattReport::Failed(failure)))
+                    if failure.request_id == request_id
+                        && failure.connection == connection =>
+                {
+                    break AseLivenessOutcome::GattFailed(format!(
+                        "{:?}",
+                        failure.kind,
+                    ));
+                }
+                Ok(HciReport::Gatt(GattReport::BearerPoisoned {
+                    connection: actual_connection,
+                    request_id: actual_request_id,
+                })) if actual_request_id == request_id
+                    && actual_connection == connection =>
+                {
+                    break AseLivenessOutcome::GattFailed(
+                        "bearer poisoned".into(),
+                    );
+                }
+                Ok(report) => {
+                    process_report(
+                        stack,
+                        &mut self.control,
+                        &mut self.condition,
+                        self.scope,
+                        &mut self.timers,
+                        &mut self.binding,
+                        report,
+                    )?;
+                }
+                Err(RecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        break AseLivenessOutcome::TimedOut;
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(RecvError::Disconnected) => {
+                    return Err("HCI report lane disconnected".into());
+                }
+            }
+        };
+
+        let after = match read_acl_audit_before_cleanup(
+            stack,
+            &mut self.control,
+            &mut self.condition,
+            self.scope,
+            &mut self.timers,
+            &mut self.binding,
+            &mut trace,
+        )? {
+            CleanupAseAclAuditResult::Snapshot(snapshot) => snapshot,
+            CleanupAseAclAuditResult::Unavailable(error) => {
+                return Err(format!(
+                    "ASE liveness post-audit unavailable: {error}"
+                ));
+            }
+        };
+
+        Ok(AseLivenessProbe {
+            side,
+            connection_handle: connection.connection_handle,
+            attribute_handle,
+            outcome,
+            before,
+            after,
+        })
     }
 
     pub(crate) fn iso_audit(
@@ -1696,6 +1937,54 @@ mod tests {
         ));
         assert!(text.contains("probe_delta_host_submit=1"));
         assert!(text.contains("probe_delta_acl_rx=1"));
+    }
+
+
+    #[test]
+    fn ase_liveness_summary_exposes_tx_and_rx_deltas() {
+        let before = AclCreditSnapshot {
+            bumble_pending: 0,
+            audit_in_flight: 0,
+            audit_limit: Some(6),
+            controller_acl_rx_packets: 10,
+            att_pdus_drained: 10,
+            gatt_value_events: 4,
+            audit_total_submitted: 20,
+            audit_total_completed: 20,
+            audit_total_retired: 0,
+            transport_mailbox_enqueued: 20,
+            transport_usb_submitted: 20,
+            transport_usb_completed: 20,
+            recent_att_writes: [None; 4],
+        };
+        let after = AclCreditSnapshot {
+            controller_acl_rx_packets: 11,
+            att_pdus_drained: 11,
+            audit_total_submitted: 21,
+            audit_total_completed: 21,
+            transport_mailbox_enqueued: 21,
+            transport_usb_submitted: 21,
+            transport_usb_completed: 21,
+            ..before
+        };
+        let probe = AseLivenessProbe {
+            side: AudioSide::Right,
+            connection_handle: 0x0800,
+            attribute_handle: 0x0046,
+            outcome: AseLivenessOutcome::Responsive {
+                ase_id: 1,
+                state: 0x04,
+            },
+            before,
+            after,
+        };
+
+        let text = probe.summary();
+        assert!(text.contains("result=responsive(ase_id=1, state=0x04)"));
+        assert!(text.contains("delta_host_submit=1"));
+        assert!(text.contains("delta_ncp_complete=1"));
+        assert!(text.contains("delta_acl_rx=1"));
+        assert!(text.contains("delta_att_pdus=1"));
     }
 
 }

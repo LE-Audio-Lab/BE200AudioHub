@@ -52,6 +52,14 @@ fn main() {
                 }
             );
             println!(
+                "ACL RX liveness probe: {}",
+                if config.acl_rx_liveness_ab {
+                    "A/B ON (ASE Read at pre-media + live checkpoints; aborts on first timeout)"
+                } else {
+                    "off"
+                }
+            );
+            println!(
                 "Controller RX flow-control sanitize: {}",
                 if config.sanitize_rx_flow_control_ab {
                     "A/B ON (explicit OFF before resetless attach)"

@@ -27,6 +27,7 @@ use crate::{
             },
             iso::credit::IsoCreditSnapshot,
         },
+        l1_control::interface::stream::AudioSide,
         l1_media::{
             live::{
                 LivePcmIsoWorker, LivePcmWorkerExit,
@@ -55,6 +56,8 @@ const DEFAULT_LONGEVITY_SECONDS: u64 = 300;
 const MAX_LONGEVITY_SECONDS: u64 = 86_400;
 const LONGEVITY_HEARTBEAT_STEPS: u64 = 10;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
+const ACL_LIVENESS_PROBE_TIMEOUT: Duration =
+    Duration::from_millis(750);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRelayConfig {
@@ -67,6 +70,7 @@ pub struct LiveRelayConfig {
     pub longevity_test: bool,
     pub group_release_ab: bool,
     pub sanitize_rx_flow_control_ab: bool,
+    pub acl_rx_liveness_ab: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +105,7 @@ pub fn parse_live_relay_args(
     let mut longevity_test = false;
     let mut group_release_ab = false;
     let mut sanitize_rx_flow_control_ab = false;
+    let mut acl_rx_liveness_ab = false;
     let mut confirmed = false;
     let mut index = 0usize;
 
@@ -178,6 +183,15 @@ pub fn parse_live_relay_args(
                 sanitize_rx_flow_control_ab = true;
                 index += 1;
             }
+            "--acl-rx-liveness-ab" => {
+                if acl_rx_liveness_ab {
+                    return Err(
+                        "--acl-rx-liveness-ab specified more than once".into(),
+                    );
+                }
+                acl_rx_liveness_ab = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -233,6 +247,7 @@ pub fn parse_live_relay_args(
         longevity_test,
         group_release_ab,
         sanitize_rx_flow_control_ab,
+        acl_rx_liveness_ab,
     })
 }
 
@@ -360,6 +375,77 @@ fn print_longevity_snapshot(
     );
 }
 
+fn run_acl_liveness_probe(
+    label: &str,
+    stack: &HciStack,
+    driver: &mut CurrentPathControlDriver,
+) -> Result<bool, String> {
+    let probe = driver.probe_ase_liveness(
+        stack,
+        AudioSide::Right,
+        ACL_LIVENESS_PROBE_TIMEOUT,
+    )?;
+    println!("[acl-liveness] {label}: {}", probe.summary());
+    Ok(probe.timed_out())
+}
+
+fn wait_live_duration_with_acl_liveness(
+    duration: Duration,
+    source: &ProcessLoopbackSource,
+    media: &LivePcmIsoWorker,
+    stack: &HciStack,
+    driver: &mut CurrentPathControlDriver,
+    audit_origin: &IsoCreditSnapshot,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut targets = vec![
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(15),
+    ];
+    if duration > Duration::from_secs(20) {
+        targets.push(duration.saturating_sub(Duration::from_secs(1)));
+    }
+    targets.retain(|target| *target < duration);
+    targets.sort_unstable();
+    targets.dedup();
+
+    for target in targets {
+        let elapsed = started.elapsed();
+        if elapsed < target {
+            thread::sleep(target - elapsed);
+        }
+
+        let label = format!("live t={:.1}s", started.elapsed().as_secs_f64());
+        if run_acl_liveness_probe(&label, stack, driver)? {
+            return Err(format!(
+                "ACL RX liveness A/B DEAD at {label}; ATT Read left pending by design, so graceful GATT teardown must be skipped for this diagnostic run"
+            ));
+        }
+
+        // Keep the data-plane evidence visible beside each successful ATT
+        // liveness read without changing media scheduling semantics.
+        let source_stats = source.stats();
+        let media_stats = media.snapshot();
+        let iso = driver.iso_audit(stack)?;
+        println!(
+            "[acl-liveness]   media capture_frames={} intervals={} pcm_fill={} iso_submitted={} iso_completed={} iso_in_flight={}",
+            source_stats.captured_frames,
+            media_stats.pcm.intervals_consumed,
+            media_stats.pcm_fill_frames,
+            iso.total_submitted.saturating_sub(audit_origin.total_submitted),
+            iso.total_completed.saturating_sub(audit_origin.total_completed),
+            iso.in_flight,
+        );
+    }
+
+    let elapsed = started.elapsed();
+    if elapsed < duration {
+        thread::sleep(duration - elapsed);
+    }
+    Ok(())
+}
+
 fn wait_live_duration(
     duration: Duration,
     longevity_test: bool,
@@ -425,11 +511,25 @@ fn run_live_media(
     duration: Duration,
     longevity_test: bool,
     group_release_ab: bool,
+    acl_rx_liveness_ab: bool,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
+
+    if acl_rx_liveness_ab
+        && run_acl_liveness_probe(
+            "pre-media / route-bound",
+            stack,
+            &mut driver,
+        )?
+    {
+        return Err(
+            "ACL RX liveness A/B DEAD before media start; ATT Read left pending by design and graceful GATT teardown intentionally skipped"
+                .into(),
+        );
+    }
 
     let (boundary, producer) = PcmRelayBoundary::relay_defaults();
     let media = LivePcmIsoWorker::start(
@@ -463,21 +563,64 @@ fn run_live_media(
             }
         };
 
-    let wait_result = wait_live_duration(
-        duration,
-        longevity_test,
-        &source,
-        &media,
-        stack,
-        &mut driver,
-        &audit_before,
-    );
+    let wait_result = if acl_rx_liveness_ab {
+        wait_live_duration_with_acl_liveness(
+            duration,
+            &source,
+            &media,
+            stack,
+            &mut driver,
+            &audit_before,
+        )
+    } else {
+        wait_live_duration(
+            duration,
+            longevity_test,
+            &source,
+            &media,
+            stack,
+            &mut driver,
+            &audit_before,
+        )
+    };
 
     let source_result = source.shutdown();
     let media_result = media.shutdown();
 
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
+
+    let diagnostic_dead = wait_result
+        .as_ref()
+        .err()
+        .map(|error| error.starts_with("ACL RX liveness A/B DEAD"))
+        .unwrap_or(false);
+
+    let post_media_liveness_dead = if acl_rx_liveness_ab
+        && !diagnostic_dead
+        && audit_after_result.is_ok()
+    {
+        run_acl_liveness_probe(
+            "post-media / ISO-drained / pre-Stop",
+            stack,
+            &mut driver,
+        )?
+    } else {
+        false
+    };
+
+    if diagnostic_dead || post_media_liveness_dead {
+        let _ = source_result;
+        let _ = media_result;
+        let _ = audit_after_result;
+        return Err(if diagnostic_dead {
+            wait_result.unwrap_err()
+        } else {
+            "ACL RX liveness A/B DEAD after media shutdown and ISO drain but before StopControl; ATT Read left pending by design, graceful GATT teardown intentionally skipped"
+                .into()
+        });
+    }
+
     let stop_result = if group_release_ab {
         driver.stop_group_release_ab(stack)
     } else {
@@ -547,6 +690,7 @@ pub fn execute_live_relay(
         config.live_duration,
         config.longevity_test,
         config.group_release_ab,
+        config.acl_rx_liveness_ab,
     );
     let exit = stack.shutdown();
 
@@ -602,6 +746,16 @@ mod tests {
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
         assert!(!config.group_release_ab);
         assert!(!config.sanitize_rx_flow_control_ab);
+        assert!(!config.acl_rx_liveness_ab);
+    }
+
+    #[test]
+    fn parser_enables_explicit_acl_rx_liveness_ab() {
+        let mut value = args();
+        value.push("--acl-rx-liveness-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.acl_rx_liveness_ab);
     }
 
     #[test]
