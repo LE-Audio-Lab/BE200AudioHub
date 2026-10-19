@@ -39,6 +39,119 @@ fn main() {
                     }
                 };
 
+            if let Some(model) = config.final_model {
+                println!(
+                    "Round9 final-model HIL: {}",
+                    model.as_str()
+                );
+                println!("Target set: {}", config.target_name);
+                println!(
+                    "Fixed duration: {:.0} s; checkpoint=5 s; teardown=Review emergency (no ASCS Release)",
+                    config.live_duration.as_secs_f64(),
+                );
+                match model {
+                    round8_live_relay::FinalModel::AclOnly => {
+                        println!(
+                            "Topology: dual encrypted ACL + dual GATT/ASCS CodecConfigured; NO CIG/CIS/ISO."
+                        );
+                    }
+                    round8_live_relay::FinalModel::SingleCis => {
+                        println!(
+                            "Topology: dual encrypted ACL; Right-only QoS/Enable/CIS/InputPath/Streaming; raw valid LC3 silence at 100 B / 10 ms."
+                        );
+                    }
+                    round8_live_relay::FinalModel::DualCisLowQos => {
+                        println!(
+                            "Topology: product dual CIS; 48 kHz/10 ms/100 B/2M; RTN=3; max transport latency=22 ms; valid stereo LC3 silence."
+                        );
+                    }
+                }
+                println!(
+                    "Probe policy: pre-run + every 5 s Read ASE on BOTH ears; ACL runtime snapshot at every checkpoint."
+                );
+
+                match round8_live_relay::execute_final_model(config) {
+                    Ok(result) => {
+                        println!("Firmware bypass: {:?}", result.firmware);
+                        println!(
+                            "Stored controller identity: {}",
+                            result.controller_identity
+                        );
+                        println!(
+                            "Checkpoints passed: {}",
+                            result.checkpoints_passed
+                        );
+                        if let Some(pressure) = result.pressure {
+                            println!(
+                                "ISO pressure: attempted={} submitted={} backpressure_drop={} grid_skipped={}",
+                                pressure.attempted_intervals,
+                                pressure.submitted_intervals,
+                                pressure.backpressure_drops,
+                                pressure.grid_skipped,
+                            );
+                        }
+                        if let (Some(before), Some(after)) =
+                            (&result.audit_before, &result.audit_after)
+                        {
+                            println!(
+                                "ISO Host delta: submitted={} completed={} in_flight_after={}",
+                                after.total_submitted
+                                    .saturating_sub(before.total_submitted),
+                                after.total_completed
+                                    .saturating_sub(before.total_completed),
+                                after.in_flight,
+                            );
+                        }
+                        println!(
+                            "Emergency teardown -> Control Idle: {}",
+                            if result.emergency_teardown_ok {
+                                "PASS"
+                            } else {
+                                "FAIL"
+                            }
+                        );
+                        println!(
+                            "Bond store unchanged: {}",
+                            result.bond_unchanged
+                        );
+                        println!(
+                            "Shutdown: hci={:?} transport={:?}",
+                            result.exit.hci,
+                            result.exit.transport
+                        );
+
+                        if let Some(failure) = &result.failure {
+                            eprintln!(
+                                "FINAL MODEL {}: FAIL — {}",
+                                result.model.as_str(),
+                                failure,
+                            );
+                        } else if result.passed() {
+                            println!(
+                                "FINAL MODEL {}: PASS",
+                                result.model.as_str()
+                            );
+                        } else {
+                            eprintln!(
+                                "FINAL MODEL {}: INFRA/CLEANUP FAIL",
+                                result.model.as_str()
+                            );
+                        }
+
+                        if result.passed() {
+                            return;
+                        }
+                        std::process::exit(1);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "Round9 final-model HIL FAILED before verdict: {error}"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             println!(
                 "Round8 live relay HIL: Windows Process Loopback -> Relay PCM boundary -> live LC3/StreamClock/IsoTxBridge -> current logical HCI ISO path"
             );
