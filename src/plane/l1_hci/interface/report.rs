@@ -4,7 +4,8 @@ use crate::{
     plane::l1_hci::{
         acl::{
             connection::{
-                DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
+                AclRuntimeSnapshot, DisconnectState, FalConnectionState,
+                LeConnectionSetSnapshot,
             },
             credit::AclCreditSnapshot,
             privacy::ControllerPrivacyState,
@@ -49,6 +50,7 @@ pub enum HciReport {
     StoredEncryptionState(StoredEncryptionState),
     CisHostFeatureState(CisHostFeatureState),
     AclTxAudit(AclCreditSnapshot),
+    AclRuntimeSnapshot(AclRuntimeSnapshot),
     IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),

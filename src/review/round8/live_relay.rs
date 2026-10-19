@@ -405,6 +405,11 @@ fn run_acl_liveness_probe(
         ACL_LIVENESS_PROBE_TIMEOUT,
     )?;
     println!("[acl-liveness] {label}: {}", probe.summary());
+    let runtime = driver.read_acl_runtime_snapshot(stack)?;
+    println!(
+        "[acl-liveness]   ACL runtime: {}",
+        CurrentPathControlDriver::format_acl_runtime_snapshot(&runtime),
+    );
     if probe.timed_out() {
         let controller = driver.probe_controller_rssi(
             stack,

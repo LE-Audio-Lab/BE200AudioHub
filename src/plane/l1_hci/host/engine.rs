@@ -57,6 +57,7 @@ use crate::{
             },
             acl::{
                 connection::{
+                    AclRuntimeDataLength, AclRuntimeRecord, AclRuntimeSnapshot,
                     ConnectionEvent, ConnectionToken, DisconnectAction,
                     DisconnectConfigError, DisconnectEvent, DisconnectState,
                     DisconnectTransaction, FalConnectAction,
@@ -477,6 +478,52 @@ impl HciEngine {
 
     pub fn fal_connection_state(&self) -> &FalConnectionState {
         &self.fal_connection_state
+    }
+
+    pub fn acl_runtime_snapshot(&self) -> AclRuntimeSnapshot {
+        AclRuntimeSnapshot {
+            connections: self
+                .device
+                .le_connections()
+                .map(|info| {
+                    let generation = *self
+                        .connection_generations
+                        .get(&info.connection_handle)
+                        .expect("live LE connection missing generation");
+                    AclRuntimeRecord {
+                        connection: ConnectionToken {
+                            connection_handle: info.connection_handle,
+                            generation,
+                        },
+                        connection_interval:
+                            info.parameters.connection_interval,
+                        peripheral_latency:
+                            info.parameters.peripheral_latency,
+                        supervision_timeout:
+                            info.parameters.supervision_timeout,
+                        subrate_factor:
+                            info.parameters.subrate_factor,
+                        continuation_number:
+                            info.parameters.continuation_number,
+                        data_length: info.data_length.map(|length| {
+                            AclRuntimeDataLength {
+                                max_tx_octets: length.max_tx_octets,
+                                max_tx_time: length.max_tx_time,
+                                max_rx_octets: length.max_rx_octets,
+                                max_rx_time: length.max_rx_time,
+                            }
+                        }),
+                        tx_phy: info.phy.tx_phy,
+                        rx_phy: info.phy.rx_phy,
+                        rssi: info.rssi,
+                        encryption_enabled:
+                            info.encryption_enabled,
+                        encryption_key_size:
+                            info.encryption_key_size,
+                    }
+                })
+                .collect(),
+        }
     }
 
     pub fn connection_set_snapshot(&self) -> LeConnectionSetSnapshot {
@@ -4952,6 +4999,24 @@ mod tests {
             }
             other => panic!("expected Connected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn acl_runtime_snapshot_projects_negotiated_connection_state() {
+        let (mut engine, _rx) = engine(8);
+        let token =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        let snapshot = engine.acl_runtime_snapshot();
+        let record = snapshot.connections.iter()
+            .find(|record| record.connection == token)
+            .unwrap();
+        assert_eq!(record.connection_interval, 0x0018);
+        assert_eq!(record.peripheral_latency, 0);
+        assert_eq!(record.supervision_timeout, 0x002a);
+        assert_eq!(record.subrate_factor, 1);
+        assert_eq!(record.continuation_number, 0);
+        assert_eq!(record.encryption_enabled, 1);
     }
 
     #[test]

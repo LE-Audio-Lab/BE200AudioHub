@@ -4,6 +4,35 @@ use bumble_hci::Command;
 pub const DISCONNECT_REASON_REMOTE_USER_TERMINATED: u8 = 0x13;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AclRuntimeDataLength {
+    pub max_tx_octets: u16,
+    pub max_tx_time: u16,
+    pub max_rx_octets: u16,
+    pub max_rx_time: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AclRuntimeRecord {
+    pub connection: ConnectionToken,
+    pub connection_interval: u16,
+    pub peripheral_latency: u16,
+    pub supervision_timeout: u16,
+    pub subrate_factor: u16,
+    pub continuation_number: u16,
+    pub data_length: Option<AclRuntimeDataLength>,
+    pub tx_phy: u8,
+    pub rx_phy: u8,
+    pub rssi: Option<i8>,
+    pub encryption_enabled: u8,
+    pub encryption_key_size: u8,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AclRuntimeSnapshot {
+    pub connections: Vec<AclRuntimeRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisconnectConfigError {
     InvalidConnectionHandle(u16),
 }

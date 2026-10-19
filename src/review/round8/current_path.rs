@@ -42,6 +42,7 @@ use crate::{
         },
         l1_hci::{
             acl::{
+                connection::AclRuntimeSnapshot,
                 credit::AclCreditSnapshot,
                 security::StoredLeKeyMaterial,
             },
@@ -1542,6 +1543,94 @@ impl CurrentPathControlDriver {
             before,
             after,
         })
+    }
+
+    pub(crate) fn read_acl_runtime_snapshot(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<AclRuntimeSnapshot, String> {
+        stack
+            .control()
+            .try_read_acl_runtime_snapshot()
+            .map_err(|error| {
+                format!(
+                    "ACL runtime snapshot query rejected: {error:?}"
+                )
+            })?;
+
+        let deadline = Instant::now() + AUDIT_TIMEOUT;
+        loop {
+            match stack.reports().try_recv() {
+                Ok(HciReport::AclRuntimeSnapshot(snapshot)) => {
+                    return Ok(snapshot);
+                }
+                Ok(report) => {
+                    process_report(
+                        stack,
+                        &mut self.control,
+                        &mut self.condition,
+                        self.scope,
+                        &mut self.timers,
+                        &mut self.binding,
+                        report,
+                    )?;
+                }
+                Err(RecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Err(
+                            "ACL runtime snapshot query timed out".into()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(RecvError::Disconnected) => {
+                    return Err("HCI report lane disconnected".into());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn format_acl_runtime_snapshot(
+        snapshot: &AclRuntimeSnapshot,
+    ) -> String {
+        snapshot
+            .connections
+            .iter()
+            .map(|record| {
+                let data_length = record.data_length
+                    .map(|length| {
+                        format!(
+                            "{}/{}/{}/{}",
+                            length.max_tx_octets,
+                            length.max_tx_time,
+                            length.max_rx_octets,
+                            length.max_rx_time,
+                        )
+                    })
+                    .unwrap_or_else(|| "none".into());
+                let rssi = record.rssi
+                    .map(|value| format!("{value}dBm"))
+                    .unwrap_or_else(|| "none".into());
+
+                format!(
+                    "conn=0x{:04x}/g{} interval={} latency={} supervision={} subrate={} continuation={} phy={}/{} data_len={} rssi={} enc={}/{}",
+                    record.connection.connection_handle,
+                    record.connection.generation,
+                    record.connection_interval,
+                    record.peripheral_latency,
+                    record.supervision_timeout,
+                    record.subrate_factor,
+                    record.continuation_number,
+                    record.tx_phy,
+                    record.rx_phy,
+                    data_length,
+                    rssi,
+                    record.encryption_enabled,
+                    record.encryption_key_size,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     pub(crate) fn probe_controller_rssi(
