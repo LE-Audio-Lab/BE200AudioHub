@@ -405,6 +405,16 @@ fn run_acl_liveness_probe(
         ACL_LIVENESS_PROBE_TIMEOUT,
     )?;
     println!("[acl-liveness] {label}: {}", probe.summary());
+    if probe.timed_out() {
+        let controller = driver.probe_controller_rssi(
+            stack,
+            AudioSide::Right,
+            Duration::from_secs(2),
+        )?;
+        println!(
+            "[acl-liveness]   controller RSSI after ATT timeout: {controller}"
+        );
+    }
     Ok(probe.timed_out())
 }
 

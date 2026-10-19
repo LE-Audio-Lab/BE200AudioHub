@@ -49,9 +49,12 @@ use crate::{
                 GattOperation, GattReport, GattRequest, GattResult,
                 GattValueEvent,
             },
-            host::stack::{
+            host::{
+                engine::AclRssiProbeResult,
+                stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
+            },
             },
             interface::report::HciReport,
             iso::credit::IsoCreditSnapshot,
@@ -1537,6 +1540,96 @@ impl CurrentPathControlDriver {
             before,
             after,
         })
+    }
+
+    pub(crate) fn probe_controller_rssi(
+        &mut self,
+        stack: &HciStack,
+        side: AudioSide,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let prepared = self
+            .control
+            .prepared_ase_for_review(side)
+            .ok_or_else(|| {
+                format!(
+                    "controller RSSI probe has no prepared control for {side:?}"
+                )
+            })?;
+        let connection = prepared.sink.connection;
+
+        stack
+            .control()
+            .try_read_acl_rssi_probe(connection)
+            .map_err(|error| {
+                format!(
+                    "controller RSSI probe dispatch failed for {side:?}: {error:?}"
+                )
+            })?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match stack.reports().try_recv() {
+                Ok(HciReport::AclRssiProbe(result)) => {
+                    return Ok(match result {
+                        AclRssiProbeResult::Alive {
+                            connection,
+                            rssi,
+                        } => format!(
+                            "alive conn=0x{:04x}/g{} rssi={}dBm",
+                            connection.connection_handle,
+                            connection.generation,
+                            rssi,
+                        ),
+                        AclRssiProbeResult::Rejected {
+                            connection,
+                            status,
+                        } => format!(
+                            "rejected conn=0x{:04x}/g{} status=0x{status:02x}",
+                            connection.connection_handle,
+                            connection.generation,
+                        ),
+                        AclRssiProbeResult::Malformed {
+                            connection,
+                            parameters_after_status,
+                        } => format!(
+                            "malformed conn=0x{:04x}/g{} params={:02x?}",
+                            connection.connection_handle,
+                            connection.generation,
+                            parameters_after_status,
+                        ),
+                        AclRssiProbeResult::HandleMismatch {
+                            connection,
+                            returned_handle,
+                        } => format!(
+                            "handle-mismatch expected=0x{:04x}/g{} returned=0x{returned_handle:04x}",
+                            connection.connection_handle,
+                            connection.generation,
+                        ),
+                    });
+                }
+                Ok(report) => {
+                    process_report(
+                        stack,
+                        &mut self.control,
+                        &mut self.condition,
+                        self.scope,
+                        &mut self.timers,
+                        &mut self.binding,
+                        report,
+                    )?;
+                }
+                Err(RecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Ok("timeout".into());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(RecvError::Disconnected) => {
+                    return Err("HCI report lane disconnected".into());
+                }
+            }
+        }
     }
 
     pub(crate) fn iso_audit(

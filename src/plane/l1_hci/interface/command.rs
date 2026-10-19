@@ -26,6 +26,7 @@ pub enum HciCommand {
     StartPassiveExtendedScan,
     StopPassiveExtendedScan,
     ReadControllerIdentity,
+    ReadAclRssiProbe { connection: ConnectionToken },
     ConfigureControllerPrivacy(ResolvingListConfig),
     ClearControllerPrivacy,
     BeginFalConnection(FalConnectRequest),
@@ -111,6 +112,15 @@ impl HciControl {
     pub fn try_read_controller_identity(&self) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::ReadControllerIdentity)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_acl_rssi_probe(
+        &self,
+        connection: ConnectionToken,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadAclRssiProbe { connection })
             .map_err(map_send_error)
     }
 

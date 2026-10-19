@@ -647,6 +647,9 @@ fn process_command(
         HciCommand::ReadControllerIdentity => {
             engine.begin_controller_identity_probe()
         }
+        HciCommand::ReadAclRssiProbe { connection } => {
+            engine.begin_acl_rssi_probe(connection)
+        }
         HciCommand::ConfigureControllerPrivacy(config) => {
             engine.begin_controller_privacy(config)
         }
@@ -847,6 +850,12 @@ fn publish_state_transitions(
     if let Some(identity) = engine.take_controller_identity_result() {
         report_tx
             .try_send(HciReport::ControllerIdentity(identity))
+            .map_err(map_report_error)?;
+    }
+
+    if let Some(result) = engine.take_acl_rssi_probe_result() {
+        report_tx
+            .try_send(HciReport::AclRssiProbe(result))
             .map_err(map_report_error)?;
     }
 

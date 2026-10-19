@@ -13,7 +13,7 @@ use crate::{
         },
         gatt::transaction::GattReport,
         host::engine::{
-            ControllerCapabilities, ControllerIdentity,
+            AclRssiProbeResult, ControllerCapabilities, ControllerIdentity,
             ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
         },
         iso::{
@@ -38,6 +38,7 @@ pub enum HciReport {
     ControllerIdentity(
         Result<ControllerIdentity, ControllerIdentityFailure>,
     ),
+    AclRssiProbe(AclRssiProbeResult),
     PassiveScanState(PassiveScanState),
     ScanComplete(ScanSummary),
     ControllerPrivacyState(ControllerPrivacyState),
