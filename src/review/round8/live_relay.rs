@@ -1154,6 +1154,7 @@ pub fn execute_final_model(
                 }),
                 Some(driver.iso_audit(&stack)?),
             )
+        }
         })
     })();
 
