@@ -965,15 +965,6 @@ fn run_final_model_window(
     driver: &mut CurrentPathControlDriver,
     include_cis: bool,
 ) -> Result<(u64, Option<String>), String> {
-    if let Some(failure) = run_final_model_checkpoint(
-        "pre-run",
-        stack,
-        driver,
-        include_cis,
-    )? {
-        return Ok((0, Some(failure)));
-    }
-
     let started = Instant::now();
     let mut checkpoints_passed = 1u64;
     let mut target = FINAL_MODEL_CHECKPOINT;
@@ -1002,6 +993,54 @@ fn run_final_model_window(
     }
 
     Ok((checkpoints_passed, None))
+}
+
+#[cfg(windows)]
+fn abort_final_model(
+    stack: HciStack,
+    driver: &mut CurrentPathControlDriver,
+    pressure: Option<FinalIsoPressure>,
+    error: String,
+) -> String {
+    let pressure_note = pressure
+        .map(|pressure| match pressure.shutdown() {
+            Ok(exit) => format!(
+                "pressure stopped(submitted={}, drops={})",
+                exit.submitted_intervals,
+                exit.backpressure_drops,
+            ),
+            Err(stop_error) => {
+                format!("pressure stop failed({stop_error})")
+            }
+        })
+        .unwrap_or_else(|| "no pressure worker".into());
+
+    let drain_note = match driver.wait_iso_idle(
+        &stack,
+        ISO_DRAIN_TIMEOUT,
+    ) {
+        Ok(snapshot) => format!(
+            "ISO drain in_flight={}",
+            snapshot.in_flight,
+        ),
+        Err(drain_error) => format!(
+            "ISO drain failed({drain_error})"
+        ),
+    };
+
+    let teardown_note = match driver.emergency_stop_for_review(&stack) {
+        Ok(()) => "emergency teardown PASS".to_string(),
+        Err(teardown_error) => format!(
+            "emergency teardown failed({teardown_error})"
+        ),
+    };
+
+    let exit = stack.shutdown();
+    format!(
+        "{error}; abort cleanup: {pressure_note}; {drain_note}; {teardown_note}; shutdown hci={:?} transport={:?}",
+        exit.hci,
+        exit.transport,
+    )
 }
 
 #[cfg(windows)]
@@ -1038,13 +1077,27 @@ pub fn execute_final_model(
     })?;
 
     let stack = spawn_be200_hci_stack(HciStackConfig::default());
-    let mut driver = CurrentPathControlDriver::new_with_review_profile(
+    let mut driver = match CurrentPathControlDriver::new_with_review_profile(
         plan,
         config.connect_timeout,
         model.review_profile(),
-    )?;
+    ) {
+        Ok(driver) => driver,
+        Err(error) => {
+            let exit = stack.shutdown();
+            return Err(format!(
+                "{error}; stack shutdown hci={:?} transport={:?}",
+                exit.hci,
+                exit.transport,
+            ));
+        }
+    };
 
-    let setup = match model {
+    let setup_result = (|| -> Result<
+        (Option<FinalPressureSpec>, Option<IsoCreditSnapshot>),
+        String,
+    > {
+        Ok(match model {
         FinalModel::AclOnly => {
             driver.start_to_codec_configured(&stack)?;
             (None, None)
@@ -1101,29 +1154,107 @@ pub fn execute_final_model(
                 }),
                 Some(driver.iso_audit(&stack)?),
             )
+        })
+    })();
+
+    let (pressure_spec, audit_before) = match setup_result {
+        Ok(setup) => setup,
+        Err(error) => {
+            return Err(abort_final_model(
+                stack,
+                &mut driver,
+                None,
+                error,
+            ));
         }
     };
 
-    let (pressure_spec, audit_before) = setup;
-    let pressure = match pressure_spec {
-        Some(spec) => Some(FinalIsoPressure::start(spec)?),
-        None => None,
+    let include_cis = model != FinalModel::AclOnly;
+    let pre_failure = match run_final_model_checkpoint(
+        "pre-run",
+        &stack,
+        &mut driver,
+        include_cis,
+    ) {
+        Ok(failure) => failure,
+        Err(error) => {
+            return Err(abort_final_model(
+                stack,
+                &mut driver,
+                None,
+                error,
+            ));
+        }
     };
 
-    let (checkpoints_passed, failure) =
-        run_final_model_window(
-            &stack,
-            &mut driver,
-            model != FinalModel::AclOnly,
-        )?;
+    let pressure = if pre_failure.is_none() {
+        match pressure_spec {
+            Some(spec) => match FinalIsoPressure::start(spec) {
+                Ok(pressure) => Some(pressure),
+                Err(error) => {
+                    return Err(abort_final_model(
+                        stack,
+                        &mut driver,
+                        None,
+                        error,
+                    ));
+                }
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let (checkpoints_passed, timed_failure) =
+        if pre_failure.is_none() {
+            match run_final_model_window(
+                &stack,
+                &mut driver,
+                include_cis,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(abort_final_model(
+                        stack,
+                        &mut driver,
+                        pressure,
+                        error,
+                    ));
+                }
+            }
+        } else {
+            (0, None)
+        };
+    let failure = pre_failure.or(timed_failure);
 
     let pressure_exit = match pressure {
-        Some(pressure) => Some(pressure.shutdown()?),
+        Some(pressure) => match pressure.shutdown() {
+            Ok(exit) => Some(exit),
+            Err(error) => {
+                return Err(abort_final_model(
+                    stack,
+                    &mut driver,
+                    None,
+                    error,
+                ));
+            }
+        },
         None => None,
     };
 
     let audit_after = if audit_before.is_some() {
-        Some(driver.wait_iso_idle(&stack, ISO_DRAIN_TIMEOUT)?)
+        match driver.wait_iso_idle(&stack, ISO_DRAIN_TIMEOUT) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                return Err(abort_final_model(
+                    stack,
+                    &mut driver,
+                    None,
+                    error,
+                ));
+            }
+        }
     } else {
         None
     };
