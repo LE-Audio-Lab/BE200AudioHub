@@ -388,9 +388,13 @@ impl ControlMachine {
                     expected.sort_unstable();
                     let mut actual = established_cis_ids.clone();
                     actual.sort_unstable();
+                    let expected_cig_id = self.planned.iso_plan
+                        .as_ref()
+                        .expect("CreatingCis requires ISO plan")
+                        .cig_id;
                     return self.fail(
                         ControlFailure::CisCreateMismatch {
-                            expected_cig_id: plan.cig_id,
+                            expected_cig_id,
                             actual_cig_id: *cig_id,
                             expected_cis_ids: expected,
                             actual_cis_ids: actual,
