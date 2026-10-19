@@ -1090,7 +1090,7 @@ mod tests {
             }
         ));
 
-        // CP and ASE notifications may race ahead of ATT Write Response.
+        // CP and ASE notifications may race ahead of local Write Command completion.
         assert_eq!(
             machine
                 .on_gatt_report(&GattReport::Value(
@@ -1187,7 +1187,7 @@ mod tests {
                 connection: write.connection,
                 result: GattResult::WriteComplete {
                     attribute_handle: 0x0043,
-                    with_response: true,
+                    with_response: false,
                 },
             })
             .unwrap();
@@ -1276,7 +1276,7 @@ mod tests {
                 connection: write.connection,
                 result: GattResult::WriteComplete {
                     attribute_handle: 0x0043,
-                    with_response: true,
+                    with_response: false,
                 },
             })
             .unwrap();
@@ -1350,7 +1350,7 @@ mod tests {
                 connection: write.connection,
                 result: GattResult::WriteComplete {
                     attribute_handle: 0x0043,
-                    with_response: true,
+                    with_response: false,
                 },
             })
             .unwrap();

@@ -949,7 +949,7 @@
     }
 
     #[test]
-    fn codec_semantic_timeout_after_write_response_rolls_back() {
+    fn codec_semantic_timeout_after_write_command_rolls_back() {
         use crate::plane::l1_hci::gatt::transaction::{
             GattOperation, GattResult,
         };
@@ -961,7 +961,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest { .. }
+            GattOperation::WriteCommand { .. }
         ));
         let actions = complete_gatt(
             &mut machine,
