@@ -3377,3 +3377,169 @@
         );
         assert!(machine.stream_binding().is_err());
     }
+
+
+#[test]
+fn final_model_codec_only_fences_before_any_cig_work() {
+    let mut machine = machine_at_codec_configured();
+    machine.review_profile = ReviewStreamProfile::CodecOnly;
+
+    let actions = machine.continue_ready_stage().unwrap();
+    assert!(actions.is_empty());
+    assert_eq!(machine.phase(), ControlPhase::CodecConfigured);
+    assert!(machine.planned.iso_plan().is_none());
+    assert!(!machine.cleanup_knowledge.cig_may_exist);
+}
+
+#[test]
+fn final_model_low_qos_changes_only_iso_reliability_budget() {
+    let mut machine = machine_at_codec_configured();
+    machine.review_profile = ReviewStreamProfile::DualCisLowQos;
+
+    machine.plan_iso().unwrap();
+    let plan = machine.planned.iso_plan().unwrap();
+    assert_eq!(plan.sdu_interval_us, 10_000);
+    assert_eq!(plan.octets_per_sdu, 100);
+    assert_eq!(plan.phy, 0x02);
+    assert_eq!(plan.rtn, 3);
+    assert_eq!(plan.max_transport_latency_ms, 22);
+
+    let cig = plan.cig_config();
+    assert_eq!(cig.cis.len(), 2);
+    assert!(cig.cis.iter().all(|cis| cis.rtn_c_to_p == 3));
+    assert_eq!(cig.max_transport_latency_c_to_p, 22);
+}
+
+#[test]
+fn final_model_single_cis_right_uses_only_right_after_codec() {
+    let mut machine = machine_at_codec_configured();
+    machine.review_profile = ReviewStreamProfile::SingleCisRight;
+
+    machine.plan_iso().unwrap();
+    let plan = machine.planned.iso_plan().unwrap().clone();
+    let actions = machine.begin_cig_configuration().unwrap();
+    let config = actions.iter().find_map(|action| {
+        if let ControlAction::ConfigureCig(config) = action {
+            Some(config.clone())
+        } else {
+            None
+        }
+    }).expect("single-CIS model must configure a CIG");
+    assert_eq!(config.cis.len(), 1);
+    assert_eq!(config.cis[0].cis_id, plan.right.cis_id);
+
+    machine.on_hci_report(&HciReport::CigConfigureState(
+        CigConfigureState::Ready(CigAllocation {
+            cig_id: plan.cig_id,
+            cis: vec![
+                crate::plane::l1_hci::iso::cig_cis::CisAllocation {
+                    cis_id: plan.right.cis_id,
+                    connection_handle: 0x0901,
+                },
+            ],
+        }),
+    )).unwrap();
+    assert_eq!(machine.phase(), ControlPhase::CigConfigured);
+
+    machine.plan_qos().unwrap();
+    let actions = machine.begin_qos_configuration().unwrap();
+    assert_eq!(
+        machine.phase(),
+        ControlPhase::ConfiguringQos {
+            side: AudioSide::Right,
+        }
+    );
+    let _ = drive_config_qos(
+        &mut machine,
+        AudioSide::Right,
+        actions,
+    );
+    assert_eq!(machine.phase(), ControlPhase::QosConfigured);
+
+    machine.plan_enable().unwrap();
+    let actions = machine.begin_enable().unwrap();
+    assert_eq!(
+        machine.phase(),
+        ControlPhase::Enabling {
+            side: AudioSide::Right,
+        }
+    );
+    let _ = drive_enable(
+        &mut machine,
+        AudioSide::Right,
+        actions,
+    );
+    assert_eq!(machine.phase(), ControlPhase::Enabled);
+
+    let actions = machine.begin_cis_creation().unwrap();
+    let request = actions.iter().find_map(|action| {
+        if let ControlAction::CreateCis(request) = action {
+            Some(request.clone())
+        } else {
+            None
+        }
+    }).expect("single-CIS model must create one CIS");
+    assert_eq!(request.bindings.len(), 1);
+    assert_eq!(request.bindings[0].cis_id, plan.right.cis_id);
+    assert_eq!(request.bindings[0].acl, plan.right.acl);
+
+    machine.on_hci_report(&HciReport::SemanticCisCreateState(
+        SemanticCisCreateState::Ready {
+            cig_id: plan.cig_id,
+            established_cis_ids: vec![plan.right.cis_id],
+        },
+    )).unwrap();
+    assert_eq!(machine.phase(), ControlPhase::CisEstablished);
+
+    let actions = machine.begin_iso_path_setup().unwrap();
+    let right = CisRef {
+        cig_id: plan.cig_id,
+        cis_id: plan.right.cis_id,
+    };
+    assert!(actions.iter().any(|action| {
+        *action == ControlAction::SetupIsoInputPathByRef { cis: right }
+    }));
+    assert_eq!(
+        machine.phase(),
+        ControlPhase::SettingUpIsoPath {
+            side: AudioSide::Right,
+        }
+    );
+
+    machine.on_hci_report(&HciReport::SemanticIsoPathState(
+        SemanticIsoPathState::SetupComplete {
+            cis: right,
+            direction: IsoDataPathDirection::Input,
+        },
+    )).unwrap();
+    assert_eq!(machine.phase(), ControlPhase::IsoPathsReady);
+
+    let _ = machine.begin_streaming_gate().unwrap();
+    assert_eq!(
+        machine.phase(),
+        ControlPhase::AwaitingStreaming {
+            side: AudioSide::Right,
+        }
+    );
+}
+
+#[test]
+fn review_emergency_teardown_from_codec_skips_ase_release() {
+    let mut machine = machine_at_codec_configured();
+    machine.review_profile = ReviewStreamProfile::CodecOnly;
+
+    let actions = machine.begin_emergency_teardown_for_review().unwrap();
+    assert_eq!(machine.phase(), ControlPhase::RollingBack);
+    assert!(!actions.iter().any(|action| {
+        matches!(
+            action,
+            ControlAction::BeginGatt(_)
+                | ControlAction::CancelGatt { .. }
+                | ControlAction::ConfigureCig(_)
+                | ControlAction::CreateCis(_)
+        )
+    }));
+    assert!(actions.iter().any(|action| {
+        matches!(action, ControlAction::DisconnectAcl { .. })
+    }));
+}
