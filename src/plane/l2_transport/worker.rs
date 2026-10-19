@@ -1,4 +1,5 @@
 use std::{
+    sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -15,6 +16,7 @@ use super::{
     packet::{ControllerPacket, HostPacket},
     reactor::{StepOutcome, TransportFault, TransportReactor},
     sink::ControllerPacketSink,
+    tx_audit::{AclTransportTxSnapshot, TransportTxAudit},
 };
 
 const TX_BUDGET_PER_TURN: usize = 32;
@@ -32,6 +34,7 @@ pub enum TransportWorkerExit {
 pub struct TransportTx {
     tx: BoundedSender<HostPacket>,
     cancel: CancellationToken,
+    audit: Arc<TransportTxAudit>,
 }
 
 impl TransportTx {
@@ -47,13 +50,25 @@ impl TransportTx {
             Self {
                 tx,
                 cancel: CancellationToken::new(),
+                audit: Arc::new(TransportTxAudit::default()),
             },
             rx,
         )
     }
 
     pub fn try_send(&self, packet: HostPacket) -> Result<(), SendError> {
-        self.tx.try_send(packet)
+        let is_acl = matches!(&packet, HostPacket::Acl(_));
+        let result = self.tx.try_send(packet);
+        if result.is_ok() && is_acl {
+            self.audit.observe_mailbox_enqueued();
+        }
+        result
+    }
+
+    pub(crate) fn acl_tx_audit_snapshot(
+        &self,
+    ) -> AclTransportTxSnapshot {
+        self.audit.snapshot()
     }
 
     pub fn cancel(&self) {
@@ -111,6 +126,8 @@ where
     let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
+    let audit = Arc::new(TransportTxAudit::default());
+    let worker_audit = audit.clone();
 
     let join = thread::Builder::new()
         .name("UsbReactor".into())
@@ -122,7 +139,8 @@ where
                 }
             };
 
-            let mut reactor = TransportReactor::new(backend, hci_sink);
+            let mut reactor =
+                TransportReactor::new(backend, hci_sink, worker_audit);
             if let Err(fault) = reactor.start() {
                 return TransportWorkerExit::Faulted(fault);
             }
@@ -133,7 +151,10 @@ where
         })
         .expect("failed to spawn USB reactor");
 
-    (TransportTx { tx, cancel }, TransportWorkerJoin { join })
+    (
+        TransportTx { tx, cancel, audit },
+        TransportWorkerJoin { join },
+    )
 }
 
 fn run_loop<B, S>(

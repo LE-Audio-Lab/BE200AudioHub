@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     platform::backend::{
         BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TxEndpoint,
@@ -13,6 +15,7 @@ use super::{
         TransportConditionUpdate, TransportState,
     },
     sink::{ControllerPacketSink, PacketSinkError},
+    tx_audit::TransportTxAudit,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,10 +55,15 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     rx_packets: u64,
     tx_packets: u64,
     faults: u64,
+    tx_audit: Arc<TransportTxAudit>,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
-    pub fn new(backend: B, hci_rx: S) -> Self {
+    pub fn new(
+        backend: B,
+        hci_rx: S,
+        tx_audit: Arc<TransportTxAudit>,
+    ) -> Self {
         Self {
             backend,
             state: ReactorState::Stopped,
@@ -66,6 +74,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             rx_packets: 0,
             tx_packets: 0,
             faults: 0,
+            tx_audit,
         }
     }
 
@@ -121,6 +130,9 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         match self.backend.submit_write(endpoint, bytes) {
             Ok(_) => {
                 self.tx_packets = self.tx_packets.saturating_add(1);
+                if endpoint == TxEndpoint::Acl {
+                    self.tx_audit.observe_usb_submitted();
+                }
                 Ok(())
             }
             Err(error) => Err(TransportFault::Backend(error)),
@@ -142,7 +154,12 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
                 bytes,
                 ..
             } => self.handle_read(endpoint, &bytes),
-            TransferCompletion::Write { .. } => StepOutcome::WriteCompleted,
+            TransferCompletion::Write { endpoint, .. } => {
+                if endpoint == TxEndpoint::Acl {
+                    self.tx_audit.observe_usb_completed();
+                }
+                StepOutcome::WriteCompleted
+            },
             TransferCompletion::Cancelled { .. } => StepOutcome::Cancelled,
             TransferCompletion::DeviceGone => {
                 self.state = ReactorState::Detached;
@@ -215,7 +232,14 @@ mod tests {
         crate::runtime::mailbox::BoundedReceiver<ControllerPacket>,
     ) {
         let (tx, rx) = mailbox::bounded(hci_capacity);
-        (TransportReactor::new(TestBackend::default(), tx), rx)
+        (
+            TransportReactor::new(
+                TestBackend::default(),
+                tx,
+                Arc::new(TransportTxAudit::default()),
+            ),
+            rx,
+        )
     }
 
     #[test]

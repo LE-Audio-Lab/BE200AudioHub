@@ -7,5 +7,6 @@ pub mod packet;
 pub mod reactor;
 pub mod sink;
 pub mod worker;
+pub(crate) mod tx_audit;
 
 pub mod interface;

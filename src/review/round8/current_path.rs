@@ -652,9 +652,34 @@ fn read_acl_audit_before_cleanup(
     }
 }
 
+fn format_att_write_signatures(
+    writes: [Option<crate::plane::l1_hci::acl::credit::AclAttWriteSignature>; 4],
+) -> String {
+    let entries = writes
+        .into_iter()
+        .flatten()
+        .map(|write| {
+            let prefix_len = usize::from(write.value_prefix_len)
+                .min(write.value_prefix.len());
+            format!(
+                "conn=0x{:04x}/attr=0x{:04x}/len={}/prefix={:02x?}",
+                write.connection_handle,
+                write.attribute_handle,
+                write.value_len,
+                &write.value_prefix[..prefix_len],
+            )
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        "none".into()
+    } else {
+        entries.join(",")
+    }
+}
+
 fn format_acl_snapshot(snapshot: AclCreditSnapshot) -> String {
     format!(
-        "bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?} acl_rx={} att_pdus={} gatt_values={}",
+        "bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?} acl_rx={} att_pdus={} gatt_values={} host_submit={} ncp_complete={} host_retired={} mailbox={} usb_submit={} usb_complete={} att_writes=[{}]",
         snapshot.bumble_pending,
         snapshot.audit_in_flight,
         snapshot.waiting_estimate(),
@@ -662,6 +687,13 @@ fn format_acl_snapshot(snapshot: AclCreditSnapshot) -> String {
         snapshot.controller_acl_rx_packets,
         snapshot.att_pdus_drained,
         snapshot.gatt_value_events,
+        snapshot.audit_total_submitted,
+        snapshot.audit_total_completed,
+        snapshot.audit_total_retired,
+        snapshot.transport_mailbox_enqueued,
+        snapshot.transport_usb_submitted,
+        snapshot.transport_usb_completed,
+        format_att_write_signatures(snapshot.recent_att_writes),
     )
 }
 
@@ -690,13 +722,25 @@ fn format_cleanup_acl_audits(
                 let interval = previous
                     .map(|before| {
                         format!(
-                            " delta_acl_rx={} delta_att_pdus={} delta_gatt_values={}",
+                            " delta_acl_rx={} delta_att_pdus={} delta_gatt_values={} delta_host_submit={} delta_ncp_complete={} delta_host_retired={} delta_mailbox={} delta_usb_submit={} delta_usb_complete={}",
                             snapshot.controller_acl_rx_packets
                                 .saturating_sub(before.controller_acl_rx_packets),
                             snapshot.att_pdus_drained
                                 .saturating_sub(before.att_pdus_drained),
                             snapshot.gatt_value_events
                                 .saturating_sub(before.gatt_value_events),
+                            snapshot.audit_total_submitted
+                                .saturating_sub(before.audit_total_submitted),
+                            snapshot.audit_total_completed
+                                .saturating_sub(before.audit_total_completed),
+                            snapshot.audit_total_retired
+                                .saturating_sub(before.audit_total_retired),
+                            snapshot.transport_mailbox_enqueued
+                                .saturating_sub(before.transport_mailbox_enqueued),
+                            snapshot.transport_usb_submitted
+                                .saturating_sub(before.transport_usb_submitted),
+                            snapshot.transport_usb_completed
+                                .saturating_sub(before.transport_usb_completed),
                         )
                     })
                     .unwrap_or_default();
@@ -1214,6 +1258,13 @@ mod tests {
                 controller_acl_rx_packets: 10,
                 att_pdus_drained: 5,
                 gatt_value_events: 3,
+                audit_total_submitted: 20,
+                audit_total_completed: 20,
+                audit_total_retired: 0,
+                transport_mailbox_enqueued: 20,
+                transport_usb_submitted: 20,
+                transport_usb_completed: 20,
+                recent_att_writes: [None; 4],
             },
         );
         let text = format_cleanup_acl_audits(
@@ -1229,6 +1280,13 @@ mod tests {
                             controller_acl_rx_packets: 12,
                             att_pdus_drained: 7,
                             gatt_value_events: 4,
+                audit_total_submitted: 22,
+                audit_total_completed: 22,
+                audit_total_retired: 0,
+                transport_mailbox_enqueued: 22,
+                transport_usb_submitted: 22,
+                transport_usb_completed: 22,
+                recent_att_writes: [None; 4],
                         },
                     ),
                 },
@@ -1242,10 +1300,10 @@ mod tests {
         );
 
         assert!(text.contains(
-            "baseline: bumble_pending=0 audit_in_flight=0 waiting_estimate=0 limit=Some(6) acl_rx=10 att_pdus=5 gatt_values=3"
+            "baseline: bumble_pending=0 audit_in_flight=0 waiting_estimate=0 limit=Some(6) acl_rx=10 att_pdus=5 gatt_values=3 host_submit=20 ncp_complete=20 host_retired=0 mailbox=20 usb_submit=20 usb_complete=20 att_writes=[none]"
         ));
         assert!(text.contains(
-            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6) acl_rx=12 att_pdus=7 gatt_values=4 delta_acl_rx=2 delta_att_pdus=2 delta_gatt_values=1"
+            "Right: bumble_pending=2 audit_in_flight=1 waiting_estimate=1 limit=Some(6) acl_rx=12 att_pdus=7 gatt_values=4 host_submit=22 ncp_complete=22 host_retired=0 mailbox=22 usb_submit=22 usb_complete=22 att_writes=[none] delta_acl_rx=2 delta_att_pdus=2 delta_gatt_values=1 delta_host_submit=2 delta_ncp_complete=2 delta_host_retired=0 delta_mailbox=2 delta_usb_submit=2 delta_usb_complete=2"
         ));
         assert!(text.contains("Left: unavailable(query timed out)"));
     }

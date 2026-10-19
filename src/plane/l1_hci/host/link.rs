@@ -12,6 +12,7 @@ use bumble_host::HostTransport;
 
 use crate::{
     runtime::mailbox::SendError,
+    plane::l1_hci::acl::credit::AclAttWriteSignature,
     plane::l2_transport::{
         packet::{ControllerPacket, HostPacket},
         worker::TransportTx,
@@ -54,6 +55,9 @@ pub struct QueueHostTransport {
     suppress_command_complete_once: BTreeSet<u16>,
     fault: Option<LinkFault>,
     acl_rx_packets: u64,
+    recent_att_writes: [Option<AclAttWriteSignature>; 4],
+    recent_att_write_cursor: usize,
+    recent_att_write_count: usize,
 }
 
 impl QueueHostTransport {
@@ -65,6 +69,9 @@ impl QueueHostTransport {
             suppress_command_complete_once: BTreeSet::new(),
             fault: None,
             acl_rx_packets: 0,
+            recent_att_writes: [None; 4],
+            recent_att_write_cursor: 0,
+            recent_att_write_count: 0,
         }
     }
 
@@ -116,6 +123,64 @@ impl QueueHostTransport {
 
     pub fn acl_rx_packets(&self) -> u64 {
         self.acl_rx_packets
+    }
+
+    pub fn acl_tx_transport_snapshot(
+        &self,
+    ) -> crate::plane::l2_transport::tx_audit::AclTransportTxSnapshot {
+        self.tx.acl_tx_audit_snapshot()
+    }
+
+    pub fn recent_att_writes(
+        &self,
+    ) -> [Option<AclAttWriteSignature>; 4] {
+        let mut ordered = [None; 4];
+        let count = self.recent_att_write_count.min(4);
+        let start = if self.recent_att_write_count < 4 {
+            0
+        } else {
+            self.recent_att_write_cursor
+        };
+        for (offset, slot) in ordered.iter_mut().take(count).enumerate() {
+            *slot = self.recent_att_writes[(start + offset) % 4];
+        }
+        ordered
+    }
+
+    fn observe_att_write_command(&mut self, packet: &AclDataPacket) {
+        const ATT_CID: u16 = 0x0004;
+        const ATT_WRITE_COMMAND: u8 = 0x52;
+
+        let data = &packet.data;
+        if data.len() < 7 {
+            return;
+        }
+        let cid = u16::from_le_bytes([data[2], data[3]]);
+        if cid != ATT_CID || data[4] != ATT_WRITE_COMMAND {
+            return;
+        }
+
+        let attribute_handle =
+            u16::from_le_bytes([data[5], data[6]]);
+        let value = &data[7..];
+        let mut value_prefix = [0u8; 8];
+        let prefix_len = value.len().min(value_prefix.len());
+        value_prefix[..prefix_len]
+            .copy_from_slice(&value[..prefix_len]);
+
+        let signature = AclAttWriteSignature {
+            connection_handle: packet.connection_handle,
+            attribute_handle,
+            value_len: u16::try_from(value.len()).unwrap_or(u16::MAX),
+            value_prefix_len: u8::try_from(prefix_len).unwrap_or(8),
+            value_prefix,
+        };
+        self.recent_att_writes[self.recent_att_write_cursor] =
+            Some(signature);
+        self.recent_att_write_cursor =
+            (self.recent_att_write_cursor + 1) % 4;
+        self.recent_att_write_count =
+            self.recent_att_write_count.saturating_add(1);
     }
 
     pub fn take_observations(&mut self) -> Vec<HciObservation> {
@@ -247,6 +312,7 @@ impl HostTransport for QueueHostTransport {
         packet: AclDataPacket,
     ) -> bool {
         let connection_handle = packet.connection_handle;
+        self.observe_att_write_command(&packet);
         let sent =
             self.send_native(HCI_ACL_DATA_PACKET, packet.to_bytes());
         if sent {
@@ -467,6 +533,39 @@ mod tests {
 
         assert_eq!(link.acl_rx_packets(), 1);
         assert_eq!(link.drain_host_events(0).len(), 1);
+    }
+
+    #[test]
+    fn att_write_command_signature_keeps_handle_and_value_prefix() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        let packet = AclDataPacket {
+            connection_handle: 0x0801,
+            pb_flag: 0b10,
+            bc_flag: 0,
+            data_total_length: 12,
+            data: vec![
+                0x08, 0x00, // L2CAP payload length
+                0x04, 0x00, // ATT fixed CID
+                0x52,       // ATT Write Command
+                0x43, 0x00, // ASCS Control Point handle
+                0x08, 0x01, 0x02, 0xaa, 0xbb,
+            ],
+        };
+
+        assert!(link.send_acl_packet(0, packet));
+
+        let writes = link.recent_att_writes();
+        let signature = writes[0].unwrap();
+        assert_eq!(signature.connection_handle, 0x0801);
+        assert_eq!(signature.attribute_handle, 0x0043);
+        assert_eq!(signature.value_len, 5);
+        assert_eq!(signature.value_prefix_len, 5);
+        assert_eq!(
+            &signature.value_prefix[..5],
+            &[0x08, 0x01, 0x02, 0xaa, 0xbb],
+        );
     }
 
     #[test]

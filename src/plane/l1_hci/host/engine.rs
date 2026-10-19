@@ -758,6 +758,7 @@ impl HciEngine {
     }
 
     pub fn acl_credit_snapshot(&self) -> AclCreditSnapshot {
+        let transport = self.link.acl_tx_transport_snapshot();
         AclCreditSnapshot {
             bumble_pending: self.device.acl_packets_pending(),
             audit_in_flight: self.acl_credit_audit.in_flight(),
@@ -765,6 +766,13 @@ impl HciEngine {
             controller_acl_rx_packets: self.link.acl_rx_packets(),
             att_pdus_drained: self.att_pdus_drained,
             gatt_value_events: self.gatt_value_events,
+            audit_total_submitted: self.acl_credit_audit.total_submitted(),
+            audit_total_completed: self.acl_credit_audit.total_completed(),
+            audit_total_retired: self.acl_credit_audit.total_retired(),
+            transport_mailbox_enqueued: transport.mailbox_enqueued,
+            transport_usb_submitted: transport.usb_submitted,
+            transport_usb_completed: transport.usb_completed,
+            recent_att_writes: self.link.recent_att_writes(),
         }
     }
 

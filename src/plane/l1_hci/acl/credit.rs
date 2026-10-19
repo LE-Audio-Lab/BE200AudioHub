@@ -20,6 +20,15 @@ pub enum AclCreditFault {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AclAttWriteSignature {
+    pub connection_handle: u16,
+    pub attribute_handle: u16,
+    pub value_len: u16,
+    pub value_prefix_len: u8,
+    pub value_prefix: [u8; 8],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AclCreditSnapshot {
     pub bumble_pending: usize,
@@ -31,6 +40,13 @@ pub struct AclCreditSnapshot {
     pub att_pdus_drained: u64,
     /// ATT Handle Value Notification/Indication PDUs surfaced as GATT values.
     pub gatt_value_events: u64,
+    pub audit_total_submitted: u64,
+    pub audit_total_completed: u64,
+    pub audit_total_retired: u64,
+    pub transport_mailbox_enqueued: u64,
+    pub transport_usb_submitted: u64,
+    pub transport_usb_completed: u64,
+    pub recent_att_writes: [Option<AclAttWriteSignature>; 4],
 }
 
 impl AclCreditSnapshot {
@@ -44,6 +60,9 @@ pub struct AclCreditAudit {
     limit: Option<usize>,
     total_in_flight: usize,
     per_handle: BTreeMap<u16, usize>,
+    total_submitted: u64,
+    total_completed: u64,
+    total_retired: u64,
 }
 
 impl AclCreditAudit {
@@ -75,6 +94,7 @@ impl AclCreditAudit {
 
         self.total_in_flight += 1;
         *self.per_handle.entry(connection_handle).or_default() += 1;
+        self.total_submitted = self.total_submitted.saturating_add(1);
         Ok(())
     }
 
@@ -104,6 +124,9 @@ impl AclCreditAudit {
 
         *in_flight -= completed;
         self.total_in_flight -= completed;
+        self.total_completed = self
+            .total_completed
+            .saturating_add(completed as u64);
         if *in_flight == 0 {
             self.per_handle.remove(&connection_handle);
         }
@@ -115,6 +138,9 @@ impl AclCreditAudit {
     pub fn flush(&mut self, connection_handle: u16) -> usize {
         let retired = self.per_handle.remove(&connection_handle).unwrap_or(0);
         self.total_in_flight -= retired;
+        self.total_retired = self
+            .total_retired
+            .saturating_add(retired as u64);
         retired
     }
 
@@ -122,6 +148,9 @@ impl AclCreditAudit {
         let retired = self.total_in_flight;
         self.per_handle.clear();
         self.total_in_flight = 0;
+        self.total_retired = self
+            .total_retired
+            .saturating_add(retired as u64);
         retired
     }
 
@@ -138,6 +167,18 @@ impl AclCreditAudit {
 
     pub fn limit(&self) -> Option<usize> {
         self.limit
+    }
+
+    pub fn total_submitted(&self) -> u64 {
+        self.total_submitted
+    }
+
+    pub fn total_completed(&self) -> u64 {
+        self.total_completed
+    }
+
+    pub fn total_retired(&self) -> u64 {
+        self.total_retired
     }
 }
 
