@@ -222,6 +222,22 @@ pub enum AclRssiProbeResult {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AclLlFeaturesProbeResult {
+    Alive {
+        connection: ConnectionToken,
+        features: [u8; 8],
+    },
+    Rejected {
+        connection: ConnectionToken,
+        status: u8,
+    },
+    HandleMismatch {
+        connection: ConnectionToken,
+        returned_handle: u16,
+    },
+}
+
 pub struct HciEngine {
     device: Device,
     link: QueueHostTransport,
@@ -236,6 +252,8 @@ pub struct HciEngine {
         Option<Result<ControllerIdentity, ControllerIdentityFailure>>,
     acl_rssi_probe_pending: Option<ConnectionToken>,
     acl_rssi_probe_result: Option<AclRssiProbeResult>,
+    acl_ll_features_probe_pending: Option<ConnectionToken>,
+    acl_ll_features_probe_result: Option<AclLlFeaturesProbeResult>,
     privacy_state: ControllerPrivacyState,
     privacy_transaction: Option<PrivacyTransaction>,
     privacy_clear_transaction: Option<PrivacyClearTransaction>,
@@ -297,6 +315,8 @@ impl HciEngine {
             controller_identity_result: None,
             acl_rssi_probe_pending: None,
             acl_rssi_probe_result: None,
+            acl_ll_features_probe_pending: None,
+            acl_ll_features_probe_result: None,
             privacy_state: ControllerPrivacyState::Idle,
             privacy_transaction: None,
             privacy_clear_transaction: None,
@@ -413,6 +433,42 @@ impl HciEngine {
         &mut self,
     ) -> Option<AclRssiProbeResult> {
         self.acl_rssi_probe_result.take()
+    }
+
+    pub fn begin_acl_ll_features_probe(
+        &mut self,
+        connection: ConnectionToken,
+    ) -> Result<(), EngineFault> {
+        let current_generation = self
+            .connection_generations
+            .get(&connection.connection_handle)
+            .copied();
+        if current_generation != Some(connection.generation) {
+            return Err(EngineFault::StaleConnection {
+                connection_handle: connection.connection_handle,
+                requested_generation: connection.generation,
+                current_generation,
+            });
+        }
+        if self.acl_ll_features_probe_pending.is_some() {
+            return Err(EngineFault::InvalidState);
+        }
+
+        if !self.device.read_remote_le_features_on_handle(
+            &mut self.link,
+            connection.connection_handle,
+        ) {
+            return Err(EngineFault::InvalidState);
+        }
+        self.check_link_fault()?;
+        self.acl_ll_features_probe_pending = Some(connection);
+        Ok(())
+    }
+
+    pub fn take_acl_ll_features_probe_result(
+        &mut self,
+    ) -> Option<AclLlFeaturesProbeResult> {
+        self.acl_ll_features_probe_result.take()
     }
 
     pub fn controller_privacy_state(&self) -> &ControllerPrivacyState {
@@ -1755,6 +1811,7 @@ impl HciEngine {
             self.process_data_credit_observation(&observation)?;
             self.process_controller_identity_observation(&observation);
             self.process_acl_rssi_probe_observation(&observation);
+            self.process_acl_ll_features_probe_observation(&observation);
             self.process_privacy_observation(&observation)?;
             self.process_fal_connection_observation(&observation)?;
             self.process_disconnect_observation(&observation)?;
@@ -1824,6 +1881,57 @@ impl HciEngine {
                     Some(AclRssiProbeResult::Rejected {
                         connection,
                         status: *status,
+                    });
+            }
+            _ => {}
+        }
+    }
+
+    fn process_acl_ll_features_probe_observation(
+        &mut self,
+        observation: &HciObservation,
+    ) {
+        let Some(connection) = self.acl_ll_features_probe_pending else {
+            return;
+        };
+
+        match observation {
+            HciObservation::CommandStatus { opcode, status }
+                if *opcode
+                    == bumble_hci::codes::HCI_LE_READ_REMOTE_FEATURES_COMMAND
+                    && *status != 0 =>
+            {
+                self.acl_ll_features_probe_pending = None;
+                self.acl_ll_features_probe_result =
+                    Some(AclLlFeaturesProbeResult::Rejected {
+                        connection,
+                        status: *status,
+                    });
+            }
+            HciObservation::LeRemoteFeaturesComplete {
+                status,
+                connection_handle,
+                features,
+            } => {
+                self.acl_ll_features_probe_pending = None;
+                self.acl_ll_features_probe_result =
+                    Some(if *connection_handle
+                        != connection.connection_handle
+                    {
+                        AclLlFeaturesProbeResult::HandleMismatch {
+                            connection,
+                            returned_handle: *connection_handle,
+                        }
+                    } else if *status != 0 {
+                        AclLlFeaturesProbeResult::Rejected {
+                            connection,
+                            status: *status,
+                        }
+                    } else {
+                        AclLlFeaturesProbeResult::Alive {
+                            connection,
+                            features: *features,
+                        }
                     });
             }
             _ => {}
@@ -4625,6 +4733,42 @@ mod tests {
             &ControllerPrivacyState::Ready
         );
         assert_eq!(rx.try_recv(), Err(RecvError::Empty));
+    }
+
+    #[test]
+    fn acl_ll_features_probe_requires_peer_ll_response_and_returns_event() {
+        let (mut engine, rx) = engine(8);
+        let connection =
+            establish_encrypted_test_acl(&mut engine, 0x0800, 1);
+
+        engine.begin_acl_ll_features_probe(connection).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            HostPacket::Command(vec![0x16, 0x20, 0x02, 0x00, 0x08])
+        );
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x0f, 0x04, 0x00, 0x01, 0x16, 0x20,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x3e, 0x0c, 0x04, 0x00, 0x00, 0x08,
+                1, 2, 3, 4, 5, 6, 7, 8,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.take_acl_ll_features_probe_result(),
+            Some(AclLlFeaturesProbeResult::Alive {
+                connection,
+                features: [1, 2, 3, 4, 5, 6, 7, 8],
+            })
+        );
     }
 
     #[test]

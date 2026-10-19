@@ -414,6 +414,14 @@ fn run_acl_liveness_probe(
         println!(
             "[acl-liveness]   controller RSSI after ATT timeout: {controller}"
         );
+        let peer_ll = driver.probe_peer_ll_features(
+            stack,
+            AudioSide::Right,
+            Duration::from_secs(3),
+        )?;
+        println!(
+            "[acl-liveness]   peer LL remote-features after ATT timeout: {peer_ll}"
+        );
     }
     Ok(probe.timed_out())
 }

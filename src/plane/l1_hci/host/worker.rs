@@ -650,6 +650,9 @@ fn process_command(
         HciCommand::ReadAclRssiProbe { connection } => {
             engine.begin_acl_rssi_probe(connection)
         }
+        HciCommand::ReadAclLlFeaturesProbe { connection } => {
+            engine.begin_acl_ll_features_probe(connection)
+        }
         HciCommand::ConfigureControllerPrivacy(config) => {
             engine.begin_controller_privacy(config)
         }
@@ -856,6 +859,12 @@ fn publish_state_transitions(
     if let Some(result) = engine.take_acl_rssi_probe_result() {
         report_tx
             .try_send(HciReport::AclRssiProbe(result))
+            .map_err(map_report_error)?;
+    }
+
+    if let Some(result) = engine.take_acl_ll_features_probe_result() {
+        report_tx
+            .try_send(HciReport::AclLlFeaturesProbe(result))
             .map_err(map_report_error)?;
     }
 

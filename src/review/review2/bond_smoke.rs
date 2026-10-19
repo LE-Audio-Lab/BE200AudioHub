@@ -259,7 +259,8 @@ impl BondSmokeTracker {
             | HciReport::IsoDrainState(_)
             | HciReport::AclTxAudit(_)
             | HciReport::IsoTxAudit(_)
-            | HciReport::AclRssiProbe(_) => {}
+            | HciReport::AclRssiProbe(_)
+            | HciReport::AclLlFeaturesProbe(_) => {}
         }
     }
 

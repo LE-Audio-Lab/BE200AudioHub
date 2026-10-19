@@ -50,7 +50,9 @@ use crate::{
                 GattValueEvent,
             },
             host::{
-                engine::AclRssiProbeResult,
+                engine::{
+                    AclLlFeaturesProbeResult, AclRssiProbeResult,
+                },
                 stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
@@ -1599,6 +1601,87 @@ impl CurrentPathControlDriver {
                             parameters_after_status,
                         ),
                         AclRssiProbeResult::HandleMismatch {
+                            connection,
+                            returned_handle,
+                        } => format!(
+                            "handle-mismatch expected=0x{:04x}/g{} returned=0x{returned_handle:04x}",
+                            connection.connection_handle,
+                            connection.generation,
+                        ),
+                    });
+                }
+                Ok(report) => {
+                    process_report(
+                        stack,
+                        &mut self.control,
+                        &mut self.condition,
+                        self.scope,
+                        &mut self.timers,
+                        &mut self.binding,
+                        report,
+                    )?;
+                }
+                Err(RecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return Ok("timeout".into());
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(RecvError::Disconnected) => {
+                    return Err("HCI report lane disconnected".into());
+                }
+            }
+        }
+    }
+
+    pub(crate) fn probe_peer_ll_features(
+        &mut self,
+        stack: &HciStack,
+        side: AudioSide,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let prepared = self
+            .control
+            .prepared_ase_for_review(side)
+            .ok_or_else(|| {
+                format!(
+                    "peer LL feature probe has no prepared control for {side:?}"
+                )
+            })?;
+        let connection = prepared.sink.connection;
+
+        stack
+            .control()
+            .try_read_acl_ll_features_probe(connection)
+            .map_err(|error| {
+                format!(
+                    "peer LL feature probe dispatch failed for {side:?}: {error:?}"
+                )
+            })?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match stack.reports().try_recv() {
+                Ok(HciReport::AclLlFeaturesProbe(result)) => {
+                    return Ok(match result {
+                        AclLlFeaturesProbeResult::Alive {
+                            connection,
+                            features,
+                        } => format!(
+                            "alive conn=0x{:04x}/g{} features={:02x?}",
+                            connection.connection_handle,
+                            connection.generation,
+                            features,
+                        ),
+                        AclLlFeaturesProbeResult::Rejected {
+                            connection,
+                            status,
+                        } => format!(
+                            "rejected conn=0x{:04x}/g{} status=0x{status:02x}",
+                            connection.connection_handle,
+                            connection.generation,
+                        ),
+                        AclLlFeaturesProbeResult::HandleMismatch {
                             connection,
                             returned_handle,
                         } => format!(

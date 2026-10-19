@@ -46,6 +46,11 @@ pub enum HciObservation {
     CompletedPackets {
         completions: Vec<(u16, u16)>,
     },
+    LeRemoteFeaturesComplete {
+        status: u8,
+        connection_handle: u16,
+        features: [u8; 8],
+    },
 }
 
 pub struct QueueHostTransport {
@@ -297,6 +302,20 @@ fn observe_native_event(bytes: &[u8]) -> Option<HciObservation> {
             status: bytes[2],
         }),
 
+        // LE Meta / LE Read Remote Features Complete:
+        // event=0x3e, len=12, subevent=0x04, status, handle_le[2], features[8]
+        0x3e if bytes.len() == 14 && bytes[2] == 0x04 => {
+            let mut features = [0u8; 8];
+            features.copy_from_slice(&bytes[6..14]);
+            Some(HciObservation::LeRemoteFeaturesComplete {
+                status: bytes[3],
+                connection_handle: u16::from_le_bytes([
+                    bytes[4], bytes[5],
+                ]),
+                features,
+            })
+        }
+
         _ => None,
     }
 }
@@ -512,6 +531,28 @@ mod tests {
                 status: 0x0c,
             }]
         );
+    }
+
+    #[test]
+    fn le_remote_features_complete_is_journaled_without_stealing_event() {
+        let (tx, _rx) = tx(4);
+        let mut link = QueueHostTransport::new(tx);
+
+        link.ingest(ControllerPacket::Event(vec![
+            0x3e, 0x0c, 0x04, 0x00, 0x00, 0x08,
+            1, 2, 3, 4, 5, 6, 7, 8,
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            link.take_observations(),
+            vec![HciObservation::LeRemoteFeaturesComplete {
+                status: 0,
+                connection_handle: 0x0800,
+                features: [1, 2, 3, 4, 5, 6, 7, 8],
+            }]
+        );
+        assert_eq!(link.drain_host_events(0).len(), 1);
     }
 
     #[test]
