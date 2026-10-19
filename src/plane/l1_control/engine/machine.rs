@@ -63,7 +63,8 @@ use crate::{
 use crate::plane::l1_control::{
     ascs::{
         operation::{
-            AseOperationAction, AseOperationFailure, AseOperationMachine,
+            AseOperationAction, AseOperationFailure,
+            AseOperationGateSnapshot, AseOperationMachine,
             AsePrepareAction, AsePrepareFailure, AsePrepareMachine,
             PreparedAseControl,
         },

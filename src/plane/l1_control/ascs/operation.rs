@@ -97,19 +97,6 @@ impl AsePrepareMachine {
         self.pending_request_id
     }
 
-    pub fn gate_snapshot(&self) -> AseOperationGateSnapshot {
-        AseOperationGateSnapshot {
-            phase: self.phase,
-            pending_request_id: self.pending_request_id,
-            write_complete: self.write_complete,
-            cp_success: self.cp_success,
-            notified_state: self
-                .notified_status
-                .as_ref()
-                .map(|status| status.state),
-        }
-    }
-
     pub fn next_request_id(&self) -> GattRequestId {
         self.next_request_id
     }
@@ -515,6 +502,19 @@ impl AseOperationMachine {
 
     pub fn pending_request_id(&self) -> Option<GattRequestId> {
         self.pending_request_id
+    }
+
+    pub fn gate_snapshot(&self) -> AseOperationGateSnapshot {
+        AseOperationGateSnapshot {
+            phase: self.phase,
+            pending_request_id: self.pending_request_id,
+            write_complete: self.write_complete,
+            cp_success: self.cp_success,
+            notified_state: self
+                .notified_status
+                .as_ref()
+                .map(|status| status.state),
+        }
     }
 
     pub fn next_request_id(&self) -> GattRequestId {
