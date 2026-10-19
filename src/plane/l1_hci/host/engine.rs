@@ -753,6 +753,14 @@ impl HciEngine {
             .map(|_| entry.link.connection_handle)
     }
 
+    pub fn acl_credit_snapshot(&self) -> AclCreditSnapshot {
+        AclCreditSnapshot {
+            bumble_pending: self.device.acl_packets_pending(),
+            audit_in_flight: self.acl_credit_audit.in_flight(),
+            audit_limit: self.acl_credit_audit.limit(),
+        }
+    }
+
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
         self.iso_credit_audit.snapshot()
     }

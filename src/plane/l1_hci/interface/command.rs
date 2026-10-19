@@ -33,6 +33,7 @@ pub enum HciCommand {
     Disconnect { connection: ConnectionToken },
     BeginStoredEncryption(StoredEncryptionRequest),
     EnsureCisHostFeature,
+    ReadAclTxAudit,
     ReadIsoTxAudit,
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
@@ -166,6 +167,14 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::EnsureCisHostFeature)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_acl_tx_audit(
+        &self,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadAclTxAudit)
             .map_err(map_send_error)
     }
 

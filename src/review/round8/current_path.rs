@@ -40,7 +40,10 @@ use crate::{
             },
         },
         l1_hci::{
-            acl::security::StoredLeKeyMaterial,
+            acl::{
+                credit::AclCreditSnapshot,
+                security::StoredLeKeyMaterial,
+            },
             host::stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
                 HciStackExit,
@@ -476,6 +479,38 @@ fn drive_until(
 
         if !progressed {
             thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+pub(crate) fn read_acl_audit_diagnostic(
+    stack: &HciStack,
+) -> Result<AclCreditSnapshot, String> {
+    stack
+        .control()
+        .try_read_acl_tx_audit()
+        .map_err(|error| {
+            format!("ACL audit query rejected: {error:?}")
+        })?;
+
+    let deadline = Instant::now() + AUDIT_TIMEOUT;
+    loop {
+        match stack.reports().try_recv() {
+            Ok(HciReport::AclTxAudit(snapshot)) => return Ok(snapshot),
+            Ok(_) => {
+                // Teardown has already failed when this diagnostic is used.
+                // Preserve HCI worker progress but do not feed further reports
+                // into a terminal Control generation.
+            }
+            Err(RecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return Err("ACL audit query timed out".into());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(RecvError::Disconnected) => {
+                return Err("HCI report lane disconnected".into())
+            }
         }
     }
 }

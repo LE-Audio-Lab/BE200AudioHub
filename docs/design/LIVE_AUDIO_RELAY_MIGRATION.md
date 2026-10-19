@@ -408,3 +408,30 @@ BE200AudioHub now maps ASCS Control Point operations to
 `WriteRequest`. The ASCS state machine still requires the semantic Control
 Point SUCCESS notification and the expected ASE state notification; only the
 non-normative ATT Write Response dependency is removed.
+
+
+### HIL-6 — teardown ACL queue audit
+
+A 30-second normal-mode run still failed graceful Release after ASCS Control
+Point writes were aligned to Write Command. The Release gate showed local write
+completion but no Control Point SUCCESS or ASE state notification on either
+ear.
+
+Bumble's `send_l2cap_on_handle()` returns success after enqueueing ACL
+fragments even when controller credits prevent immediate HCI submission.
+Therefore local Write Command completion is not proof that the packet reached
+the controller.
+
+The Round8 failure path now queries a diagnostic ACL snapshot after teardown
+failure:
+- `bumble_pending`: Bumble ACL packets queued or in flight.
+- `audit_in_flight`: packets actually submitted through QueueHostTransport
+  and not yet completed by HCI Number Of Completed Packets.
+- `waiting_estimate = bumble_pending - audit_in_flight`.
+
+Interpretation:
+- waiting_estimate > 0: packet(s) are still blocked in Bumble's host queue.
+- waiting_estimate == 0 and audit_in_flight > 0: packet(s) reached HCI but
+  controller completion is still outstanding.
+- both zero: host/controller transmission retired; missing CP/ASE response is
+  above the HCI ACL completion boundary.

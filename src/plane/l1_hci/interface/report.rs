@@ -6,6 +6,7 @@ use crate::{
             connection::{
                 DisconnectState, FalConnectionState, LeConnectionSetSnapshot,
             },
+            credit::AclCreditSnapshot,
             privacy::ControllerPrivacyState,
             scan::ScanSummary,
             security::StoredEncryptionState,
@@ -44,6 +45,7 @@ pub enum HciReport {
     DisconnectState(DisconnectState),
     StoredEncryptionState(StoredEncryptionState),
     CisHostFeatureState(CisHostFeatureState),
+    AclTxAudit(AclCreditSnapshot),
     IsoTxAudit(IsoCreditSnapshot),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),

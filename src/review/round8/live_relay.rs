@@ -449,6 +449,11 @@ fn run_live_media(
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
     let stop_result = driver.stop(stack);
+    let teardown_acl_audit = if stop_result.is_err() {
+        read_acl_audit_diagnostic(stack).ok()
+    } else {
+        None
+    };
 
     let (source_stats, capture_stats) = source_result.map_err(
         |error| {
@@ -459,7 +464,18 @@ fn run_live_media(
         format!("live Media worker failed: {error:?}")
     })?;
     let audit_after = audit_after_result?;
-    stop_result?;
+    if let Err(error) = stop_result {
+        if let Some(audit) = teardown_acl_audit {
+            return Err(format!(
+                "{error}; ACL teardown audit: bumble_pending={} audit_in_flight={} waiting_estimate={} limit={:?}",
+                audit.bumble_pending,
+                audit.audit_in_flight,
+                audit.waiting_estimate(),
+                audit.audit_limit,
+            ));
+        }
+        return Err(error);
+    }
     wait_result?;
 
     Ok(LiveRelayMediaResult {

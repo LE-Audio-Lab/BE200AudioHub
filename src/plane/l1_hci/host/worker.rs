@@ -137,7 +137,9 @@ fn run_loop(
             match control_rx.try_recv() {
                 Ok(command) => {
                     did_work = true;
-                    let audit_command =
+                    let acl_audit_command =
+                        matches!(&command, HciCommand::ReadAclTxAudit);
+                    let iso_audit_command =
                         matches!(&command, HciCommand::ReadIsoTxAudit);
 
                     let route_state =
@@ -167,7 +169,17 @@ fn run_loop(
                         }
                     }
 
-                    if audit_command {
+                    if acl_audit_command {
+                        if let Err(fault) = report_tx
+                            .try_send(HciReport::AclTxAudit(
+                                engine.acl_credit_snapshot(),
+                            ))
+                            .map_err(map_report_error)
+                        {
+                            return HciWorkerExit::Faulted(fault);
+                        }
+                    }
+                    if iso_audit_command {
                         if let Err(fault) = report_tx
                             .try_send(HciReport::IsoTxAudit(
                                 engine.iso_credit_snapshot(),
@@ -388,7 +400,9 @@ fn run_loop(
                         )
                     }
                 };
-                let audit_command =
+                let acl_audit_command =
+                    matches!(&command, HciCommand::ReadAclTxAudit);
+                let iso_audit_command =
                     matches!(&command, HciCommand::ReadIsoTxAudit);
                 let route_state =
                     match process_worker_command(
@@ -413,7 +427,17 @@ fn run_loop(
                         return HciWorkerExit::Faulted(fault);
                     }
                 }
-                if audit_command {
+                if acl_audit_command {
+                    if let Err(fault) = report_tx
+                        .try_send(HciReport::AclTxAudit(
+                            engine.acl_credit_snapshot(),
+                        ))
+                        .map_err(map_report_error)
+                    {
+                        return HciWorkerExit::Faulted(fault);
+                    }
+                }
+                if iso_audit_command {
                     if let Err(fault) = report_tx
                         .try_send(HciReport::IsoTxAudit(
                             engine.iso_credit_snapshot(),
@@ -622,7 +646,8 @@ fn process_command(
         HciCommand::EnsureCisHostFeature => {
             engine.begin_cis_host_feature()
         }
-        HciCommand::ReadIsoTxAudit => Ok(()),
+        HciCommand::ReadAclTxAudit
+        | HciCommand::ReadIsoTxAudit => Ok(()),
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
         }

@@ -20,6 +20,19 @@ pub enum AclCreditFault {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AclCreditSnapshot {
+    pub bumble_pending: usize,
+    pub audit_in_flight: usize,
+    pub audit_limit: Option<usize>,
+}
+
+impl AclCreditSnapshot {
+    pub fn waiting_estimate(self) -> usize {
+        self.bumble_pending.saturating_sub(self.audit_in_flight)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AclCreditAudit {
     limit: Option<usize>,
