@@ -506,3 +506,112 @@ The new HIL still reuses sealed Review-2D setup/teardown as an oracle; full Core
 - [../reference-index/README.md](../reference-index/README.md)
 
 This chat migration is **not** the Round7 engineering boundary. The next chat continues Round7 from the valid-LC3 First Sound HIL.
+
+## 12. Round 8 / V2 structural closure + live product-path HIL
+
+Round8 structural/ownership refactor 已封板；当前 `round8` CLI namespace
+继续承载 current-path / live-relay HIL，不代表结构重构仍在进行。
+
+### 12.1 Real HIL progression
+
+```text
+Round7 valid-LC3 First Sound            REAL HIL PASS
+Round8 current-path First Sound         REAL HIL PASS
+Windows live Process Loopback           REAL HIL PASS ×2 @10 s
+300 s longevity data window             reached 300/300 s
+30 s live data plane                    clean Host ISO conservation
+30 s graceful Stop                      FAIL — dual ASE Release gate
+```
+
+Live path:
+
+```text
+Windows apps
+→ sacrificial physical render endpoint
+→ Process Loopback
+→ bounded PCM relay
+→ LC3
+→ StreamClock / IsoTxBridge
+→ logical HCI ISO
+→ BE200
+→ Buds3 Pro
+```
+
+### 12.2 Current teardown evidence
+
+The current authoritative 30 s failure, after ASCS Control Point was aligned to
+Write Without Response, is:
+
+```text
+AseReleaseGateTimeout {
+  side: Right/Left,
+  gate: {
+    phase: WaitingGates,
+    pending_request_id: None,
+    write_complete: true,
+    cp_success: false,
+    notified_state: None
+  }
+}
+```
+
+This means local WriteCommand completion occurred, but no CP SUCCESS and no ASE
+state notification were observed on either ear.
+
+It does **not** yet prove the ACL packet crossed Bumble's waiting queue into
+actual HCI TX.
+
+### 12.3 Current diagnostic boundary
+
+`d1fb532c` + `084fa605` add teardown ACL audit:
+
+```text
+bumble_pending
+audit_in_flight
+waiting_estimate = bumble_pending - audit_in_flight
+```
+
+Next HIL classification:
+
+```text
+waiting_estimate > 0
+  → blocked in Bumble Host ACL queue
+
+waiting_estimate == 0 && audit_in_flight > 0
+  → submitted to HCI, controller completion outstanding
+
+waiting_estimate == 0 && audit_in_flight == 0
+  → Host/controller TX retired; investigate response/peer layer
+```
+
+No real HIL output for this new ACL audit has been recorded yet.
+
+### 12.4 Crash recovery / user-space ownership
+
+Ctrl+C during an active live session reproduced a dirty-controller failure:
+subsequent resetless launches repeatedly hit
+`Discovery(MemberNotVisible { member_index: 0 })`; BE200 power cycle restored
+operation immediately.
+
+Product failsafe is therefore a Wave-1 requirement:
+
+```text
+CLEAN previous generation
+→ resetless attach
+
+DIRTY / UNKNOWN previous generation
+→ HCI Reset + full Host reinitialization
+```
+
+Normal Ctrl+C must request graceful Stop; only proven teardown may clear the
+durable ownership-dirty marker.
+
+### 12.5 Current next step
+
+Do not run another 300 s test yet.
+
+1. Start from a clean BE200/Buds state after the previous failed teardown.
+2. Run 30 s normal `round8 live-relay`.
+3. Capture the appended ACL teardown audit if Stop fails.
+4. Use the audit classification above to choose the next layer.
+5. Only after 30 s teardown is clean, return to 300 s longevity.

@@ -1,6 +1,6 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 完成 R5.3 Experiment 封板与 Review-1；Round6 完成 Review-2A/2B/2C/2D software + real HIL；Round7 完成 Control semantic path、产品 Media/Clock/Bridge/logical-HCI 数据面并通过 valid-LC3 First Sound real HIL；Round8 完成 V2 Structural / Ownership Refactor。旧 Round 原文不回写，新阶段以独立 Round 追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 完成 R5.3 Experiment 封板与 Review-1；Round6 完成 Review-2A/2B/2C/2D software + real HIL；Round7 完成 Control semantic path、产品 Media/Clock/Bridge/logical-HCI 数据面并通过 valid-LC3 First Sound real HIL；Round8 完成 V2 Structural / Ownership Refactor，Post-Round8 已打通 Windows live Process Loopback → LC3 → logical HCI ISO → BE200 → Buds3 Pro，并进入 longevity / teardown / crash-recovery HIL。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
 **时间范围**：2026-10-11—持续更新；**当前 V2 工作分支**：`refactor/v2-architecture`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
@@ -17,7 +17,7 @@
 | [Round4.md](./Round4.md) | **Round4 原文**：Codec→QoS→CIG→Enable→双 CIS Established→规范 Disconnect/Release/Remove CIG，及三次 R5.2-B HIL |
 | [Round5.md](./Round5.md) | **Round5**：R5.3 First Sound、Experiment 封板、Review 架构冻结、Runtime/Async Transport 完成、Reference Index 建立 |
 | [Round6.md](./Round6.md) | **Round6**：Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部发生 chat migration，但 Round6 最终在 Review-2D HIL 后封板 |
-| [Round7.md](./Round7.md) | **Round7（CLOSED）**：Control semantic path、StreamBinding/route ACK、LocalStreamClock、valid LC3、IsoTxBridge、logical HCI ISO lane；valid-LC3 First Sound real HIL PASS |\n| [Round8.md](./Round8.md) | **Round8（CLOSED）**：V2 Structural / Ownership Refactor；内部旧称 Round1–6 统一解释为 Round8/Subround 1–6；Post-Round8 从 ControlModel extraction 开始 |
+| [Round7.md](./Round7.md) | **Round7（CLOSED）**：Control semantic path、StreamBinding/route ACK、LocalStreamClock、valid LC3、IsoTxBridge、logical HCI ISO lane；valid-LC3 First Sound real HIL PASS |\n| [Round8.md](./Round8.md) | **Round8 structural CLOSED / live-HIL ACTIVE**：V2 ownership refactor、current-path First Sound、Windows live relay、longevity teardown、ACL queue audit、用户态 Host crash failsafe |
 
 ## 推荐阅读顺序
 
@@ -56,11 +56,12 @@
 | **Review-2C ACL / L2CAP / ATT / GATT** | **Software + HIL PASS** |
 | **Review-2D CIG / CIS / ISO Host** | **Software + HIL PASS** |
 | **Round7 Control semantic path** | **Software PASS** |
-| **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software + real First Sound HIL PASS** |\n| **Round8 V2 Structural / Ownership Refactor** | **372 tests PASS / check PASS / build PASS** |
+| **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software + real First Sound HIL PASS** |\n| **Round8 V2 Structural / Ownership Refactor** | **Software CLOSED** |
+| **Post-Round8 Windows live relay** | **Real HIL PASS ×2 @10 s；300 s data window reached 100%；30 s graceful teardown currently FAIL / under active diagnosis** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
-**当前 checkpoint**：Round7 已以 valid-LC3 First Sound real HIL 封板；Round8 V2 structural ownership refactor 已完成。当前不再继续目录重构，进入 Post-Round8 semantic/runtime work：先机械抽取 durable `ControlModel`，再抽 `RollbackOperation`，之后才进入 Core runtime composition。详见 [Round8.md](./Round8.md)、[Round7.md](./Round7.md) 与 [TIMELINE.md](./TIMELINE.md)。
+**当前 checkpoint**：Round7 valid-LC3 First Sound real HIL 已封板，Round8 structural ownership refactor 已完成；Post-Round8 live relay 已真实发声并通过两轮 10 s HIL，300 s data window 可稳定跑满，但 30 s graceful Stop 当前在双耳 ASCS Release gate 失败。最新诊断已把边界推进到 Bumble ACL queue / actual HCI ACL submit：下一轮先读取 teardown ACL audit，不再重做上层 Release 顺序。用户态 Host 的 Ctrl+C/crash dirty-controller recovery 也已列为 Wave-1 confirmed defect。详见 [Round8.md](./Round8.md)、[LIVE_AUDIO_RELAY_MIGRATION.md](../design/LIVE_AUDIO_RELAY_MIGRATION.md) 与 [TIMELINE.md](./TIMELINE.md)。
 
 ## 新 Round 维护规则
 
@@ -90,5 +91,8 @@ Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Rev
 - Round6：正式封板；
 - Round7 Control semantic path：software complete；
 - Round7 Media/Clock/Bridge/logical-HCI data plane：software complete；
-- Round7 valid-LC3 First Sound HIL：ready / not yet run；
-- full Core/Lifecycle runtime、egui、WASAPI/ASRC：后续。
+- Round7 valid-LC3 First Sound HIL：**REAL HIL PASS**；
+- Post-Round8 Windows live relay：**REAL HIL PASS ×2 @10 s**；300 s data window reached 100%，但 30 s graceful teardown 当前 FAIL；
+- teardown lower-boundary：ASCS WriteCommand local complete，CP/ASE notifications missing；ACL teardown audit 已接通、等待下一轮 HIL；
+- Ctrl+C / abnormal Host death failsafe：**OPEN / confirmed defect**；
+- full product supervisor/runtime、negative drift、RT scheduling：后续 Wave-1/2。
