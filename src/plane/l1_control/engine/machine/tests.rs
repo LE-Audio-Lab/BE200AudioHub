@@ -837,7 +837,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -848,7 +848,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
 
@@ -968,7 +968,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
         assert!(actions.iter().any(|action| matches!(
@@ -1121,7 +1121,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -1132,7 +1132,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
         assert!(actions.iter().any(|action| matches!(
@@ -1307,7 +1307,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -1318,7 +1318,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
         assert!(actions.iter().any(|action| matches!(
@@ -1469,7 +1469,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -1480,7 +1480,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
 
@@ -1545,7 +1545,7 @@
         let write = only_begin_gatt(&actions);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -1556,7 +1556,7 @@
             &write,
             GattResult::WriteComplete {
                 attribute_handle: 0x0043,
-                with_response: true,
+                with_response: false,
             },
         );
 

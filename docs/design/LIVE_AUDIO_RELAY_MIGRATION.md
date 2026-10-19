@@ -389,3 +389,22 @@ ATT/Control-Point success plus an ASE RELEASING notification is sufficient to
 advance into ISO path/CIS cleanup. Other ASCS operations retain strict readback
 verification, and failure rollback keeps its existing terminal Release
 readback after transport retirement.
+
+
+### HIL-5 — ASCS Control Point uses Write Without Response
+
+Repeated 30-second HIL runs showed both graceful Release operations timing out
+before any ATT Write Response, Control Point response, or ASE RELEASING
+notification was observed. A 1-second run could still complete teardown, making
+the previous Write Request behavior appear intermittently valid.
+
+Reference implementations do not require an ATT Write Response for normal ASCS
+Control Point procedures. AOSP uses its no-response GATT write path for short
+Control Point payloads, and Bumble clients likewise issue the Control Point
+write without response.
+
+BE200AudioHub now maps ASCS Control Point operations to
+`GattOperation::WriteCommand`. CCCD subscription continues to use
+`WriteRequest`. The ASCS state machine still requires the semantic Control
+Point SUCCESS notification and the expected ASE state notification; only the
+non-normative ATT Write Response dependency is removed.

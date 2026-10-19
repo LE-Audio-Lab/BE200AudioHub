@@ -539,7 +539,7 @@ impl AseOperationMachine {
         };
         self.issue(
             AseOperationPhase::WaitingGates,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle:
                     self.prepared.sink.ascs_control_point.value_handle,
                 value,
@@ -600,7 +600,7 @@ impl AseOperationMachine {
             AseOperationPhase::WaitingGates => {
                 let GattResult::WriteComplete {
                     attribute_handle,
-                    with_response: true,
+                    with_response: false,
                 } = result.clone()
                 else {
                     return self.unexpected(result);
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(write.request_id, 100);
         assert!(matches!(
             write.operation,
-            GattOperation::WriteRequest {
+            GattOperation::WriteCommand {
                 attribute_handle: 0x0043,
                 ..
             }
@@ -1126,7 +1126,7 @@ mod tests {
                     connection: write.connection,
                     result: GattResult::WriteComplete {
                         attribute_handle: 0x0043,
-                        with_response: true,
+                        with_response: false,
                     },
                 })
                 .unwrap(),
