@@ -258,7 +258,8 @@ impl BondSmokeTracker {
             | HciReport::StreamRouteState(_)
             | HciReport::IsoDrainState(_)
             | HciReport::AclTxAudit(_)
-            | HciReport::IsoTxAudit(_) => {}
+            | HciReport::IsoTxAudit(_)
+            | HciReport::AclRssiProbe(_) => {}
         }
     }
 
