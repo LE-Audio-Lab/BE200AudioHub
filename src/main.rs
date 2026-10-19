@@ -52,6 +52,14 @@ fn main() {
                 }
             );
             println!(
+                "Teardown Release: {}",
+                if config.group_release_ab {
+                    "GROUP A/B (all active members issued before waiting)"
+                } else {
+                    "serial baseline"
+                }
+            );
+            println!(
                 "Live duration: {:.1} s; PCM=48 kHz Float32 stereo; LC3=100 B/ear/10 ms",
                 config.live_duration.as_secs_f64()
             );

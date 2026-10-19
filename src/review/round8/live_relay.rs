@@ -65,6 +65,7 @@ pub struct LiveRelayConfig {
     pub connect_timeout: Duration,
     pub live_duration: Duration,
     pub longevity_test: bool,
+    pub group_release_ab: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +98,7 @@ pub fn parse_live_relay_args(
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
     let mut requested_live_seconds = None;
     let mut longevity_test = false;
+    let mut group_release_ab = false;
     let mut confirmed = false;
     let mut index = 0usize;
 
@@ -155,6 +157,15 @@ pub fn parse_live_relay_args(
                 longevity_test = true;
                 index += 1;
             }
+            "--group-release-ab" => {
+                if group_release_ab {
+                    return Err(
+                        "--group-release-ab specified more than once".into(),
+                    );
+                }
+                group_release_ab = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -208,6 +219,7 @@ pub fn parse_live_relay_args(
         connect_timeout,
         live_duration,
         longevity_test,
+        group_release_ab,
     })
 }
 
@@ -399,6 +411,7 @@ fn run_live_media(
     connect_timeout: Duration,
     duration: Duration,
     longevity_test: bool,
+    group_release_ab: bool,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
@@ -426,7 +439,11 @@ fn run_live_media(
                     stack,
                     ISO_DRAIN_TIMEOUT,
                 );
-                let _ = driver.stop(stack);
+                let _ = if group_release_ab {
+                    driver.stop_group_release_ab(stack)
+                } else {
+                    driver.stop(stack)
+                };
                 return Err(format!(
                     "Windows Process Loopback startup failed: {error:?}"
                 ));
@@ -448,7 +465,11 @@ fn run_live_media(
 
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
-    let stop_result = driver.stop(stack);
+    let stop_result = if group_release_ab {
+        driver.stop_group_release_ab(stack)
+    } else {
+        driver.stop(stack)
+    };
 
     let (source_stats, capture_stats) = source_result.map_err(
         |error| {
@@ -509,6 +530,7 @@ pub fn execute_live_relay(
         config.connect_timeout,
         config.live_duration,
         config.longevity_test,
+        config.group_release_ab,
     );
     let exit = stack.shutdown();
 
@@ -562,6 +584,16 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
+        assert!(!config.group_release_ab);
+    }
+
+    #[test]
+    fn parser_enables_explicit_group_release_ab() {
+        let mut value = args();
+        value.push("--group-release-ab".into());
+
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.group_release_ab);
     }
 
     #[test]

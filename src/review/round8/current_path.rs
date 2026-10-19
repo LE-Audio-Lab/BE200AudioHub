@@ -990,6 +990,21 @@ impl CurrentPathControlDriver {
         &mut self,
         stack: &HciStack,
     ) -> Result<(), String> {
+        self.stop_with_group_release_ab(stack, false)
+    }
+
+    pub(crate) fn stop_group_release_ab(
+        &mut self,
+        stack: &HciStack,
+    ) -> Result<(), String> {
+        self.stop_with_group_release_ab(stack, true)
+    }
+
+    fn stop_with_group_release_ab(
+        &mut self,
+        stack: &HciStack,
+        group_release_ab: bool,
+    ) -> Result<(), String> {
         self.cleanup_acl_audits.clear();
         self.cleanup_gatt_trace.clear();
 
@@ -1006,12 +1021,25 @@ impl CurrentPathControlDriver {
             )?,
         );
 
-        let stop = execute_control(
-            &self.condition,
-            &mut self.control,
-            CoreCommand::StopControl,
-        )
-        .map_err(|error| format!("StopControl failed: {error:?}"))?;
+        let stop_step = if group_release_ab {
+            self.control
+                .begin_group_release_teardown_for_review()
+                .map_err(|error| {
+                    format!(
+                        "group Release A/B StopControl failed: {error:?}"
+                    )
+                })?
+        } else {
+            execute_control(
+                &self.condition,
+                &mut self.control,
+                CoreCommand::StopControl,
+            )
+            .map_err(|error| {
+                format!("StopControl failed: {error:?}")
+            })?
+            .control_step
+        };
         apply_and_continue(
             stack,
             &mut self.control,
@@ -1019,7 +1047,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
-            stop.control_step,
+            stop_step,
         )?;
         let result = drive_until(
             stack,
