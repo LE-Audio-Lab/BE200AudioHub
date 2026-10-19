@@ -4,11 +4,12 @@
 //!
 //! Failure rollback keeps the established fail-closed
 //! route -> path -> CIS -> ASE Release -> CIG -> ACL/privacy ordering.
-//! Normal Stop uses a distinct graceful policy:
-//! route -> Release gate(RELEASING) -> path -> CIS -> CIG -> ACL/privacy.
-//! This mirrors the product stop semantics used by the AOSP LE Audio client:
-//! a Streaming ASE entering RELEASING is the pivot for ISO path/CIS teardown;
-//! terminal Idle/Codec Configured may follow after transport retirement.
+//!
+//! Product Stop is intentionally protocol-ungraceful but controller-clean:
+//! route -> path -> CIS -> CIG -> ACL/privacy. It does not depend on the
+//! ASCS/GATT bearer remaining responsive. Serial/Group ASE Release modes remain
+//! available only to Review/HIL so the historical graceful path can still be
+//! diagnosed without blocking the product lifecycle.
 
 use super::*;
 
@@ -398,18 +399,20 @@ impl ControlMachine {
         self.confirmed.active_stream_binding = None;
     }
 
-    /// Begin a normal product teardown from a route-bound stream.
+    /// Begin the product teardown from a route-bound stream.
     ///
-    /// Normal Stop intentionally does not reuse failure rollback ordering.
-    /// After route unbind, active ASEs are Released while the ISO path/CIS
-    /// still exist; only then are path, CIS, CIG, ACL and privacy resources
-    /// retired. Successful cleanup returns Control to Idle, while cleanup
-    /// failures become TeardownFailed.
+    /// Product Stop deliberately skips ASCS Release. The peer-facing GATT
+    /// control bearer has proven capable of becoming permanently unresponsive
+    /// while HCI/LL state remains live; shutdown therefore depends only on
+    /// controller-owned resources that the Host can retire deterministically.
+    ///
+    /// Ordering remains semantic and controller-clean:
+    /// route -> ISO path -> CIS -> CIG -> ACL -> privacy.
     pub fn begin_teardown(
         &mut self,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         self.begin_teardown_with_release_mode(
-            GracefulAseReleaseMode::Serial,
+            GracefulAseReleaseMode::Skip,
         )
     }
 
@@ -584,9 +587,9 @@ impl ControlMachine {
 
         let normal_teardown = self.failure.is_none();
 
-        // Graceful product Stop releases Streaming ASEs before disturbing the
-        // ISO path/CIS. Failure rollback deliberately does the opposite:
-        // fail-closed transport retirement comes first.
+        // Review-only graceful modes may release Streaming ASEs before
+        // disturbing the ISO path/CIS. Product Stop selects Skip, while
+        // failure rollback keeps its separate fail-closed ordering.
         if normal_teardown {
             match self.rollback.graceful_ase_release_mode {
                 GracefulAseReleaseMode::Serial => {

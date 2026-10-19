@@ -3053,7 +3053,7 @@
 
 
     #[test]
-    fn normal_teardown_releases_ases_before_iso_path_and_cis_cleanup() {
+    fn default_teardown_skips_ase_release_and_starts_transport_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine
             .begin_stream_handoff(SessionId(7), StreamId(11))
@@ -3083,47 +3083,16 @@
             ))
             .unwrap();
 
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            ControlAction::ArmTimer(
-                ControlTimer::CleanupAse {
-                    side: AudioSide::Right,
-                }
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                ControlAction::BeginGatt(_)
+                    | ControlAction::CancelGatt { .. }
+                    | ControlAction::ArmTimer(
+                        ControlTimer::CleanupAse { .. }
+                    )
             )
-        )));
-        assert!(actions.iter().any(|action| {
-            matches!(action, ControlAction::BeginGatt(_))
         }));
-        assert!(!actions.iter().any(|action| matches!(
-            action,
-            ControlAction::RemoveIsoPathByRef { .. }
-                | ControlAction::DisconnectCisByRef { .. }
-        )));
-
-        let actions = drive_graceful_release_gate(
-            &mut machine,
-            AudioSide::Right,
-            actions,
-        );
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            ControlAction::ArmTimer(
-                ControlTimer::CleanupAse {
-                    side: AudioSide::Left,
-                }
-            )
-        )));
-        assert!(!actions.iter().any(|action| matches!(
-            action,
-            ControlAction::RemoveIsoPathByRef { .. }
-                | ControlAction::DisconnectCisByRef { .. }
-        )));
-
-        let actions = drive_graceful_release_gate(
-            &mut machine,
-            AudioSide::Left,
-            actions,
-        );
         assert!(actions.iter().any(|action| matches!(
             action,
             ControlAction::RemoveIsoPathByRef { .. }
@@ -3131,6 +3100,8 @@
         assert!(!actions.iter().any(|action| matches!(
             action,
             ControlAction::DisconnectCisByRef { .. }
+                | ControlAction::RemoveCig { .. }
+                | ControlAction::DisconnectAcl { .. }
         )));
     }
 
@@ -3287,7 +3258,11 @@
             ))
             .unwrap();
 
-        let _ = machine.begin_teardown().unwrap();
+        let _ = machine
+            .begin_teardown_with_release_mode(
+                GracefulAseReleaseMode::Serial,
+            )
+            .unwrap();
         let _ = machine
             .on_hci_report(&HciReport::StreamRouteState(
                 StreamRouteState::Unbound {
@@ -3326,7 +3301,7 @@
     }
 
     #[test]
-    fn normal_teardown_returns_idle_after_graceful_cleanup() {
+    fn default_ungraceful_teardown_returns_idle_after_controller_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine
             .begin_stream_handoff(SessionId(7), StreamId(11))
@@ -3532,7 +3507,7 @@ fn final_model_single_cis_right_uses_only_right_after_codec() {
 }
 
 #[test]
-fn review_emergency_teardown_from_codec_skips_ase_release() {
+fn review_partial_checkpoint_teardown_skips_ase_release() {
     let mut machine = machine_at_codec_configured();
     machine.review_profile = ReviewStreamProfile::CodecOnly;
 

@@ -58,8 +58,9 @@ impl ControlPlane {
         Ok(self.finish_step(actions))
     }
 
-    /// Review/HIL-only A/B entry point. Core StopControl intentionally
-    /// remains on the serial product path until HIL evidence promotes this.
+    /// Review/HIL-only legacy graceful entry point. Product StopControl now
+    /// deliberately skips ASCS Release and retires controller resources
+    /// directly.
     pub(crate) fn begin_group_release_teardown_for_review(
         &mut self,
     ) -> Result<ControlStep, ControlFailure> {
