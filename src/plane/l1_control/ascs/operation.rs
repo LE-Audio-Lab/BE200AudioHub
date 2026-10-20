@@ -408,11 +408,18 @@ pub enum AseOperationFailure {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AseOperationCompletion {
+    VerifiedReadback,
+    NotificationGate,
+}
+
 pub struct AseOperationMachine {
     prepared: PreparedAseControl,
     operation: AseOperation,
     expected_notification_state: AseState,
     expected_readback_state: AseState,
+    completion: AseOperationCompletion,
     phase: AseOperationPhase,
     pending_request_id: Option<GattRequestId>,
     next_request_id: GattRequestId,
@@ -449,6 +456,28 @@ impl AseOperationMachine {
             operation,
             expected_notification_state,
             expected_readback_state,
+            completion: AseOperationCompletion::VerifiedReadback,
+            phase: AseOperationPhase::Idle,
+            pending_request_id: None,
+            next_request_id: first_request_id,
+            write_complete: false,
+            cp_success: false,
+            notified_status: None,
+        }
+    }
+
+    pub fn new_notification_gate(
+        prepared: PreparedAseControl,
+        operation: AseOperation,
+        expected_notification_state: AseState,
+        first_request_id: GattRequestId,
+    ) -> Self {
+        Self {
+            prepared,
+            operation,
+            expected_notification_state,
+            expected_readback_state: expected_notification_state,
+            completion: AseOperationCompletion::NotificationGate,
             phase: AseOperationPhase::Idle,
             pending_request_id: None,
             next_request_id: first_request_id,
@@ -560,7 +589,7 @@ impl AseOperationMachine {
                     return self.unexpected(result);
                 }
                 self.write_complete = true;
-                self.maybe_begin_readback()
+                self.maybe_complete_or_begin_readback()
             }
 
             AseOperationPhase::ReadingBack => {
@@ -674,7 +703,7 @@ impl AseOperationMachine {
             }
 
             self.cp_success = true;
-            return self.maybe_begin_readback();
+            return self.maybe_complete_or_begin_readback();
         }
 
         if attribute_handle == self.prepared.sink.ase_value_handle {
@@ -691,7 +720,7 @@ impl AseOperationMachine {
             self.verify_status_identity(&status)?;
             if status.state == self.expected_notification_state {
                 self.notified_status = Some(status);
-                return self.maybe_begin_readback();
+                return self.maybe_complete_or_begin_readback();
             }
             return Ok(AseOperationAction::Await);
         }
@@ -714,25 +743,33 @@ impl AseOperationMachine {
         Ok(())
     }
 
-    fn maybe_begin_readback(
+    fn maybe_complete_or_begin_readback(
         &mut self,
     ) -> Result<AseOperationAction, AseOperationFailure> {
-        if self.phase == AseOperationPhase::WaitingGates
-            && self.pending_request_id.is_none()
-            && self.write_complete
-            && self.cp_success
-            && self.notified_status.is_some()
+        if self.phase != AseOperationPhase::WaitingGates
+            || self.pending_request_id.is_some()
+            || !self.write_complete
+            || !self.cp_success
         {
-            return self.issue(
-                AseOperationPhase::ReadingBack,
-                GattOperation::ReadValue {
-                    attribute_handle:
-                        self.prepared.sink.ase_value_handle,
-                },
-            );
+            return Ok(AseOperationAction::Await);
         }
 
-        Ok(AseOperationAction::Await)
+        let Some(notified_status) = self.notified_status.clone() else {
+            return Ok(AseOperationAction::Await);
+        };
+
+        if self.completion == AseOperationCompletion::NotificationGate {
+            self.phase = AseOperationPhase::Complete;
+            return Ok(AseOperationAction::Complete(notified_status));
+        }
+
+        self.issue(
+            AseOperationPhase::ReadingBack,
+            GattOperation::ReadValue {
+                attribute_handle:
+                    self.prepared.sink.ase_value_handle,
+            },
+        )
     }
 
     fn issue(
