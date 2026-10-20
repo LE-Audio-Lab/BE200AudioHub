@@ -5,9 +5,10 @@
 //! Failure rollback keeps the established fail-closed
 //! route -> path -> CIS -> best-effort ASE Release -> CIG -> ACL/privacy ordering.
 //!
-//! Product Stop is controller-clean and protocol-ungraceful by default:
-//! route -> ISO path -> CIS -> CIG -> ACL -> privacy.
-//! Product teardown never depends on peer-facing ASCS Release completion.
+//! Normal product Stop is spec-aligned by default:
+//! route -> ASCS Release/RELEASING -> ISO path -> CIS -> CIG -> ACL -> privacy.
+//! A controller-clean protocol-ungraceful policy exists only as an explicit
+//! hardware workaround and skips the peer ASCS Release gate.
 
 use super::*;
 
@@ -21,13 +22,23 @@ impl ControlMachine {
             .expect("rollback ASE release requires prepared control")
             .clone();
         let ase_id = prepared.sink.ase_id;
-        let mut machine = AseOperationMachine::new_with_states(
-            prepared,
-            AseOperation::Release(vec![ase_id]),
-            AseState::RELEASING,
-            AseState::IDLE,
-            self.next_gatt_request_id,
-        );
+        let operation = AseOperation::Release(vec![ase_id]);
+        let mut machine = if self.failure.is_none() {
+            AseOperationMachine::new_notification_gate(
+                prepared,
+                operation,
+                AseState::RELEASING,
+                self.next_gatt_request_id,
+            )
+        } else {
+            AseOperationMachine::new_with_states(
+                prepared,
+                operation,
+                AseState::RELEASING,
+                AseState::IDLE,
+                self.next_gatt_request_id,
+            )
+        };
         let action = match machine.start() {
             Ok(action) => action,
             Err(failure) => {
@@ -154,14 +165,26 @@ impl ControlMachine {
             AseOperationAction::Await
             | AseOperationAction::Ignored => Ok(actions),
             AseOperationAction::Complete(status) => {
-                if status.state != AseState::IDLE {
+                let valid = if self.failure.is_none() {
+                    status.state == AseState::RELEASING
+                } else {
+                    matches!(
+                        status.state,
+                        AseState::IDLE | AseState::CODEC_CONFIGURED
+                    )
+                };
+                if !valid {
                     self.rollback.cleanup_failures.push(
                         ControlCleanupFailure::AseRelease {
                             side,
                             failure:
                                 AseOperationFailure::ReadbackStateMismatch {
                                     ase_id: status.ase_id,
-                                    expected_state: AseState::IDLE.0,
+                                    expected_state: if self.failure.is_none() {
+                                        AseState::RELEASING.0
+                                    } else {
+                                        AseState::IDLE.0
+                                    },
                                     actual_state: status.state.0,
                                 },
                         },
@@ -187,13 +210,20 @@ impl ControlMachine {
         self.confirmed.active_stream_binding = None;
     }
 
-    /// Begin product teardown from a route-bound stream.
-    ///
-    /// Stop deliberately skips ASCS Release and retires only controller-owned
-    /// resources. Successful cleanup returns Control to Idle, while cleanup
-    /// failures become TeardownFailed.
+    /// Begin normal spec-aligned teardown from a route-bound stream.
     pub fn begin_teardown(
         &mut self,
+    ) -> Result<Vec<ControlAction>, ControlFailure> {
+        self.begin_teardown_with_policy(TeardownPolicy::Graceful)
+    }
+
+    /// Begin teardown with an explicit product policy.
+    ///
+    /// ControllerCleanUngraceful is a hardware-workaround path. It must not
+    /// become the architectural default.
+    pub fn begin_teardown_with_policy(
+        &mut self,
+        policy: TeardownPolicy,
     ) -> Result<Vec<ControlAction>, ControlFailure> {
         if self.phase != ControlPhase::StreamBoundReady {
             return Err(ControlFailure::InvalidStartState(self.phase));
@@ -216,9 +246,14 @@ impl ControlMachine {
             self.confirmed.live_cis.iter().copied().collect();
         self.rollback.cis_current = None;
 
-        // Product Stop intentionally leaves the ASE release queue empty.
-        // Failure rollback still owns best-effort peer cleanup separately.
         self.rollback.ase_queue.clear();
+        if policy == TeardownPolicy::Graceful {
+            for side in [AudioSide::Left, AudioSide::Right] {
+                if self.confirmed.prepared_ases[side_index(side)].is_some() {
+                    self.rollback.ase_queue.push(side);
+                }
+            }
+        }
         self.rollback.ase_current = None;
         self.rollback.ase_operation = None;
         self.rollback.cleanup_failures.clear();
@@ -314,8 +349,19 @@ impl ControlMachine {
 
         let normal_teardown = self.failure.is_none();
 
-        // Product Stop does not issue ASCS Release. Failure rollback may
-        // still perform best-effort peer cleanup after path/CIS retirement.
+        // Normal graceful Stop gates transport retirement on peer Release
+        // reaching RELEASING. The explicit ungraceful workaround starts with
+        // an empty ASE queue and therefore falls through directly to path/CIS.
+        if normal_teardown {
+            if self.rollback.ase_current.is_none() {
+                if let Some(side) = self.rollback.ase_queue.pop() {
+                    return self.start_rollback_ase_release(side);
+                }
+            }
+            if self.rollback.ase_current.is_some() {
+                return Ok(Vec::new());
+            }
+        }
 
         if self.rollback.iso_path_current.is_none() {
             if let Some(cis) = self.rollback.iso_path_queue.pop() {
