@@ -1885,6 +1885,26 @@ impl HciEngine {
                 let cig_id = cig_id.expect(
                     "terminal CIS action missing active transaction",
                 );
+
+                for cis in &established {
+                    println!(
+                        "[le-audio][cis] cis_id={} acl_handle=0x{:04X} cis_handle=0x{:04X} transport_c_to_p_us={} cig_sync_us={} cis_sync_us={} phy_c_to_p={} nse={} bn_c_to_p={} ft_c_to_p={} max_pdu_c_to_p={} iso_interval={} iso_interval_us={}",
+                        cis.cis_id,
+                        cis.acl.connection_handle,
+                        cis.link.connection_handle,
+                        cis.link.transport_latency_c_to_p,
+                        cis.link.cig_sync_delay,
+                        cis.link.cis_sync_delay,
+                        cis.link.phy_c_to_p,
+                        cis.link.nse,
+                        cis.link.bn_c_to_p,
+                        cis.link.ft_c_to_p,
+                        cis.link.max_pdu_c_to_p,
+                        cis.link.iso_interval,
+                        u32::from(cis.link.iso_interval) * 1_250,
+                    );
+                }
+
                 self.cis_create_transaction = None;
                 self.cis_create_state =
                     CisCreateState::Ready {
