@@ -5,6 +5,9 @@ mod plane;
 
 mod review;
 
+#[cfg(windows)]
+mod gui;
+
 use review::{
     review2::{
         attach as review2,
@@ -23,6 +26,31 @@ fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().skip(1).collect();
+
+        if args.first().map(String::as_str) == Some("gui") {
+            let config = match gui::parse_gui_args(&args[1..]) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("GUI argument error: {error}");
+                    std::process::exit(2);
+                }
+            };
+
+            println!(
+                "BE200AudioHub GUI: Process Loopback -> live gain -> LC3 -> logical HCI ISO"
+            );
+            println!("Target set: {}", config.session.target_name);
+            println!(
+                "Teardown policy: {:?}",
+                config.session.teardown_policy
+            );
+
+            if let Err(error) = gui::run_gui(config) {
+                eprintln!("BE200AudioHub GUI FAILED: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.first().map(String::as_str) == Some("round8")
             && args.get(1).map(String::as_str) == Some("live-relay")
         {
