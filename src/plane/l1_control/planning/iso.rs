@@ -18,7 +18,7 @@ pub const FIRST_PHY_2M: u8 = 0x02;
 
 pub const EXTREME_MAX_TRANSPORT_LATENCY_MS: u16 = 10;
 pub const EXTREME_RTN: u8 = 0;
-pub const EXTREME_PRESENTATION_DELAY_US: u32 = 10_000;
+pub const EXTREME_PRESENTATION_DELAY_US: u32 = 40_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StreamLatencyProfile {
@@ -45,6 +45,9 @@ impl StreamLatencyProfile {
     pub const fn presentation_delay_us(self) -> u32 {
         match self {
             Self::Daily => 40_000,
+            // Galaxy Buds3 Pro reports supported/preferred PD as exactly
+            // 40_000 us for the current LC3 codec configuration. The extreme
+            // profile therefore isolates transport latency/RTN only.
             Self::ExtremeLowLatency => EXTREME_PRESENTATION_DELAY_US,
         }
     }
