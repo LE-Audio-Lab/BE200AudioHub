@@ -16,6 +16,40 @@ pub const FIRST_MAX_TRANSPORT_LATENCY_MS: u16 = 95;
 pub const FIRST_RTN: u8 = 13;
 pub const FIRST_PHY_2M: u8 = 0x02;
 
+pub const EXTREME_MAX_TRANSPORT_LATENCY_MS: u16 = 10;
+pub const EXTREME_RTN: u8 = 0;
+pub const EXTREME_PRESENTATION_DELAY_US: u32 = 10_000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamLatencyProfile {
+    #[default]
+    Daily,
+    ExtremeLowLatency,
+}
+
+impl StreamLatencyProfile {
+    pub const fn max_transport_latency_ms(self) -> u16 {
+        match self {
+            Self::Daily => FIRST_MAX_TRANSPORT_LATENCY_MS,
+            Self::ExtremeLowLatency => EXTREME_MAX_TRANSPORT_LATENCY_MS,
+        }
+    }
+
+    pub const fn rtn(self) -> u8 {
+        match self {
+            Self::Daily => FIRST_RTN,
+            Self::ExtremeLowLatency => EXTREME_RTN,
+        }
+    }
+
+    pub const fn presentation_delay_us(self) -> u32 {
+        match self {
+            Self::Daily => 40_000,
+            Self::ExtremeLowLatency => EXTREME_PRESENTATION_DELAY_US,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlannedCis {
     pub side: AudioSide,
@@ -48,6 +82,13 @@ pub enum IsoPlanError {
 pub fn plan_first_iso(
     codec: &StereoCodecPlan,
 ) -> Result<StereoIsoPlan, IsoPlanError> {
+    plan_first_iso_with_profile(codec, StreamLatencyProfile::Daily)
+}
+
+pub fn plan_first_iso_with_profile(
+    codec: &StereoCodecPlan,
+    profile: StreamLatencyProfile,
+) -> Result<StereoIsoPlan, IsoPlanError> {
     if codec.format.sample_rate_hz != 48_000
         || codec.format.frame_duration_us != 10_000
         || codec.format.octets_per_sdu != 100
@@ -69,9 +110,9 @@ pub fn plan_first_iso(
         cig_id: FIRST_CIG_ID,
         octets_per_sdu: codec.format.octets_per_sdu,
         sdu_interval_us: FIRST_SDU_INTERVAL_US,
-        max_transport_latency_ms: FIRST_MAX_TRANSPORT_LATENCY_MS,
+        max_transport_latency_ms: profile.max_transport_latency_ms(),
         phy: FIRST_PHY_2M,
-        rtn: FIRST_RTN,
+        rtn: profile.rtn(),
         left: PlannedCis {
             side: AudioSide::Left,
             cis_id: FIRST_LEFT_CIS_ID,
@@ -257,6 +298,24 @@ mod tests {
         assert_eq!(create.bindings[0].acl.connection_handle, 0x0801);
         assert_eq!(create.bindings[1].cis_id, 2);
         assert_eq!(create.bindings[1].acl.connection_handle, 0x0800);
+    }
+
+    #[test]
+    fn extreme_profile_pushes_transport_to_low_latency_edge() {
+        let plan = plan_first_iso_with_profile(
+            &codec_plan(),
+            StreamLatencyProfile::ExtremeLowLatency,
+        )
+        .unwrap();
+
+        assert_eq!(plan.sdu_interval_us, 10_000);
+        assert_eq!(plan.phy, 0x02);
+        assert_eq!(plan.rtn, 0);
+        assert_eq!(plan.max_transport_latency_ms, 10);
+
+        let cig = plan.cig_config();
+        assert_eq!(cig.max_transport_latency_c_to_p, 10);
+        assert!(cig.cis.iter().all(|cis| cis.rtn_c_to_p == 0));
     }
 
     #[test]
