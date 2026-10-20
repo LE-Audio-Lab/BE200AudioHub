@@ -756,3 +756,60 @@ product Stop. **Round10 does not promote that implementation fact into a final a
 decision.** The next chat must make that decision explicitly and only then update design docs.
 
 See [Round10.md](./Round10.md) for the authoritative handoff.
+
+## 13. Round 11 / Teardown architecture decision — 2026-10-20
+
+Round11 closes the architecture decision intentionally deferred by Round10.
+
+The generic Control architecture remains Bluetooth/LE-Audio graceful:
+
+```text
+route unbind
+→ ASCS Release
+→ CP SUCCESS + ASE RELEASING
+→ Remove ISO Data Path
+→ Disconnect CIS
+→ Remove CIG
+→ Disconnect ACL
+→ clear privacy/FAL
+```
+
+The repeatable BE200-path controller-global Host-facing ACL-RX cessation is
+recorded as a known hardware/controller-path defect class for product policy,
+without claiming a proven silicon or firmware root cause.
+
+Current BE200 runs may explicitly select:
+
+```text
+--ungraceful-teardown
+```
+
+which uses the controller-clean workaround:
+
+```text
+route
+→ path
+→ CIS
+→ CIG
+→ ACL
+→ privacy
+```
+
+The workaround is opt-in and must not become the generic architecture default.
+
+Implementation seam:
+
+```text
+CoreCommand::StopControl { policy }
+→ ControlIntent::Stop { policy }
+→ ControlMachine::begin_teardown_with_policy(policy)
+```
+
+Initial locked software gate after the policy split:
+
+```text
+cargo test --workspace --locked
+410 passed / 0 failed
+```
+
+See [../design/BE200_TEARDOWN_POLICY.md](../design/BE200_TEARDOWN_POLICY.md).
