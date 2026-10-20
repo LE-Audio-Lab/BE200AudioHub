@@ -10,7 +10,10 @@ use std::{
 use eframe::egui;
 
 use crate::{
-    plane::l1_control::engine::machine::TeardownPolicy,
+    plane::l1_control::{
+        engine::machine::TeardownPolicy,
+        planning::iso::StreamLatencyProfile,
+    },
     review::round8::live_relay::{
         execute_live_relay_until_stop, LiveRelayRuntimeControl,
         LiveRelaySessionConfig,
@@ -33,6 +36,7 @@ pub fn parse_gui_args(args: &[String]) -> Result<GuiConfig, String> {
     let mut connect_timeout =
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
     let mut ungraceful_teardown = false;
+    let mut extreme_low_latency = false;
     let mut index = 0usize;
 
     while index < args.len() {
@@ -81,6 +85,16 @@ pub fn parse_gui_args(args: &[String]) -> Result<GuiConfig, String> {
                 ungraceful_teardown = true;
                 index += 1;
             }
+            "--extreme-low-latency" => {
+                if extreme_low_latency {
+                    return Err(
+                        "--extreme-low-latency specified more than once"
+                            .into(),
+                    );
+                }
+                extreme_low_latency = true;
+                index += 1;
+            }
             unknown => {
                 return Err(format!("unknown GUI argument: {unknown}"));
             }
@@ -100,6 +114,11 @@ pub fn parse_gui_args(args: &[String]) -> Result<GuiConfig, String> {
                 TeardownPolicy::ControllerCleanUngraceful
             } else {
                 TeardownPolicy::Graceful
+            },
+            latency_profile: if extreme_low_latency {
+                StreamLatencyProfile::ExtremeLowLatency
+            } else {
+                StreamLatencyProfile::Daily
             },
         },
     })
@@ -330,6 +349,21 @@ mod tests {
         assert_eq!(
             config.session.connect_timeout,
             Duration::from_secs(DEFAULT_CONNECT_SECONDS)
+        );
+        assert_eq!(
+            config.session.latency_profile,
+            StreamLatencyProfile::Daily
+        );
+    }
+
+    #[test]
+    fn parser_accepts_extreme_low_latency_profile() {
+        let mut value = args();
+        value.push("--extreme-low-latency".into());
+        let config = parse_gui_args(&value).unwrap();
+        assert_eq!(
+            config.session.latency_profile,
+            StreamLatencyProfile::ExtremeLowLatency
         );
     }
 
