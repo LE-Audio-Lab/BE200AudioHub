@@ -6,7 +6,7 @@ use crate::plane::l1_control::interface::stream::AudioSide;
 
 use super::{
     codec::StereoCodecPlan,
-    iso::StereoIsoPlan,
+    iso::{StereoIsoPlan, StreamLatencyProfile},
 };
 
 pub const FIRST_PRESENTATION_DELAY_US: u32 = 40_000;
@@ -57,17 +57,31 @@ pub fn plan_first_qos(
     codec: &StereoCodecPlan,
     iso: &StereoIsoPlan,
 ) -> Result<StereoQosPlan, QosPlanError> {
+    plan_first_qos_with_profile(
+        codec,
+        iso,
+        StreamLatencyProfile::Daily,
+    )
+}
+
+pub fn plan_first_qos_with_profile(
+    codec: &StereoCodecPlan,
+    iso: &StereoIsoPlan,
+    profile: StreamLatencyProfile,
+) -> Result<StereoQosPlan, QosPlanError> {
     let left = plan_side(
         AudioSide::Left,
         &codec.left,
         iso.left,
         iso,
+        profile,
     )?;
     let right = plan_side(
         AudioSide::Right,
         &codec.right,
         iso.right,
         iso,
+        profile,
     )?;
 
     Ok(StereoQosPlan { left, right })
@@ -78,6 +92,7 @@ fn plan_side(
     sink: &super::codec::PlannedSink,
     cis: super::iso::PlannedCis,
     iso: &StereoIsoPlan,
+    profile: StreamLatencyProfile,
 ) -> Result<PlannedQosSink, QosPlanError> {
     if sink.connection != cis.acl {
         return Err(QosPlanError::ConnectionMismatch { side });
@@ -100,7 +115,7 @@ fn plan_side(
             retransmission_number: iso.rtn,
             max_transport_latency:
                 iso.max_transport_latency_ms,
-            presentation_delay: FIRST_PRESENTATION_DELAY_US,
+            presentation_delay: profile.presentation_delay_us(),
         },
     })
 }
@@ -235,6 +250,28 @@ mod tests {
                     presentation_delay: 40_000,
                 }
             );
+        }
+    }
+
+    #[test]
+    fn extreme_profile_uses_ten_ms_presentation_delay() {
+        let codec = codec_plan();
+        let iso = crate::plane::l1_control::planning::iso::plan_first_iso_with_profile(
+            &codec,
+            StreamLatencyProfile::ExtremeLowLatency,
+        )
+        .unwrap();
+        let qos = plan_first_qos_with_profile(
+            &codec,
+            &iso,
+            StreamLatencyProfile::ExtremeLowLatency,
+        )
+        .unwrap();
+
+        for planned in [&qos.left, &qos.right] {
+            assert_eq!(planned.parameters.retransmission_number, 0);
+            assert_eq!(planned.parameters.max_transport_latency, 10);
+            assert_eq!(planned.parameters.presentation_delay, 10_000);
         }
     }
 
