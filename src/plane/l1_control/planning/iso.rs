@@ -17,7 +17,7 @@ pub const FIRST_RTN: u8 = 13;
 pub const FIRST_PHY_2M: u8 = 0x02;
 
 pub const EXTREME_MAX_TRANSPORT_LATENCY_MS: u16 = 10;
-pub const EXTREME_RTN: u8 = 0;
+pub const EXTREME_RTN: u8 = 1;
 pub const EXTREME_PRESENTATION_DELAY_US: u32 = 40_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -313,12 +313,12 @@ mod tests {
 
         assert_eq!(plan.sdu_interval_us, 10_000);
         assert_eq!(plan.phy, 0x02);
-        assert_eq!(plan.rtn, 0);
+        assert_eq!(plan.rtn, 1);
         assert_eq!(plan.max_transport_latency_ms, 10);
 
         let cig = plan.cig_config();
         assert_eq!(cig.max_transport_latency_c_to_p, 10);
-        assert!(cig.cis.iter().all(|cis| cis.rtn_c_to_p == 0));
+        assert!(cig.cis.iter().all(|cis| cis.rtn_c_to_p == 1));
     }
 
     #[test]
