@@ -269,7 +269,7 @@ mod tests {
         .unwrap();
 
         for planned in [&qos.left, &qos.right] {
-            assert_eq!(planned.parameters.retransmission_number, 0);
+            assert_eq!(planned.parameters.retransmission_number, 1);
             assert_eq!(planned.parameters.max_transport_latency, 10);
             assert_eq!(planned.parameters.presentation_delay, 40_000);
         }
