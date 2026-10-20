@@ -2996,7 +2996,7 @@
 
 
     #[test]
-    fn default_teardown_skips_ase_release_and_starts_transport_cleanup() {
+    fn default_teardown_is_graceful_and_releases_ase_before_transport_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine
             .begin_stream_handoff(SessionId(7), StreamId(11))
@@ -3026,30 +3026,26 @@
             ))
             .unwrap();
 
-        assert!(!actions.iter().any(|action| {
+        assert!(actions.iter().any(|action| {
+            matches!(action, ControlAction::BeginGatt(_))
+        }));
+        assert!(actions.iter().any(|action| {
             matches!(
                 action,
-                ControlAction::BeginGatt(_)
-                    | ControlAction::CancelGatt { .. }
-                    | ControlAction::ArmTimer(
-                        ControlTimer::CleanupAse { .. }
-                    )
+                ControlAction::ArmTimer(ControlTimer::CleanupAse { .. })
             )
         }));
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            ControlAction::RemoveIsoPathByRef { .. }
-        )));
         assert!(!actions.iter().any(|action| matches!(
             action,
-            ControlAction::DisconnectCisByRef { .. }
+            ControlAction::RemoveIsoPathByRef { .. }
+                | ControlAction::DisconnectCisByRef { .. }
                 | ControlAction::RemoveCig { .. }
                 | ControlAction::DisconnectAcl { .. }
         )));
     }
 
     #[test]
-    fn default_ungraceful_teardown_returns_idle_after_controller_cleanup() {
+    fn explicit_ungraceful_teardown_returns_idle_after_controller_cleanup() {
         let mut machine = drive_to_streaming_ready();
         machine
             .begin_stream_handoff(SessionId(7), StreamId(11))
@@ -3063,7 +3059,11 @@
             ))
             .unwrap();
 
-        let actions = machine.begin_teardown().unwrap();
+        let actions = machine
+            .begin_teardown_with_policy(
+                TeardownPolicy::ControllerCleanUngraceful,
+            )
+            .unwrap();
         assert_eq!(machine.phase(), ControlPhase::RollingBack);
         assert_eq!(machine.failure(), None);
         assert!(matches!(
