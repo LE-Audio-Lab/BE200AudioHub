@@ -44,6 +44,10 @@ fn main() {
                 "Teardown policy: {:?}",
                 config.session.teardown_policy
             );
+            println!(
+                "Latency profile: {:?}",
+                config.session.latency_profile
+            );
 
             if let Err(error) = gui::run_gui(config) {
                 eprintln!("BE200AudioHub GUI FAILED: {error}");
