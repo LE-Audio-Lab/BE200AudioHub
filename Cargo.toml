@@ -21,3 +21,6 @@ bumble-smp = { git = "https://github.com/chaitanyarahalkar/bumble-rs", rev = "bb
 crossbeam-channel = "0.5"
 sha2 = "0.10"
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
