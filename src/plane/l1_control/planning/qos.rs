@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn extreme_profile_uses_ten_ms_presentation_delay() {
+    fn extreme_profile_keeps_peer_required_presentation_delay() {
         let codec = codec_plan();
         let iso = crate::plane::l1_control::planning::iso::plan_first_iso_with_profile(
             &codec,
@@ -271,7 +271,7 @@ mod tests {
         for planned in [&qos.left, &qos.right] {
             assert_eq!(planned.parameters.retransmission_number, 0);
             assert_eq!(planned.parameters.max_transport_latency, 10);
-            assert_eq!(planned.parameters.presentation_delay, 10_000);
+            assert_eq!(planned.parameters.presentation_delay, 40_000);
         }
     }
 
