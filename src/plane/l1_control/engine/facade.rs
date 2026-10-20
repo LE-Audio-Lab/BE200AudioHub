@@ -37,7 +37,7 @@ impl ControlPlane {
     ) -> Result<ControlStep, ControlFailure> {
         let actions = match intent {
             ControlIntent::Start => self.machine.start()?,
-            ControlIntent::Stop => self.machine.begin_teardown()?,
+            ControlIntent::Stop { policy } => self.machine.begin_teardown_with_policy(policy)?,
             ControlIntent::BeginStreamHandoff {
                 session_id,
                 stream_id,
