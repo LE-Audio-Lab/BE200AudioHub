@@ -100,10 +100,12 @@ use crate::plane::l1_control::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
         enable::{plan_first_enable, EnablePlanError, StereoEnablePlan},
         iso::{
-            plan_first_iso, IsoPlanError, StereoIsoPlan,
+            plan_first_iso_with_profile, IsoPlanError, StereoIsoPlan,
             StreamLatencyProfile,
         },
-        qos::{plan_first_qos, QosPlanError, StereoQosPlan},
+        qos::{
+            plan_first_qos_with_profile, QosPlanError, StereoQosPlan,
+        },
     },
 };
 
