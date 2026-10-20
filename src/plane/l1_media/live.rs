@@ -514,7 +514,70 @@ impl LivePcmIsoWorker {
                                 thread::yield_now();
                             }
                         }
-                        LivePcmStep::Interval { .. } => {
+                        LivePcmStep::Interval {
+                            frame_id,
+                            source_intervals_skipped,
+                            pcm,
+                            bridge,
+                        } => {
+                            let underflow_frames = pcm
+                                .requested_frames
+                                .saturating_sub(pcm.read_frames);
+                            let (
+                                bridge_skipped,
+                                stale_frames_dropped,
+                                backpressure_drop,
+                            ) = match bridge {
+                                BridgeTxStep::Submitted {
+                                    skipped_intervals,
+                                    stale_frames_dropped,
+                                    ..
+                                } => (
+                                    skipped_intervals,
+                                    stale_frames_dropped,
+                                    false,
+                                ),
+                                BridgeTxStep::DroppedBackpressure {
+                                    skipped_intervals,
+                                    stale_frames_dropped,
+                                    ..
+                                } => (
+                                    skipped_intervals,
+                                    stale_frames_dropped,
+                                    true,
+                                ),
+                                BridgeTxStep::Wait { .. } => (0, 0, false),
+                            };
+
+                            if !pcm.keepalive
+                                && (underflow_frames > 0
+                                    || source_intervals_skipped > 0
+                                    || bridge_skipped > 0
+                                    || stale_frames_dropped > 0
+                                    || pcm.drift_trim.gradual_frames > 0
+                                    || pcm.drift_trim.emergency_frames > 0)
+                            {
+                                println!(
+                                    "[live][timing] frame={} underflow_frames={} source_skipped={} bridge_skipped={} stale_frames={} drift_gradual={} drift_emergency={}",
+                                    frame_id.0,
+                                    underflow_frames,
+                                    source_intervals_skipped,
+                                    bridge_skipped,
+                                    stale_frames_dropped,
+                                    pcm.drift_trim.gradual_frames,
+                                    pcm.drift_trim.emergency_frames,
+                                );
+                            }
+
+                            if backpressure_drop {
+                                println!(
+                                    "[live][drop] frame={} bridge_backpressure=true skipped_intervals={} stale_frames={}",
+                                    frame_id.0,
+                                    bridge_skipped,
+                                    stale_frames_dropped,
+                                );
+                            }
+
                             thread_telemetry.publish(&runtime);
                         }
                     }
