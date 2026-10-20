@@ -741,6 +741,50 @@ mod imp {
             return Err(error);
         }
 
+        let mut stream_latency_hns = 0i64;
+        let stream_latency_hr = unsafe {
+            ((*(*audio).vtable).get_stream_latency)(
+                audio,
+                &mut stream_latency_hns,
+            )
+        };
+
+        let mut default_period_hns = 0i64;
+        let mut minimum_period_hns = 0i64;
+        let device_period_hr = unsafe {
+            ((*(*audio).vtable).get_device_period)(
+                audio,
+                &mut default_period_hns,
+                &mut minimum_period_hns,
+            )
+        };
+
+        let buffer_ms =
+            f64::from(buffer_frames) * 1_000.0 / f64::from(SAMPLE_RATE_HZ);
+        if stream_latency_hr >= 0 && device_period_hr >= 0 {
+            println!(
+                "[live][loopback] sample_rate_hz={} buffer_frames={} buffer_ms={:.3} stream_latency_hns={} stream_latency_ms={:.3} default_period_hns={} default_period_ms={:.3} minimum_period_hns={} minimum_period_ms={:.3}",
+                SAMPLE_RATE_HZ,
+                buffer_frames,
+                buffer_ms,
+                stream_latency_hns,
+                stream_latency_hns as f64 / 10_000.0,
+                default_period_hns,
+                default_period_hns as f64 / 10_000.0,
+                minimum_period_hns,
+                minimum_period_hns as f64 / 10_000.0,
+            );
+        } else {
+            println!(
+                "[live][loopback] sample_rate_hz={} buffer_frames={} buffer_ms={:.3} stream_latency_hr=0x{:08X} device_period_hr=0x{:08X}",
+                SAMPLE_RATE_HZ,
+                buffer_frames,
+                buffer_ms,
+                stream_latency_hr as u32,
+                device_period_hr as u32,
+            );
+        }
+
         let mut capture_raw: *mut c_void = ptr::null_mut();
         let service_hr = unsafe {
             ((*(*audio).vtable).get_service)(
