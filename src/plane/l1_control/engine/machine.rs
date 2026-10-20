@@ -382,6 +382,12 @@ pub enum ControlFailure {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TeardownPolicy {
+    Graceful,
+    ControllerCleanUngraceful,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlEvent {
     DiscoveryWindowElapsed,
