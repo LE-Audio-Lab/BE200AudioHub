@@ -587,12 +587,25 @@ pub(crate) struct CurrentPathControlDriver {
     scope: ConditionScope,
     timers: TimerBook,
     binding: Option<StreamBinding>,
+    latency_profile: StreamLatencyProfile,
 }
 
 impl CurrentPathControlDriver {
     pub(crate) fn new(
         plan: ControlSetPlan,
         connect_timeout: Duration,
+    ) -> Result<Self, String> {
+        Self::new_with_latency_profile(
+            plan,
+            connect_timeout,
+            StreamLatencyProfile::Daily,
+        )
+    }
+
+    pub(crate) fn new_with_latency_profile(
+        plan: ControlSetPlan,
+        connect_timeout: Duration,
+        latency_profile: StreamLatencyProfile,
     ) -> Result<Self, String> {
         let lifecycle = LifecycleSnapshot {
             generation: PRODUCT_GENERATION,
@@ -605,7 +618,10 @@ impl CurrentPathControlDriver {
             PRODUCT_SESSION_ID,
         );
         let condition = Condition::new(lifecycle);
-        let control = ControlPlane::new(plan)
+        let control = ControlPlane::new_with_latency_profile(
+            plan,
+            latency_profile,
+        )
             .map_err(|error| {
                 format!("Control plan rejected: {error:?}")
             })?;
@@ -616,6 +632,7 @@ impl CurrentPathControlDriver {
             scope,
             timers: TimerBook::new(connect_timeout),
             binding: None,
+            latency_profile,
         })
     }
 
@@ -687,7 +704,8 @@ impl CurrentPathControlDriver {
             || binding.format.sample_rate_hz != 48_000
             || binding.format.frame_duration_us != 10_000
             || binding.format.octets_per_sdu != 100
-            || binding.presentation_delay_us != 40_000
+            || binding.presentation_delay_us
+                != self.latency_profile.presentation_delay_us()
         {
             return Err(format!(
                 "Control StreamBinding does not match frozen product parameters: {binding:?}"
