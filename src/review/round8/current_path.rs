@@ -23,7 +23,7 @@ use crate::{
         l1_control::{
             engine::{
                 facade::ControlPlane,
-                machine::ControlTimer,
+                machine::{ControlTimer, TeardownPolicy},
                 step::ControlStep,
             },
             interface::{
@@ -84,6 +84,7 @@ pub struct CurrentPathConfig {
     pub target_name: String,
     pub connect_timeout: Duration,
     pub frames: usize,
+    pub teardown_policy: TeardownPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +109,7 @@ pub fn parse_current_path_args(
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
     let mut frames = DEFAULT_FRAMES;
     let mut confirmed = false;
+    let mut ungraceful_teardown = false;
     let mut index = 0usize;
 
     while index < args.len() {
@@ -155,6 +157,15 @@ pub fn parse_current_path_args(
                 }
                 index += 2;
             }
+            "--ungraceful-teardown" => {
+                if ungraceful_teardown {
+                    return Err(
+                        "--ungraceful-teardown specified more than once".into(),
+                    );
+                }
+                ungraceful_teardown = true;
+                index += 1;
+            }
             "--confirm-first-sound-hil" => {
                 if confirmed {
                     return Err(
@@ -189,6 +200,11 @@ pub fn parse_current_path_args(
             .ok_or_else(|| "--name is required".to_string())?,
         connect_timeout,
         frames,
+        teardown_policy: if ungraceful_teardown {
+            TeardownPolicy::ControllerCleanUngraceful
+        } else {
+            TeardownPolicy::Graceful
+        },
     })
 }
 
@@ -741,11 +757,12 @@ impl CurrentPathControlDriver {
     pub(crate) fn stop(
         &mut self,
         stack: &HciStack,
+        policy: TeardownPolicy,
     ) -> Result<(), String> {
         let stop = execute_control(
             &self.condition,
             &mut self.control,
-            CoreCommand::StopControl,
+            CoreCommand::StopControl { policy },
         )
         .map_err(|error| format!("StopControl failed: {error:?}"))?;
         apply_and_continue(
@@ -774,6 +791,7 @@ fn run_current_path(
     plan: ControlSetPlan,
     connect_timeout: Duration,
     frames: usize,
+    teardown_policy: TeardownPolicy,
 ) -> Result<(IsoCreditSnapshot, IsoCreditSnapshot), String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
@@ -784,7 +802,7 @@ fn run_current_path(
     let audit_after =
         driver.wait_media_completion(stack, &audit_before, frames)?;
 
-    driver.stop(stack)?;
+    driver.stop(stack, teardown_policy)?;
     Ok((audit_before, audit_after))
 }
 
@@ -823,6 +841,7 @@ pub fn execute_current_path(
         plan,
         config.connect_timeout,
         config.frames,
+        config.teardown_policy,
     );
     let exit = stack.shutdown();
 
@@ -879,6 +898,18 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.frames, 20);
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
+        assert_eq!(config.teardown_policy, TeardownPolicy::Graceful);
+    }
+
+    #[test]
+    fn parser_accepts_explicit_ungraceful_teardown_workaround() {
+        let mut value = args();
+        value.push("--ungraceful-teardown".into());
+        let config = parse_current_path_args(&value).unwrap();
+        assert_eq!(
+            config.teardown_policy,
+            TeardownPolicy::ControllerCleanUngraceful
+        );
     }
 
     #[test]
