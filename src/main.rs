@@ -56,6 +56,10 @@ fn main() {
                 config.live_duration.as_secs_f64()
             );
             println!(
+                "Teardown policy: {:?}",
+                config.teardown_policy
+            );
+            println!(
                 "PCM boundary: 80 ms physical ring, 10 ms retained cushion, 40 ms startup hold, 20 ms activation threshold."
             );
             println!(
@@ -171,6 +175,10 @@ fn main() {
             println!(
                 "Frames: {} × 10 ms; LC3 48 kHz mono/ear, 100 B/ear",
                 config.frames
+            );
+            println!(
+                "Teardown policy: {:?}",
+                config.teardown_policy
             );
             println!(
                 "Frozen transport policy: CIG=1, Left CIS=1, Right CIS=2, 2M, RTN=13, max transport latency=95 ms, presentation delay=40 ms."
