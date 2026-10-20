@@ -5,7 +5,7 @@
 
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc,
         Arc,
     },
@@ -44,6 +44,50 @@ use crate::{
 const LIVE_ENCODED_CAPACITY: usize = 4;
 pub const LIVE_BRIDGE_START_LEAD_US: u64 = 20_000;
 const WORKER_MAX_SLEEP_US: u64 = 2_000;
+
+#[derive(Clone)]
+pub struct LiveGain {
+    linear_bits: Arc<AtomicU32>,
+}
+
+impl LiveGain {
+    pub fn new(linear: f32) -> Self {
+        let value = linear.clamp(0.0, 1.0);
+        Self {
+            linear_bits: Arc::new(AtomicU32::new(value.to_bits())),
+        }
+    }
+
+    pub fn unity() -> Self {
+        Self::new(1.0)
+    }
+
+    pub fn set_linear(&self, linear: f32) {
+        let value = linear.clamp(0.0, 1.0);
+        self.linear_bits
+            .store(value.to_bits(), Ordering::Release);
+    }
+
+    pub fn linear(&self) -> f32 {
+        f32::from_bits(self.linear_bits.load(Ordering::Acquire))
+    }
+}
+
+impl Default for LiveGain {
+    fn default() -> Self {
+        Self::unity()
+    }
+}
+
+fn apply_live_gain(frames: &mut [[f32; 2]], linear: f32) {
+    if linear == 1.0 {
+        return;
+    }
+    for frame in frames {
+        frame[0] *= linear;
+        frame[1] *= linear;
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LivePcmError {
@@ -90,6 +134,7 @@ pub struct LivePcmIsoRuntime {
     boundary: PcmRelayBoundary,
     encoder: Lc3StereoEncoder,
     bridge: LogicalIsoTxBridge,
+    gain: LiveGain,
     scratch: [[f32; 2]; SAMPLES_PER_FRAME],
     stats: LivePcmStats,
 }
@@ -100,6 +145,22 @@ impl LivePcmIsoRuntime {
         boundary: PcmRelayBoundary,
         epoch_us: u64,
         tx: HciLogicalIsoTx,
+    ) -> Result<Self, LivePcmError> {
+        Self::new_with_gain(
+            binding,
+            boundary,
+            epoch_us,
+            tx,
+            LiveGain::unity(),
+        )
+    }
+
+    pub fn new_with_gain(
+        binding: StreamBinding,
+        boundary: PcmRelayBoundary,
+        epoch_us: u64,
+        tx: HciLogicalIsoTx,
+        gain: LiveGain,
     ) -> Result<Self, LivePcmError> {
         if LIVE_PCM_CONSUMER_FRAMES != SAMPLES_PER_FRAME {
             return Err(LivePcmError::ConsumerFrameSizeMismatch);
@@ -126,6 +187,7 @@ impl LivePcmIsoRuntime {
             boundary,
             encoder,
             bridge,
+            gain,
             scratch: [[0.0; 2]; SAMPLES_PER_FRAME],
             stats: LivePcmStats::default(),
         })
@@ -225,6 +287,8 @@ impl LivePcmIsoRuntime {
 
         let pcm = self.boundary.consume(&mut self.scratch);
         self.observe_consume(pcm);
+
+        apply_live_gain(&mut self.scratch, self.gain.linear());
 
         let encoded = self
             .encoder
@@ -390,6 +454,20 @@ impl LivePcmIsoWorker {
         boundary: PcmRelayBoundary,
         tx: HciLogicalIsoTx,
     ) -> Result<Self, LivePcmError> {
+        Self::start_with_gain(
+            binding,
+            boundary,
+            tx,
+            LiveGain::unity(),
+        )
+    }
+
+    pub fn start_with_gain(
+        binding: StreamBinding,
+        boundary: PcmRelayBoundary,
+        tx: HciLogicalIsoTx,
+        gain: LiveGain,
+    ) -> Result<Self, LivePcmError> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let telemetry = Arc::new(LivePcmWorkerTelemetry::default());
@@ -400,11 +478,12 @@ impl LivePcmIsoWorker {
             .name("be200-media-live".into())
             .spawn(move || {
                 let origin = Instant::now();
-                let mut runtime = match LivePcmIsoRuntime::new(
+                let mut runtime = match LivePcmIsoRuntime::new_with_gain(
                     binding,
                     boundary,
                     LIVE_BRIDGE_START_LEAD_US,
                     tx,
+                    gain,
                 ) {
                     Ok(runtime) => runtime,
                     Err(error) => {
@@ -523,6 +602,20 @@ mod tests {
             presentation_delay_us: 40_000,
             topology: StreamTopology::StereoSplit,
         }
+    }
+
+    #[test]
+    fn live_gain_clamps_and_scales_stereo_pcm() {
+        let gain = LiveGain::new(2.0);
+        assert_eq!(gain.linear(), 1.0);
+
+        gain.set_linear(-1.0);
+        assert_eq!(gain.linear(), 0.0);
+
+        gain.set_linear(0.5);
+        let mut frames = [[0.8, -0.4], [0.2, 0.6]];
+        apply_live_gain(&mut frames, gain.linear());
+        assert_eq!(frames, [[0.4, -0.2], [0.1, 0.3]]);
     }
 
     #[test]
