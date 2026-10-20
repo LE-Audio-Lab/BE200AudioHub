@@ -339,3 +339,11 @@ See [Round7.md](./Round7.md) for the full chronology, claim boundary, HIL comman
 | **R10R-05** | Cleanup could accidentally remove unrelated product architecture | Compared post-cleanup active `src/` against pre-investigation baseline `a11efdff`; only three intentional files differ | **PASS** |
 | **R10R-06** | Cleanup could silently break deterministic behavior | Re-ran full locked software gate after cleanup | **408/408 tests PASS; check PASS; build PASS** |
 | **R10R-07** | Current ungraceful normal-Stop implementation could be mistaken for a finalized Round10 architecture decision | Round10 documentation records it only as current code state and explicitly defers the final teardown contract to the next chat | **DECISION DEFERRED** |
+
+## 15. Round 11 / teardown architecture decision
+
+| ID | Symptom / wrong assumption | Architecture decision | Verification / status |
+|---|---|---|---|
+| **R11R-01** | The temporary Round10 controller-clean Stop implementation could silently become the generic architecture default | Restore spec-aligned graceful Stop as the default: route → ASCS Release/RELEASING → ISO path → CIS → CIG → ACL/privacy. Keep the BE200 controller-clean sequence only behind explicit `TeardownPolicy::ControllerCleanUngraceful` / `--ungraceful-teardown` | **SOFTWARE PASS**: 410/410 locked tests |
+| **R11R-02** | BE200 long-session graceful teardown can depend on a peer-facing ACL RX path that has already ceased returning ATT/GATT data | Treat the repeatable controller-global Host-facing ACL-RX cessation as a known BE200-path defect/quirk for product policy purposes, while leaving its exact internal root cause unresolved | **ARCHITECTURE FROZEN**; forensic code remains deprecated |
+| **R11R-03** | Workaround HIL could be misread as standards-compliant graceful teardown | CLI makes workaround selection explicit and logs the teardown policy; no automatic generic fallback | **IMPLEMENTED** |
