@@ -108,6 +108,17 @@ impl ProcessLoopbackSource {
             move |packet| {
                 let result =
                     producer.push(packet.frames, packet.silent);
+
+                if result.dropped_frames > 0 || packet.discontinuity {
+                    println!(
+                        "[live][capture] loss/offset dropped_frames={} discontinuity={} device_position={} qpc_position={}",
+                        result.dropped_frames,
+                        packet.discontinuity,
+                        packet.device_position,
+                        packet.qpc_position,
+                    );
+                }
+
                 callback_counters.record(
                     result,
                     packet.discontinuity,
