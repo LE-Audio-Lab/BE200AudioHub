@@ -38,6 +38,7 @@ use crate::{
             model::set_plan::{
                 ControlMemberPlan, ControlSetPlan,
             },
+            planning::iso::StreamLatencyProfile,
         },
         l1_hci::{
             acl::security::StoredLeKeyMaterial,
