@@ -6,6 +6,10 @@
 
 use std::{
     path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +36,7 @@ use crate::{
         },
         l1_media::{
             live::{
-                LivePcmIsoWorker, LivePcmWorkerExit,
+                LiveGain, LivePcmIsoWorker, LivePcmWorkerExit,
                 LivePcmWorkerSnapshot,
             },
             pcm::relay_boundary::PcmRelayBoundary,
@@ -69,6 +73,43 @@ pub struct LiveRelayConfig {
     pub live_duration: Duration,
     pub longevity_test: bool,
     pub teardown_policy: TeardownPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveRelaySessionConfig {
+    pub sfi: PathBuf,
+    pub ddc: PathBuf,
+    pub bond_root: PathBuf,
+    pub target_name: String,
+    pub connect_timeout: Duration,
+    pub teardown_policy: TeardownPolicy,
+}
+
+#[derive(Clone)]
+pub struct LiveRelayRuntimeControl {
+    stop: Arc<AtomicBool>,
+    gain: LiveGain,
+}
+
+impl LiveRelayRuntimeControl {
+    pub fn new(initial_gain: f32) -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            gain: LiveGain::new(initial_gain),
+        }
+    }
+
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
+    pub fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    pub fn gain(&self) -> LiveGain {
+        self.gain.clone()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -412,24 +453,34 @@ fn wait_live_duration(
     Ok(())
 }
 
-fn run_live_media(
+fn run_live_media_with_wait<F>(
     stack: &HciStack,
     plan: ControlSetPlan,
     connect_timeout: Duration,
-    duration: Duration,
-    longevity_test: bool,
     teardown_policy: TeardownPolicy,
-) -> Result<LiveRelayMediaResult, String> {
+    gain: LiveGain,
+    wait: F,
+) -> Result<LiveRelayMediaResult, String>
+where
+    F: FnOnce(
+        &ProcessLoopbackSource,
+        &LivePcmIsoWorker,
+        &HciStack,
+        &mut CurrentPathControlDriver,
+        &IsoCreditSnapshot,
+    ) -> Result<(), String>,
+{
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
 
     let (boundary, producer) = PcmRelayBoundary::relay_defaults();
-    let media = LivePcmIsoWorker::start(
+    let media = LivePcmIsoWorker::start_with_gain(
         binding,
         boundary,
         stack.logical_iso_tx(),
+        gain,
     )
     .map_err(|error| {
         format!("live Media worker startup failed: {error:?}")
@@ -453,15 +504,8 @@ fn run_live_media(
             }
         };
 
-    let wait_result = wait_live_duration(
-        duration,
-        longevity_test,
-        &source,
-        &media,
-        stack,
-        &mut driver,
-        &audit_before,
-    );
+    let wait_result =
+        wait(&source, &media, stack, &mut driver, &audit_before);
 
     let source_result = source.shutdown();
     let media_result = media.shutdown();
@@ -489,6 +533,100 @@ fn run_live_media(
         audit_before,
         audit_after,
     })
+}
+
+fn run_live_media(
+    stack: &HciStack,
+    plan: ControlSetPlan,
+    connect_timeout: Duration,
+    duration: Duration,
+    longevity_test: bool,
+    teardown_policy: TeardownPolicy,
+) -> Result<LiveRelayMediaResult, String> {
+    run_live_media_with_wait(
+        stack,
+        plan,
+        connect_timeout,
+        teardown_policy,
+        LiveGain::unity(),
+        |source, media, stack, driver, audit_before| {
+            wait_live_duration(
+                duration,
+                longevity_test,
+                source,
+                media,
+                stack,
+                driver,
+                audit_before,
+            )
+        },
+    )
+}
+
+fn wait_until_stop(control: &LiveRelayRuntimeControl) {
+    while !control.stop_requested() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(windows)]
+pub fn execute_live_relay_until_stop(
+    config: LiveRelaySessionConfig,
+    control: LiveRelayRuntimeControl,
+) -> Result<(), String> {
+    let before = fingerprint_bond_store(&config.bond_root)
+        .map_err(|error| {
+            format!(
+                "cannot fingerprint bond store before GUI relay: {}",
+                error.0
+            )
+        })?;
+    let material = load_verified_bond_set(
+        &config.bond_root,
+        &config.target_name,
+    )
+    .map_err(|error| {
+        format!("cannot load verified stored bond: {}", error.0)
+    })?;
+    let plan = control_plan(&material);
+
+    be200_firmware_port::ensure_operational(
+        &config.sfi,
+        &config.ddc,
+    )
+    .map_err(|error| {
+        format!("firmware bypass failed: {error:?}")
+    })?;
+
+    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let wait_control = control.clone();
+    let run = run_live_media_with_wait(
+        &stack,
+        plan,
+        config.connect_timeout,
+        config.teardown_policy,
+        control.gain(),
+        move |_source, _media, _stack, _driver, _audit_before| {
+            wait_until_stop(&wait_control);
+            Ok(())
+        },
+    );
+    let _exit = stack.shutdown();
+
+    let bond_unchanged = fingerprint_bond_store(&config.bond_root)
+        .map(|after| after == before)
+        .map_err(|error| {
+            format!(
+                "cannot fingerprint bond store after GUI relay: {}",
+                error.0
+            )
+        })?;
+
+    run?;
+    if !bond_unchanged {
+        return Err("bond store fingerprint changed".into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
