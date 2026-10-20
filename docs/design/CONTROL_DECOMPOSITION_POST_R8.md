@@ -261,3 +261,38 @@ composed runtime
 Only after composed runtime behavior is explicit should the remaining
 `ControlPhase` checkpoint/cursor model be reduced into any new
 current/target semantic representation.
+
+## 10. Round11 teardown-policy clarification
+
+Normal product Stop and failure rollback are now explicitly distinct.
+
+Normal Stop defaults to the spec-aligned policy:
+
+```text
+route
+→ ASCS Release / ASE RELEASING gate
+→ ISO path
+→ CIS
+→ CIG
+→ ACL
+→ privacy
+```
+
+Failure rollback retains the established fail-closed order:
+
+```text
+route
+→ ISO path
+→ CIS
+→ best-effort ASE Release
+→ CIG
+→ ACL
+→ privacy
+```
+
+The Intel BE200 userspace-Host path has a separately documented known
+Host-facing ACL-RX cessation defect. The controller-clean ungraceful path is
+therefore represented as an explicit `TeardownPolicy`, never as the generic
+Control default.
+
+See [BE200_TEARDOWN_POLICY.md](./BE200_TEARDOWN_POLICY.md).
