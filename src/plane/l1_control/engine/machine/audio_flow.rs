@@ -548,6 +548,33 @@ impl ControlMachine {
                             return Ok(actions);
                         }
 
+                        if let AseStatusDetails::CodecConfigured {
+                            preferred_framing,
+                            preferred_phy,
+                            preferred_retransmission_number,
+                            preferred_max_transport_latency,
+                            supported_presentation_delay_min,
+                            supported_presentation_delay_max,
+                            preferred_presentation_delay_min,
+                            preferred_presentation_delay_max,
+                            ..
+                        } = &status.details
+                        {
+                            println!(
+                                "[le-audio][peer-qos] side={:?} ase_id={} preferred_framing={} preferred_phy={} preferred_rtn={} preferred_max_transport_latency_ms={} supported_pd_us={}..{} preferred_pd_us={}..{}",
+                                side,
+                                status.ase_id,
+                                preferred_framing,
+                                preferred_phy,
+                                preferred_retransmission_number,
+                                preferred_max_transport_latency,
+                                supported_presentation_delay_min,
+                                supported_presentation_delay_max,
+                                preferred_presentation_delay_min,
+                                preferred_presentation_delay_max,
+                            );
+                        }
+
                         self.confirmed.codec_statuses[side_index(side)] =
                             Some(status);
                         match side {
