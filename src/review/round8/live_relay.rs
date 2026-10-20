@@ -74,7 +74,6 @@ pub struct LiveRelayConfig {
     pub live_duration: Duration,
     pub longevity_test: bool,
     pub teardown_policy: TeardownPolicy,
-    pub latency_profile: StreamLatencyProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +84,7 @@ pub struct LiveRelaySessionConfig {
     pub target_name: String,
     pub connect_timeout: Duration,
     pub teardown_policy: TeardownPolicy,
+    pub latency_profile: StreamLatencyProfile,
 }
 
 #[derive(Clone)]
