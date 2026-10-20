@@ -1,325 +1,371 @@
 # BE200AudioHub
 
-**BE200AudioHub is a Windows user-space LE Audio host experiment and refactor project for Intel BE200-class controllers, built around a Rust Bluetooth host path rather than the Windows Bluetooth audio stack.**
+**BE200AudioHub is an experimental Windows user-space Bluetooth LE Audio Host for Intel BE200-class controllers.**
 
-The original Experiment phase proved the complete control/data path against Galaxy Buds3 Pro, including real acoustic First Sound. The project has now moved into **Review / Refactor**: the protocol path is considered proven; the current work is rebuilding the software around explicit clock domains, asynchronous transport, bounded queues, and replaceable scheduling policy.
+It bypasses the Windows Bluetooth LE Audio Host path for the product data plane and drives a controller directly from Rust:
 
-> **Status:** architecture refactor in progress. Not a daily-use LE Audio driver yet.
+```text
+Windows applications
+    ↓
+WASAPI Process Loopback
+    ↓
+bounded PCM relay
+    ↓
+LC3
+    ↓
+LE Audio Control / BAP
+    ↓
+HCI ISO
+    ↓
+Intel BE200
+    ↓
+LE CIS
+    ↓
+Galaxy Buds3 Pro
+```
+
+The project started as an attempt to make LE Audio usable on Windows and evolved into a complete Host-side unicast playback implementation with real-hardware HIL, dual-CIS audio, live Windows application capture, explicit lifecycle ownership, and controller-level latency instrumentation.
+
+> **Current status:** real dual-ear live audio works on hardware. The Host-side unicast playback path is functional end-to-end. This is still an experimental project, not a production Windows Bluetooth driver.
 
 ---
 
-## What has been proven
+## Current capabilities
 
-The sealed Experiment/R5 implementation demonstrated, on real hardware:
+The current implementation has exercised the following path on real Intel BE200 + Galaxy Buds3 Pro hardware:
 
-- Intel BE200 bootstrap and direct HCI access from Windows;
-- persistent bond / privacy / stored-LTK recovery;
-- coordinated-set discovery and dual encrypted ACLs;
-- PACS / ASCS / CAS / CSIS handling;
-- LC3 codec configuration and QoS planning;
+- Intel OEM-signed BE200 firmware bootstrap and direct HCI access from Windows;
+- resetless Host attach;
+- LE scanning and dual-member discovery;
+- SMP pairing, persistent bond storage, LTK/IRK reuse and controller privacy;
+- coordinated-set handling;
+- encrypted dual LE ACL links;
+- ATT / GATT transactions;
+- PACS / ASCS / CAS / CSIS discovery and state handling;
+- LC3 codec configuration;
+- BAP QoS configuration;
 - CIG creation and dual CIS establishment;
 - ISO Data Path setup/removal;
-- 48 kHz / 10 ms / 100-byte dual-mono LC3;
-- real left/right acoustic First Sound on Galaxy Buds3 Pro;
-- bounded dual-CIS streaming and complete teardown without mutating the saved bond.
+- logical stream routing isolated from raw CIS handles;
+- 48 kHz / 10 ms / 100-byte-per-ear LC3;
+- bounded HCI ISO admission and completion accounting;
+- Windows Process Loopback capture;
+- live Float32 stereo PCM → LC3 → dual-CIS playback;
+- simple egui control surface with Start / Stop / live gain;
+- explicit graceful and BE200-specific controller-clean teardown policies;
+- real First Sound HIL and sustained live-audio HIL.
 
-The Experiment phase also exposed the architectural limit of the prototype: synchronous USB servicing and mixed clock/flow-control responsibilities can distort sustained playback even when the Bluetooth protocol path itself is correct.
-
-That implementation is frozen under:
-
-`deprecated/r5/`
-
-The archived tree corresponds to Experiment commit:
-
-`34f46809105567259f9614f648eadd0451c46b72`
-
-It is historical evidence, not the current implementation target.
+The current product path is **downlink playback only**. Headset microphone uplink, telephony, Broadcast Audio/Auracast and general multi-vendor compatibility are outside the current scope.
 
 ---
 
-## Current design
-
-The Review architecture separates lifecycle, media time, Bluetooth host state and physical transport.
+## Current live data path
 
 ```text
-                           User / UI / CLI
-                                  |
-                                  v
-+---------------------------------------------------------------+
-| L0  LifeCycle / Orchestration                                 |
-| generation | session | recovery | startup | teardown          |
-+-----------------------------+---------------------------------+
-                              |
-               +--------------+--------------+
-               |              |              |
-               v              v              v
-        +-------------+ +-------------+ +------------------+
-        | L1 Control  | | L1 Media    | | L1 HCI Host      |
-        |             | |             | |                  |
-        | BAP / ASCS  | | WASAPI      | | HCI / ACL / ATT  |
-        | PACS / CSIS | | ASRC        | | CIS / ISO        |
-        | CIG / CIS   | | LC3         | | credits / queues |
-        | semantics   | |             | |                  |
-        +-------------+ +------+------+  +---------+--------+
-                               |                  ^
-                               v                  |
-                       +---------------+          |
-                       | IsoTxBridge   |----------+
-                       | interval grid |
-                       | stale/fallback|
-                       +---------------+
-
-                       +---------------+
-                       | StreamClock   |
-                       | authority     |
-                       +---------------+
-                         ^           ^
-                         |           |
-                       Media       Bridge
-
-                                      |
-                                      v
-+---------------------------------------------------------------+
-| L2  Transport Plane                                           |
-| async HCI packet movement | reassembly | transport health     |
-+-----------------------------+---------------------------------+
-                              |
-                              v
-+---------------------------------------------------------------+
-| L3  Platform / Device Backend                                 |
-| Windows | libusb/WinUSB | BE200 bootstrap | raw transfers     |
-+-----------------------------+---------------------------------+
-                              |
-                           Hardware
-```
-
-### L0 — LifeCycle / Orchestration
-
-Owns desired state, generation, session lifetime, retry/backoff, recovery escalation and ordered startup/teardown.
-
-Session is an L0-owned state-machine concept rather than a separate architecture layer.
-
-### L1 — Control Plane
-
-Owns high-level LE Audio semantics:
-
-- identity, bond, privacy and security;
-- PACS / ASCS / CAS / CSIS;
-- codec and QoS planning;
-- ASE state;
-- semantic CIG/CIS and ISO-path lifecycle.
-
-Control is also the **single writer** of the shared-readable `RuntimeState`.
-
-### L1 — Media Plane
-
-Owns the source/media clock domain:
-
-```text
-WASAPI Process Loopback
-        |
-        v
-PCM source ring
-        |
-        v
-Clock discipline / ASRC
-        |
-        v
-target-domain PCM
-        |
-        v
-channel map
-        |
-        v
+Windows application render
+        ↓
+sacrificial physical Windows render endpoint
+        ↓
+Process Loopback capture
+        ↓
+48 kHz Float32 stereo
+        ↓
+bounded SPSC PCM ring
+        ↓
+Media / StreamClock
+        ↓
+live gain
+        ↓
 LC3 L / R
-        |
-        v
-EncodedStereoFrame(FrameId)
+        ↓
+EncodedStereoFrame
+        ↓
+IsoTxBridge
+        ↓
+logical HCI ISO submit lane
+        ↓
+HCI Host ISO framing / sequence / credits
+        ↓
+BE200
+        ↓
+CIG / dual CIS
+        ↓
+Galaxy Buds3 Pro
 ```
 
-The Windows ingress side reuses lessons from LE Audio Relay. The target-domain side follows AOSP-style periodic media scheduling and explicit clock-domain adaptation.
-
-Media never observes CIS handles, controller credits or USB endpoints.
-
-### L1 — HCI Host Plane
-
-Owns controller-facing Bluetooth host state:
-
-- HCI commands/events;
-- ACL / ATT transport;
-- CIS primitives;
-- ISO transport sequence numbers;
-- HCI ISO framing / fragmentation;
-- per-CIS queues;
-- controller capacity and completion accounting.
-
-Controller completion events release capacity; they **never advance media time**.
-
-### IsoTxBridge
-
-An explicit Media ↔ HCI architectural bridge.
-
-The first implementation is an **Interval Group Scheduler**:
-
-- one interval maps to one left/right encoded frame group;
-- left/right are submitted as one logical group;
-- backlog is bounded;
-- stale audio is dropped instead of accumulating latency;
-- missed slots may use Media-provided pre-encoded fallback SDUs;
-- the bridge never waits on HCI credits or USB.
-
-The scheduling policy is intentionally replaceable. A later controller-anchored scheduler can be introduced without changing the Media/HCI boundary.
-
-### StreamClock
-
-Each active stream group owns one authoritative media timeline.
-
-There is one 10 ms grid shared by Media and IsoTxBridge. ASRC is an actuator that maps the WASAPI source clock into this target clock domain; ASRC itself is not the clock authority.
-
-Initial authority may be local monotonic/QPC time. The same abstraction is designed to become controller-anchored later.
-
-### L2 — Transport Plane
-
-Owns asynchronous HCI packet movement and complete-packet reassembly.
-
-Transport understands packet classes such as Command/Event/ACL/ISO, but not BAP/ASE/CIG/CIS semantics.
-
-Independent RX endpoints must not be synchronously round-robin polled.
-
-### L3 — Platform / Device Backend
-
-Owns Windows/USB/BE200-specific details:
-
-- libusb / WinUSB primitives;
-- device and endpoint discovery;
-- open/claim/cancel;
-- raw asynchronous transfers;
-- Intel controller bootstrap;
-- BE200-specific hardware quirks;
-- deterministic test backend.
+The Windows Bluetooth audio endpoint is not used for this path.
 
 ---
 
-## Execution model
+## Low-latency experiment
 
-The runtime follows the AOSP Handler principle:
-
-> **Modules depend on a serial execution context, not permanently on a specific OS thread.**
-
-The first deployment maps those contexts onto five physical threads:
-
-| Execution domain | Initial responsibility |
-| --- | --- |
-| **Core** | L0 LifeCycle + Control + RuntimeState reducer |
-| **HCI Host** | Bumble/host state, ACL/ATT, CIS/ISO, controller credits and host queues |
-| **Media RT** | StreamClock deadlines, ASRC, LC3 and first-stage IsoTxBridge scheduling |
-| **WASAPI Capture** | event-driven Process Loopback ingestion on the Windows audio clock |
-| **USB Reactor** | asynchronous USB completion servicing and HCI packet reassembly |
-
-This is a deployment choice, not a permanent module-level dependency.
-
----
-
-## Frozen design invariants
-
-The current Review baseline treats these as architectural contracts:
-
-1. Media time never waits for HCI credits.
-2. Number Of Completed Packets only releases controller capacity.
-3. RuntimeState is shared-readable and Control-single-writer.
-4. Plane internals are owned by one serial execution context.
-5. Cross-context communication prefers typed messages over shared mutable objects.
-6. WASAPI source clock and LE StreamClock are distinct clock domains.
-7. ASRC maps source time into target time; it is not the clock authority.
-8. Media and IsoTxBridge reference one StreamClock grid.
-9. Media produces encoded transport-agnostic frame groups.
-10. HCI Host owns transport sequence, fragmentation, HCI ISO framing and controller credits.
-11. IsoTxBridge policy is replaceable.
-12. Backlog is bounded; stale audio is not allowed to accumulate latency indefinitely.
-13. Transport never synchronously round-robin polls independent RX endpoints.
-14. HCI Host and USB transport are separate execution domains.
-15. Media RT never blocks on USB, HCI credit, GATT, logging or general-purpose locks.
-
----
-
-## Reference implementations
-
-The refactor deliberately combines established ideas instead of inventing lower-level Bluetooth/media policy from scratch:
-
-- **AOSP Bluetooth / LE Audio** — realtime media worker, ASRC placement, Handler-style execution contexts;
-- **Zephyr Bluetooth Host** — per-CIS ISO queues, fragmentation and completion-driven credit release;
-- **Bumble / Bumble-RS** — Rust Host substrate, ISO packetization and DataPacketQueue behavior;
-- **PipeWire BlueZ5** — grouped ISO scheduling, bounded fill and fallback media;
-- **Linux Bluetooth ISO + BlueZ** — userspace SDU / ISO-socket boundary and BAP transport binding;
-- **Nordic nRF Audio** — controller-timestamp alignment and bounded-latency correction;
-- **Espressif esp_bt_audio** — TX groups, interval timers and startup priming;
-- **BTstack** — explicit Host readiness/credit accounting;
-- **LE Audio Relay** — Windows Process Loopback, SPSC audio buffering and lifecycle/recovery experience.
-
-A behavior with no strong reference precedent should remain explicitly unresolved until justified by system constraints or HIL evidence.
-
----
-
-## Repository layout
+The current `ExtremeLowLatency` profile keeps the Buds3 Pro-required presentation delay while reducing controller transport latency:
 
 ```text
-.
-├─ src/
-│  ├─ main.rs
-│  └─ architecture/
-│     ├─ lifecycle.rs
-│     ├─ runtime_state.rs
-│     ├─ control.rs
-│     ├─ media.rs
-│     ├─ hci_host.rs
-│     ├─ iso_tx_bridge.rs
-│     ├─ stream_clock.rs
-│     ├─ transport.rs
-│     ├─ platform.rs
-│     └─ types.rs
-│
-├─ docs/
-│  ├─ design/
-│  ├─ reference/
-│  └─ history/
-│
-└─ deprecated/
-   └─ r5/        # frozen Experiment/R5 source + docs snapshot
+SDU interval              10 ms
+PHY                       2M
+RTN                       2
+Max Transport Latency     10 ms
+Presentation Delay        40 ms
 ```
+
+Real controller-selected CIS timing:
+
+| Profile | RTN | NSE | Controller C→P transport |
+|---|---:|---:|---:|
+| experimental RTN0 | 0 | 1 | 1.458 ms |
+| experimental RTN1 | 1 | 2 | 3.066 ms |
+| current RTN2 | 2 | 3 | 4.674 ms |
+
+RTN0 proved too fragile for practical RF conditions. RTN2 is the current low-latency/robustness experiment point.
+
+Galaxy Buds3 Pro reports, for the current codec configuration:
+
+```text
+supported presentation delay = 40000..40000 us
+preferred presentation delay = 40000..40000 us
+```
+
+So the peer currently fixes Presentation Delay at **40 ms**.
+
+### Host-side latency observations
+
+The Windows Process Loopback endpoint currently allocates:
+
+```text
+480 frames @ 48 kHz = 10.000 ms
+```
+
+A temporary QPC instrumentation run measured a 10 ms packet span with roughly **0.4–1.9 ms** callback tail age in the sampled run.
+
+With the current 10 ms PCM target cushion, the working nominal timing model is approximately:
+
+```text
+Process Loopback sample-phase + delivery   ~6 ms
+PCM target cushion                         10 ms
+LC3 10 ms frame sample-phase               ~5 ms
+CIS transport                              4.674 ms
+Presentation Delay                         40 ms
+------------------------------------------------
+nominal scheduled/Host timing model       ~65 ms
+```
+
+This is **not yet a physical acoustic E2E measurement**. A future measurement will reuse the project's earlier physical latency-probe methodology.
+
+ASRC-based clock discipline and a smaller steady-state PCM cushion are planned follow-up work; they are not claimed as complete here.
+
+---
+
+## Architecture
+
+The current root implementation is organized by ownership boundary rather than protocol call sequence.
+
+```text
+L0 Core / LifeCycle
+    |
+    +----------------------+-----------------------+
+    |                      |                       |
+    v                      v                       v
+L1 Control             L1 Media               L1 HCI Host
+BAP / ASCS             PCM / LC3              HCI / ACL / ATT
+PACS / CSIS            StreamClock            CIG / CIS / ISO
+semantic state         IsoTxBridge            credits / raw handles
+    |                      |                       |
+    +----------------------+-----------------------+
+                           |
+                           v
+                    L2 Transport
+                           |
+                           v
+                 L3 Windows / BE200
+```
+
+Major source areas:
+
+```text
+src/
+├─ core/
+│  ├─ command/
+│  ├─ condition/
+│  └─ lifecycle/
+├─ plane/
+│  ├─ l1_control/
+│  ├─ l1_media/
+│  ├─ l1_hci/
+│  └─ l2_transport/
+├─ platform/
+│  └─ windows/
+├─ runtime/
+├─ gui.rs
+└─ main.rs
+```
+
+### Frozen engineering invariants
+
+The current implementation treats these as non-regression contracts:
+
+1. **Media time never waits for HCI credits.**
+2. Number Of Completed Packets releases capacity; it never advances media time.
+3. HCI owns raw CIS handles, ISO sequence numbers, fragmentation and controller credits.
+4. Media never observes raw CIS handles.
+5. Logical routes are session-fenced.
+6. Route acknowledgement gates the transport-neutral stream binding.
+7. Left/right audio is submitted as one logical interval group.
+8. Backpressure drops stale/current audio instead of shifting media time.
+9. Queues are bounded.
+10. Mutable subsystem state has a single owner.
+11. Reliable state-changing traffic is never silently dropped.
+12. L2 Transport moves/reassembles packets but does not own BAP/CIS semantics.
+13. L3 owns raw Windows/device I/O.
+14. Normal teardown and failure rollback are distinct policies.
+
+The architectural principle that drove the media rewrite is:
+
+> **Do not let transport backpressure become media time.**
+
+---
+
+## Teardown policy and known BE200 defect
+
+The architecture remains protocol-graceful by default.
+
+Normal graceful shutdown is:
+
+```text
+stop Media
+→ drain / stop Bridge submissions
+→ unbind route
+→ ASCS Release
+→ ASE RELEASING
+→ Remove ISO Data Path
+→ Disconnect CIS
+→ Remove CIG
+→ Disconnect ACL
+→ clear controller privacy/FAL
+```
+
+A long-session investigation found a separate repeatable defect on the current BE200 userspace-Host path: after roughly tens of seconds, both LE ACLs can remain logically alive while **controller → Host HCI ACL RX stops**, even though HCI Event traffic and Host → Controller ACL TX remain alive.
+
+The project deliberately does **not** claim that Intel firmware, BE200 silicon, USB DMA, the peer or the custom Host has been proven as the internal root cause.
+
+For current BE200 daily use an explicit workaround exists:
+
+```text
+--ungraceful-teardown
+```
+
+It skips peer-facing ASCS Release during full-session shutdown and retires controller-owned ISO/CIS/CIG/ACL resources directly. It is a hardware-path workaround, not the Bluetooth architectural default.
+
+See [BE200 Teardown Policy](./docs/design/BE200_TEARDOWN_POLICY.md) and the archived investigation under `deprecated/graceful-teardown-bug/`.
+
+---
+
+## GUI
+
+The current GUI is intentionally small:
+
+- Start
+- Stop
+- live volume/gain slider
+
+The gain value is read by the live Media path before LC3 encoding, without restarting the LE Audio session.
+
+Example launch:
+
+```powershell
+.\target\debug\be200hub.exe gui `
+  --sfi <path-to-intel-oem-signed.sfi> `
+  --ddc <path-to-intel.ddc> `
+  --bond-root <bond-store-directory> `
+  --name "Galaxy Buds3 Pro (...)" `
+  --connect-seconds 12 `
+  --ungraceful-teardown `
+  --extreme-low-latency
+```
+
+Intel proprietary firmware files and private bond/key material are **not distributed by this repository**.
+
+---
+
+## Build and test
+
+Rust workspace:
+
+```powershell
+cargo test --workspace --locked
+cargo check --workspace --locked
+cargo build --workspace --locked
+```
+
+Current software gate at the mainline merge checkpoint:
+
+```text
+416 tests passed
+cargo check PASS
+cargo build PASS
+```
+
+Software tests are not treated as substitutes for real-hardware HIL. HIL claims in the documentation are made only from explicit runs on the target hardware.
+
+---
+
+## Real-hardware milestones
+
+| Milestone | Status |
+|---|---|
+| BE200 firmware bootstrap / HCI / scanning | HIL PASS |
+| dual-member pairing / bond / privacy | HIL PASS |
+| dual encrypted ACL + PACS/ASCS/CAS | HIL PASS |
+| codec / QoS / CIG / dual CIS | HIL PASS |
+| ISO Data Path lifecycle | HIL PASS |
+| valid LC3 dual-ear First Sound | HIL PASS |
+| V2 semantic Control + logical HCI ISO path | HIL PASS |
+| Windows Process Loopback → LC3 → BE200 → Buds3 Pro | HIL PASS |
+| sustained live data plane | HIL PASS |
+| graceful long-session teardown | known BE200-path defect remains |
+| ASRC + reduced PCM cushion | planned |
+| physical acoustic E2E for current custom Host | planned |
 
 ---
 
 ## Documentation
 
-Start with:
+Start here:
 
 1. [Documentation index](./docs/README.md)
 2. [Base Design Principles](./docs/design/BASE_DESIGN_PRINCIPLES.md)
 3. [Architecture](./docs/design/ARCHITECTURE.md)
 4. [Data Flow](./docs/design/DATA_FLOW.md)
-5. [Reference implementations](./docs/reference/README.md)
-6. [Experiment history index](./docs/history/README.md)
+5. [Live Audio Relay Migration](./docs/design/LIVE_AUDIO_RELAY_MIGRATION.md)
+6. [BE200 Teardown Policy](./docs/design/BE200_TEARDOWN_POLICY.md)
+7. [Engineering Timeline](./docs/Timeline/README.md)
+8. [Bug / Fix Register](./docs/Timeline/BUG_FIX_REGISTER.md)
+9. [Function-level Reference Index](./docs/reference-index/README.md)
+
+Historical Experiment/R5 source and evidence remain frozen under `deprecated/r5/`.
+
+The Round9/10 graceful-teardown forensic implementation is archived under `deprecated/graceful-teardown-bug/`.
 
 ---
 
-## Current phase
+## Scope and non-goals
 
-**Review / Refactor**
+BE200AudioHub is currently:
 
-Immediate design/implementation work is focused on:
+- Windows-focused;
+- Intel BE200-class controller focused;
+- Galaxy Buds3 Pro focused for product HIL;
+- unicast sink/playback focused;
+- a userspace Host experiment and engineering platform.
 
-1. execution-context mailbox and ownership contracts;
-2. asynchronous L3/L2 transport;
-3. a single-owner HCI Host execution domain;
-4. authoritative StreamClock + interval-group IsoTxBridge;
-5. rebuilt synthetic media path;
-6. clean synthetic First Sound validation;
-7. WASAPI Process Loopback integration;
-8. clock discipline / ASRC;
-9. lifecycle and recovery integration;
-10. profiling before reconsidering physical-thread placement.
+It is not currently:
 
-The project is intentionally not carrying the Experiment/R5 synchronous architecture forward into the new root implementation.
+- a general replacement Windows Bluetooth driver;
+- a multi-vendor compatibility layer;
+- a headset microphone / telephony implementation;
+- a Broadcast Audio / Auracast implementation;
+- a controller firmware project;
+- an earbud firmware project.
 
 ---
 
@@ -327,10 +373,4 @@ The project is intentionally not carrying the Experiment/R5 synchronous architec
 
 BE200AudioHub source code is licensed under the **Apache License, Version 2.0**.
 
-See [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Third-party dependencies and
-distribution-specific license boundaries are listed in
-[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
-
-Intel firmware images such as `.sfi` and `.ddc` files are third-party
-materials and are **not** covered by the BE200AudioHub Apache-2.0 license.
-
+See [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Third-party dependencies and distribution-specific license boundaries remain governed by their respective licenses.
