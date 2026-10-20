@@ -102,11 +102,11 @@ mod tests {
                 format: None,
             },
         );
-        assert_eq!(admit(&condition, CoreCommand::StopControl), Ok(()));
+        assert_eq!(admit(&condition, CoreCommand::StopControl { policy: crate::plane::l1_control::engine::machine::TeardownPolicy::Graceful }), Ok(()));
 
         let condition = test_condition();
         assert_eq!(
-            admit(&condition, CoreCommand::StopControl),
+            admit(&condition, CoreCommand::StopControl { policy: crate::plane::l1_control::engine::machine::TeardownPolicy::Graceful }),
             Err(CommandAdmissionError::StopControl(
                 StopControlAdmission::ControlIdle,
             )),
