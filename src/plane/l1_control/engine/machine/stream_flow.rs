@@ -187,8 +187,12 @@ impl ControlMachine {
         let iso = self.planned.iso_plan
             .as_ref()
             .expect("CigConfigured requires ISO plan");
-        let plan = plan_first_qos(codec, iso)
-            .map_err(ControlFailure::QosPlan)?;
+        let plan = plan_first_qos_with_profile(
+            codec,
+            iso,
+            self.latency_profile,
+        )
+        .map_err(ControlFailure::QosPlan)?;
         self.planned.qos_plan = Some(plan);
         self.confirmed.qos_statuses = [None, None];
         self.planned.enable_plan = None;
@@ -216,8 +220,11 @@ impl ControlMachine {
         let codec = self.planned.codec_plan
             .as_ref()
             .expect("CodecConfigured requires codec plan");
-        let plan = plan_first_iso(codec)
-            .map_err(ControlFailure::IsoPlan)?;
+        let plan = plan_first_iso_with_profile(
+            codec,
+            self.latency_profile,
+        )
+        .map_err(ControlFailure::IsoPlan)?;
         self.planned.iso_plan = Some(plan);
         self.planned.qos_plan = None;
         self.confirmed.qos_statuses = [None, None];
