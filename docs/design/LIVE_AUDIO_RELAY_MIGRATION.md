@@ -435,3 +435,36 @@ Interpretation:
   controller completion is still outstanding.
 - both zero: host/controller transmission retired; missing CP/ASE response is
   above the HCI ACL completion boundary.
+
+### Round11 decision — preserve graceful architecture, opt in to BE200 workaround
+
+Round10 ultimately showed that the long-session Release failure was a symptom
+of a broader BE200-path Host-facing ACL-RX cessation that also occurs without
+CIG/CIS/ISO/media.
+
+The final architecture does **not** redefine normal LE Audio Stop around that
+quirk.
+
+Default teardown remains:
+
+```text
+route
+→ ASCS Release / RELEASING
+→ ISO path
+→ CIS
+→ CIG
+→ ACL/privacy
+```
+
+For current BE200 HIL/product-path runs, the controller-clean workaround is
+selected explicitly:
+
+```powershell
+--ungraceful-teardown
+```
+
+That path skips peer ASCS Release and retires route/path/CIS/CIG/ACL/privacy
+resources directly. A successful run with this flag is not evidence that peer
+graceful Release completed.
+
+See [BE200_TEARDOWN_POLICY.md](./BE200_TEARDOWN_POLICY.md).
