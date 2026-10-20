@@ -99,7 +99,10 @@ use crate::plane::l1_control::{
     planning::{
         codec::{plan_first_stream, CodecPlanError, StereoCodecPlan},
         enable::{plan_first_enable, EnablePlanError, StereoEnablePlan},
-        iso::{plan_first_iso, IsoPlanError, StereoIsoPlan},
+        iso::{
+            plan_first_iso, IsoPlanError, StereoIsoPlan,
+            StreamLatencyProfile,
+        },
         qos::{plan_first_qos, QosPlanError, StereoQosPlan},
     },
 };
@@ -407,10 +410,21 @@ pub struct ControlMachine {
     streaming_operation: StreamingOperation,
     stream_route_operation: StreamRouteOperation,
     failure: Option<ControlFailure>,
+    latency_profile: StreamLatencyProfile,
 }
 
 impl ControlMachine {
     pub fn new(plan: ControlSetPlan) -> Result<Self, ControlPlanError> {
+        Self::new_with_latency_profile(
+            plan,
+            StreamLatencyProfile::Daily,
+        )
+    }
+
+    pub fn new_with_latency_profile(
+        plan: ControlSetPlan,
+        latency_profile: StreamLatencyProfile,
+    ) -> Result<Self, ControlPlanError> {
         plan.validate()?;
         Ok(Self {
             plan,
@@ -425,6 +439,7 @@ impl ControlMachine {
             streaming_operation: StreamingOperation::new(),
             stream_route_operation: StreamRouteOperation::new(),
             failure: None,
+            latency_profile,
         })
     }
 
