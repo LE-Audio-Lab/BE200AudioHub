@@ -19,7 +19,10 @@ use crate::{
         windows::process_loopback::ProcessLoopbackCaptureStats,
     },
     plane::{
-        l1_control::model::set_plan::ControlSetPlan,
+        l1_control::{
+            engine::machine::TeardownPolicy,
+            model::set_plan::ControlSetPlan,
+        },
         l1_hci::{
             host::stack::{
                 spawn_be200_hci_stack, HciStack, HciStackConfig,
@@ -65,6 +68,7 @@ pub struct LiveRelayConfig {
     pub connect_timeout: Duration,
     pub live_duration: Duration,
     pub longevity_test: bool,
+    pub teardown_policy: TeardownPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +102,7 @@ pub fn parse_live_relay_args(
     let mut requested_live_seconds = None;
     let mut longevity_test = false;
     let mut confirmed = false;
+    let mut ungraceful_teardown = false;
     let mut index = 0usize;
 
     while index < args.len() {
@@ -155,6 +160,15 @@ pub fn parse_live_relay_args(
                 longevity_test = true;
                 index += 1;
             }
+            "--ungraceful-teardown" => {
+                if ungraceful_teardown {
+                    return Err(
+                        "--ungraceful-teardown specified more than once".into(),
+                    );
+                }
+                ungraceful_teardown = true;
+                index += 1;
+            }
             "--confirm-live-relay-hil" => {
                 if confirmed {
                     return Err(
@@ -208,6 +222,11 @@ pub fn parse_live_relay_args(
         connect_timeout,
         live_duration,
         longevity_test,
+        teardown_policy: if ungraceful_teardown {
+            TeardownPolicy::ControllerCleanUngraceful
+        } else {
+            TeardownPolicy::Graceful
+        },
     })
 }
 
@@ -399,6 +418,7 @@ fn run_live_media(
     connect_timeout: Duration,
     duration: Duration,
     longevity_test: bool,
+    teardown_policy: TeardownPolicy,
 ) -> Result<LiveRelayMediaResult, String> {
     let mut driver =
         CurrentPathControlDriver::new(plan, connect_timeout)?;
@@ -426,7 +446,7 @@ fn run_live_media(
                     stack,
                     ISO_DRAIN_TIMEOUT,
                 );
-                let _ = driver.stop(stack);
+                let _ = driver.stop(stack, teardown_policy);
                 return Err(format!(
                     "Windows Process Loopback startup failed: {error:?}"
                 ));
@@ -448,7 +468,7 @@ fn run_live_media(
 
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
-    let stop_result = driver.stop(stack);
+    let stop_result = driver.stop(stack, teardown_policy);
 
     let (source_stats, capture_stats) = source_result.map_err(
         |error| {
@@ -507,6 +527,7 @@ pub fn execute_live_relay(
         config.connect_timeout,
         config.live_duration,
         config.longevity_test,
+        config.teardown_policy,
     );
     let exit = stack.shutdown();
 
@@ -560,6 +581,18 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
+        assert_eq!(config.teardown_policy, TeardownPolicy::Graceful);
+    }
+
+    #[test]
+    fn parser_accepts_explicit_ungraceful_teardown_workaround() {
+        let mut value = args();
+        value.push("--ungraceful-teardown".into());
+        let config = parse_live_relay_args(&value).unwrap();
+        assert_eq!(
+            config.teardown_policy,
+            TeardownPolicy::ControllerCleanUngraceful
+        );
     }
 
     #[test]
