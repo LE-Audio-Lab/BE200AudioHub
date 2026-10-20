@@ -12,6 +12,7 @@ use crate::plane::l1_control::{
         report::ControlLowerReport,
     },
     model::set_plan::{ControlPlanError, ControlSetPlan},
+    planning::iso::StreamLatencyProfile,
 };
 
 pub struct ControlPlane {
@@ -22,6 +23,18 @@ impl ControlPlane {
     pub fn new(plan: ControlSetPlan) -> Result<Self, ControlPlanError> {
         Ok(Self {
             machine: ControlMachine::new(plan)?,
+        })
+    }
+
+    pub fn new_with_latency_profile(
+        plan: ControlSetPlan,
+        latency_profile: StreamLatencyProfile,
+    ) -> Result<Self, ControlPlanError> {
+        Ok(Self {
+            machine: ControlMachine::new_with_latency_profile(
+                plan,
+                latency_profile,
+            )?,
         })
     }
 
