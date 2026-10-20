@@ -90,6 +90,7 @@ mod imp {
     const AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM: u32 = 0x8000_0000;
     const AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY: u32 = 0x1;
     const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 0x2;
+    const AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR: u32 = 0x4;
 
     const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
     const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -426,6 +427,8 @@ mod imp {
         fn SetEvent(event: Handle) -> i32;
         fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
         fn CloseHandle(handle: Handle) -> i32;
+        fn QueryPerformanceCounter(value: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(value: *mut i64) -> i32;
     }
 
     #[link(name = "ntdll")]
@@ -468,6 +471,23 @@ mod imp {
         fn raw(&self) -> Handle {
             self.0
         }
+    }
+
+    fn qpc_now_hns() -> Option<u64> {
+        let mut counter = 0i64;
+        let mut frequency = 0i64;
+        if unsafe { QueryPerformanceCounter(&mut counter) } == 0
+            || unsafe { QueryPerformanceFrequency(&mut frequency) } == 0
+            || counter < 0
+            || frequency <= 0
+        {
+            return None;
+        }
+
+        Some(
+            ((counter as u128) * 10_000_000u128 / (frequency as u128))
+                .min(u128::from(u64::MAX)) as u64,
+        )
     }
 
     impl Drop for OwnedHandle {
@@ -880,6 +900,33 @@ mod imp {
             }
 
             let frame_count = frames as usize;
+            let packet_index = stats.packets.saturating_add(1);
+            let timestamp_error =
+                flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR != 0;
+            if !timestamp_error && qpc_position != 0
+                && (packet_index == 1 || packet_index % 100 == 0)
+            {
+                if let Some(now_hns) = qpc_now_hns() {
+                    let first_age_hns =
+                        i128::from(now_hns) - i128::from(qpc_position);
+                    let packet_span_hns =
+                        (frame_count as i128) * 10_000_000i128
+                            / i128::from(SAMPLE_RATE_HZ);
+                    let tail_age_hns =
+                        first_age_hns - packet_span_hns;
+                    println!(
+                        "[live][loopback-qpc] packet={} frames={} first_frame_age_ms={:.3} packet_span_ms={:.3} tail_age_ms={:.3} qpc_position_hns={} now_hns={}",
+                        packet_index,
+                        frame_count,
+                        first_age_hns as f64 / 10_000.0,
+                        packet_span_hns as f64 / 10_000.0,
+                        tail_age_hns as f64 / 10_000.0,
+                        qpc_position,
+                        now_hns,
+                    );
+                }
+            }
+
             if frame_count > session.scratch.len() {
                 let release_hr = unsafe {
                     ((*(*session.capture).vtable).release_buffer)(
