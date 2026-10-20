@@ -26,6 +26,7 @@ use crate::{
         l1_control::{
             engine::machine::TeardownPolicy,
             model::set_plan::ControlSetPlan,
+            planning::iso::StreamLatencyProfile,
         },
         l1_hci::{
             host::stack::{
@@ -73,6 +74,7 @@ pub struct LiveRelayConfig {
     pub live_duration: Duration,
     pub longevity_test: bool,
     pub teardown_policy: TeardownPolicy,
+    pub latency_profile: StreamLatencyProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,6 +460,7 @@ fn run_live_media_with_wait<F>(
     plan: ControlSetPlan,
     connect_timeout: Duration,
     teardown_policy: TeardownPolicy,
+    latency_profile: StreamLatencyProfile,
     gain: LiveGain,
     wait: F,
 ) -> Result<LiveRelayMediaResult, String>
@@ -471,7 +474,11 @@ where
     ) -> Result<(), String>,
 {
     let mut driver =
-        CurrentPathControlDriver::new(plan, connect_timeout)?;
+        CurrentPathControlDriver::new_with_latency_profile(
+            plan,
+            connect_timeout,
+            latency_profile,
+        )?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
 
@@ -548,6 +555,7 @@ fn run_live_media(
         plan,
         connect_timeout,
         teardown_policy,
+        StreamLatencyProfile::Daily,
         LiveGain::unity(),
         |source, media, stack, driver, audit_before| {
             wait_live_duration(
@@ -605,6 +613,7 @@ pub fn execute_live_relay_until_stop(
         plan,
         config.connect_timeout,
         config.teardown_policy,
+        config.latency_profile,
         control.gain(),
         move |_source, _media, _stack, _driver, _audit_before| {
             wait_until_stop(&wait_control);
