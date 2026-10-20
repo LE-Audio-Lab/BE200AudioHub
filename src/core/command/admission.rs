@@ -22,7 +22,7 @@ pub fn admit(
             StartControlAdmission::Allowed => Ok(()),
             denied => Err(CommandAdmissionError::StartControl(denied)),
         },
-        CoreCommand::StopControl => match condition.stop_control_admission() {
+        CoreCommand::StopControl { .. } => match condition.stop_control_admission() {
             StopControlAdmission::Allowed => Ok(()),
             denied => Err(CommandAdmissionError::StopControl(denied)),
         },
