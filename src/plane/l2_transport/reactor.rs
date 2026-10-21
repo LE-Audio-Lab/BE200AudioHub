@@ -5,14 +5,18 @@ use crate::{
 };
 
 use super::{
+    interface::condition::{
+        TransportConditionUpdate, TransportState,
+    },
     packet::{
         reassembly::{PacketReassembler, ReassemblyError},
         ControllerPacketKind, HostPacket,
     },
-    interface::condition::{
-        TransportConditionUpdate, TransportState,
-    },
     sink::{ControllerPacketSink, PacketSinkError},
+    telemetry::{
+        TransportTelemetry, TransportTelemetrySnapshot,
+        TransportTraceFault, TransportTraceRecord,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,9 +53,7 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     event_rx: PacketReassembler,
     acl_rx: PacketReassembler,
     iso_rx: PacketReassembler,
-    rx_packets: u64,
-    tx_packets: u64,
-    faults: u64,
+    telemetry: TransportTelemetry,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -63,9 +65,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             event_rx: PacketReassembler::new(ControllerPacketKind::Event),
             acl_rx: PacketReassembler::new(ControllerPacketKind::Acl),
             iso_rx: PacketReassembler::new(ControllerPacketKind::Iso),
-            rx_packets: 0,
-            tx_packets: 0,
-            faults: 0,
+            telemetry: TransportTelemetry::default(),
         }
     }
 
@@ -81,12 +81,25 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             ReactorState::Running => TransportState::Ready,
             ReactorState::Faulted => TransportState::Faulted,
         };
+        let telemetry = self.telemetry.snapshot();
         TransportConditionUpdate {
             state,
-            rx_packets: self.rx_packets,
-            tx_packets: self.tx_packets,
-            faults: self.faults,
+            rx_packets: telemetry.rx_packets,
+            tx_packets: telemetry.tx_packets,
+            faults: telemetry.faults,
         }
+    }
+
+    pub fn telemetry_snapshot(&self) -> TransportTelemetrySnapshot {
+        self.telemetry.snapshot()
+    }
+
+    pub fn telemetry_trace_snapshot(&self) -> Vec<TransportTraceRecord> {
+        self.telemetry.trace_snapshot()
+    }
+
+    pub fn take_telemetry_dirty(&mut self) -> bool {
+        self.telemetry.take_dirty()
     }
 
     pub fn start(&mut self) -> Result<(), TransportFault> {
@@ -95,8 +108,14 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             return Err(TransportFault::Backend(BackendError::DeviceGone));
         }
 
-        self.arm_rx(RxEndpoint::Event)?;
-        self.arm_rx(RxEndpoint::Acl)?;
+        if let Err(fault) = self.arm_rx(RxEndpoint::Event) {
+            self.record_fault(fault);
+            return Err(fault);
+        }
+        if let Err(fault) = self.arm_rx(RxEndpoint::Acl) {
+            self.record_fault(fault);
+            return Err(fault);
+        }
         self.state = ReactorState::Running;
         Ok(())
     }
@@ -118,12 +137,18 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             HostPacket::Acl(bytes) => (TxEndpoint::Acl, bytes),
             HostPacket::Iso(bytes) => (TxEndpoint::Iso, bytes),
         };
+        let bytes_len = bytes.len();
         match self.backend.submit_write(endpoint, bytes) {
-            Ok(_) => {
-                self.tx_packets = self.tx_packets.saturating_add(1);
+            Ok(id) => {
+                self.telemetry
+                    .observe_tx_submitted(id, endpoint, bytes_len);
                 Ok(())
             }
-            Err(error) => Err(TransportFault::Backend(error)),
+            Err(error) => {
+                let fault = TransportFault::Backend(error);
+                self.record_fault(fault);
+                Err(fault)
+            }
         }
     }
 
@@ -138,21 +163,41 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
         match completion {
             TransferCompletion::Read {
+                id,
                 endpoint,
                 bytes,
-                ..
-            } => self.handle_read(endpoint, &bytes),
-            TransferCompletion::Write { .. } => StepOutcome::WriteCompleted,
-            TransferCompletion::Cancelled { .. } => StepOutcome::Cancelled,
+            } => self.handle_read(id, endpoint, &bytes),
+            TransferCompletion::Write {
+                id,
+                endpoint,
+                bytes,
+            } => {
+                self.telemetry
+                    .observe_write_completed(id, endpoint, bytes);
+                StepOutcome::WriteCompleted
+            }
+            TransferCompletion::Cancelled { id } => {
+                self.telemetry.observe_cancelled(id);
+                StepOutcome::Cancelled
+            }
             TransferCompletion::DeviceGone => {
+                self.telemetry.observe_device_gone();
                 self.state = ReactorState::Detached;
                 StepOutcome::Detached
             }
-            TransferCompletion::Failed { .. } => self.fail(TransportFault::TransferFailed),
+            TransferCompletion::Failed { id } => {
+                self.telemetry.observe_transfer_failed_completion(id);
+                self.fail(TransportFault::TransferFailed)
+            }
         }
     }
 
-    fn handle_read(&mut self, endpoint: RxEndpoint, bytes: &[u8]) -> StepOutcome {
+    fn handle_read(
+        &mut self,
+        id: crate::platform::backend::TransferId,
+        endpoint: RxEndpoint,
+        bytes: &[u8],
+    ) -> StepOutcome {
         let packets = {
             let reassembler = match endpoint {
                 RxEndpoint::Event => &mut self.event_rx,
@@ -165,6 +210,13 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             }
         };
 
+        self.telemetry.observe_read_completed(
+            id,
+            endpoint,
+            bytes.len(),
+            packets.len(),
+        );
+
         for packet in &packets {
             if let Err(error) = self.hci_rx.try_send_controller(packet.clone()) {
                 return self.fail(match error {
@@ -172,7 +224,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
                     PacketSinkError::Disconnected => TransportFault::HciInboxDisconnected,
                 });
             }
-            self.rx_packets = self.rx_packets.saturating_add(1);
+            self.telemetry.observe_rx_delivered(1);
         }
 
         if self.state == ReactorState::Running {
@@ -191,11 +243,31 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             .map_err(TransportFault::Backend)
     }
 
-    fn fail(&mut self, fault: TransportFault) -> StepOutcome {
+    fn record_fault(&mut self, fault: TransportFault) {
         self.state = ReactorState::Faulted;
-        self.faults = self.faults.saturating_add(1);
+        self.telemetry.observe_fault(transport_trace_fault(fault));
         self.backend.cancel_all();
+    }
+
+    fn fail(&mut self, fault: TransportFault) -> StepOutcome {
+        self.record_fault(fault);
         StepOutcome::Faulted(fault)
+    }
+}
+
+fn transport_trace_fault(fault: TransportFault) -> TransportTraceFault {
+    match fault {
+        TransportFault::Backend(error) => TransportTraceFault::Backend(error),
+        TransportFault::Reassembly(error) => {
+            TransportTraceFault::Reassembly(error)
+        }
+        TransportFault::HciInboxFull => TransportTraceFault::HciInboxFull,
+        TransportFault::HciInboxDisconnected => {
+            TransportTraceFault::HciInboxDisconnected
+        }
+        TransportFault::TransferFailed => {
+            TransportTraceFault::TransferFailed
+        }
     }
 }
 

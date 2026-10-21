@@ -6,6 +6,7 @@
 pub mod packet;
 pub mod reactor;
 pub mod sink;
+pub mod telemetry;
 pub mod worker;
 
 pub mod interface;
