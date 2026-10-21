@@ -13,7 +13,14 @@ use std::{
 use crate::{
     core::{
         command::{execute_control, CoreCommand},
-        condition::{interface::ConditionScope, Condition, ConditionSnapshot},
+        condition::{
+            interface::ConditionScope,
+            publication::{
+                runtime_channels, ConditionPublicationInbox,
+                ConditionPublishers, ConditionReconcileStats,
+            },
+            Condition, ConditionSnapshot,
+        },
         lifecycle::{
             LifecycleSnapshot, LifecycleState, SessionId, SessionState,
             StreamId,
@@ -77,6 +84,11 @@ const PRODUCT_STREAM_ID: StreamId = StreamId(11);
 const CONTROL_DRIVE_DEADLINE: Duration = Duration::from_secs(90);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
+
+pub(crate) fn current_path_condition_runtime(
+) -> (ConditionPublishers, ConditionPublicationInbox) {
+    runtime_channels(PRODUCT_GENERATION, PRODUCT_SESSION_ID)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentPathConfig {
@@ -449,11 +461,16 @@ fn drive_until(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    publication: Option<&ConditionPublicationInbox>,
     target: DriveTarget,
 ) -> Result<(), String> {
     let deadline = Instant::now() + CONTROL_DRIVE_DEADLINE;
 
     loop {
+        if let Some(publication) = publication {
+            publication.reconcile(condition);
+        }
+
         if target_reached(condition, *binding, target) {
             return Ok(());
         }
@@ -505,6 +522,7 @@ fn read_iso_audit(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    publication: Option<&ConditionPublicationInbox>,
 ) -> Result<IsoCreditSnapshot, String> {
     stack
         .control()
@@ -515,6 +533,10 @@ fn read_iso_audit(
 
     let deadline = Instant::now() + AUDIT_TIMEOUT;
     loop {
+        if let Some(publication) = publication {
+            publication.reconcile(condition);
+        }
+
         match stack.reports().try_recv() {
             Ok(HciReport::IsoTxAudit(snapshot)) => return Ok(snapshot),
             Ok(report) => {
@@ -543,6 +565,7 @@ fn wait_media_completion(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    publication: Option<&ConditionPublicationInbox>,
     before: &IsoCreditSnapshot,
     frames: usize,
 ) -> Result<IsoCreditSnapshot, String> {
@@ -553,7 +576,13 @@ fn wait_media_completion(
 
     loop {
         let after = read_iso_audit(
-            stack, control, condition, scope, timers, binding,
+            stack,
+            control,
+            condition,
+            scope,
+            timers,
+            binding,
+            publication,
         )?;
         let submitted = after
             .total_submitted
@@ -590,6 +619,7 @@ pub(crate) struct CurrentPathControlDriver {
     timers: TimerBook,
     binding: Option<StreamBinding>,
     latency_profile: StreamLatencyProfile,
+    publication: Option<ConditionPublicationInbox>,
 }
 
 impl CurrentPathControlDriver {
@@ -608,6 +638,20 @@ impl CurrentPathControlDriver {
         plan: ControlSetPlan,
         connect_timeout: Duration,
         latency_profile: StreamLatencyProfile,
+    ) -> Result<Self, String> {
+        Self::new_with_latency_profile_and_publication(
+            plan,
+            connect_timeout,
+            latency_profile,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_latency_profile_and_publication(
+        plan: ControlSetPlan,
+        connect_timeout: Duration,
+        latency_profile: StreamLatencyProfile,
+        publication: Option<ConditionPublicationInbox>,
     ) -> Result<Self, String> {
         let lifecycle = LifecycleSnapshot {
             generation: PRODUCT_GENERATION,
@@ -635,6 +679,7 @@ impl CurrentPathControlDriver {
             timers: TimerBook::new(connect_timeout),
             binding: None,
             latency_profile,
+            publication,
         })
     }
 
@@ -665,6 +710,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            self.publication.as_ref(),
             DriveTarget::StreamReadyUnbound,
         )?;
 
@@ -695,6 +741,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            self.publication.as_ref(),
             DriveTarget::StreamBound,
         )?;
 
@@ -715,6 +762,21 @@ impl CurrentPathControlDriver {
         }
 
         Ok(binding)
+    }
+
+    pub(crate) fn reconcile_condition_publications(
+        &mut self,
+    ) -> ConditionReconcileStats {
+        match self.publication.as_ref() {
+            Some(publication) => {
+                publication.reconcile(&mut self.condition)
+            }
+            None => ConditionReconcileStats::default(),
+        }
+    }
+
+    pub(crate) fn condition_snapshot(&self) -> ConditionSnapshot {
+        self.condition.snapshot()
     }
 
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
@@ -745,6 +807,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            self.publication.as_ref(),
         )
     }
 
@@ -761,6 +824,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            self.publication.as_ref(),
             before,
             frames,
         )
@@ -814,6 +878,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            self.publication.as_ref(),
             DriveTarget::Idle,
         )
     }
