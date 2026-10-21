@@ -23,6 +23,14 @@ pub enum ClockLock {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamClockSnapshot {
+    pub period_us: u32,
+    pub current_frame: crate::plane::l1_media::clock::frame::FrameId,
+    pub lock: ClockLock,
+    pub rate_error_ppm: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaConditionState {
     pub state: MediaState,
     pub clock_lock: ClockLock,
