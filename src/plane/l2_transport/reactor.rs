@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::{
     platform::backend::{
         BackendError, DeviceBackend, RxEndpoint, TransferCompletion, TxEndpoint,
@@ -54,6 +56,7 @@ pub struct TransportReactor<B: DeviceBackend, S: ControllerPacketSink> {
     acl_rx: PacketReassembler,
     iso_rx: PacketReassembler,
     telemetry: TransportTelemetry,
+    trace_origin: Instant,
 }
 
 impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
@@ -66,6 +69,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             acl_rx: PacketReassembler::new(ControllerPacketKind::Acl),
             iso_rx: PacketReassembler::new(ControllerPacketKind::Iso),
             telemetry: TransportTelemetry::default(),
+            trace_origin: Instant::now(),
         }
     }
 
@@ -100,6 +104,11 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
     pub fn take_telemetry_dirty(&mut self) -> bool {
         self.telemetry.take_dirty()
+    }
+
+    fn trace_now_us(&self) -> u64 {
+        u64::try_from(self.trace_origin.elapsed().as_micros())
+            .unwrap_or(u64::MAX)
     }
 
     pub fn start(&mut self) -> Result<(), TransportFault> {
@@ -140,8 +149,9 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         let bytes_len = bytes.len();
         match self.backend.submit_write(endpoint, bytes) {
             Ok(id) => {
+                let at_us = self.trace_now_us();
                 self.telemetry
-                    .observe_tx_submitted(id, endpoint, bytes_len);
+                    .observe_tx_submitted(at_us, id, endpoint, bytes_len);
                 Ok(())
             }
             Err(error) => {
@@ -172,21 +182,26 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
                 endpoint,
                 bytes,
             } => {
+                let at_us = self.trace_now_us();
                 self.telemetry
-                    .observe_write_completed(id, endpoint, bytes);
+                    .observe_write_completed(at_us, id, endpoint, bytes);
                 StepOutcome::WriteCompleted
             }
             TransferCompletion::Cancelled { id } => {
-                self.telemetry.observe_cancelled(id);
+                let at_us = self.trace_now_us();
+                self.telemetry.observe_cancelled(at_us, id);
                 StepOutcome::Cancelled
             }
             TransferCompletion::DeviceGone => {
-                self.telemetry.observe_device_gone();
+                let at_us = self.trace_now_us();
+                self.telemetry.observe_device_gone(at_us);
                 self.state = ReactorState::Detached;
                 StepOutcome::Detached
             }
             TransferCompletion::Failed { id } => {
-                self.telemetry.observe_transfer_failed_completion(id);
+                let at_us = self.trace_now_us();
+                self.telemetry
+                    .observe_transfer_failed_completion(at_us, id);
                 self.fail(TransportFault::TransferFailed)
             }
         }
@@ -210,7 +225,9 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             }
         };
 
+        let at_us = self.trace_now_us();
         self.telemetry.observe_read_completed(
+            at_us,
             id,
             endpoint,
             bytes.len(),
@@ -245,7 +262,9 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
 
     fn record_fault(&mut self, fault: TransportFault) {
         self.state = ReactorState::Faulted;
-        self.telemetry.observe_fault(transport_trace_fault(fault));
+        let at_us = self.trace_now_us();
+        self.telemetry
+            .observe_fault(at_us, transport_trace_fault(fault));
         self.backend.cancel_all();
     }
 

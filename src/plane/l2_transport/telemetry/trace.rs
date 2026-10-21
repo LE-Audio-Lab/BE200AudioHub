@@ -22,29 +22,37 @@ pub enum TransportTraceFault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportTraceRecord {
     TxSubmitted {
+        at_us: u64,
         id: TransferId,
         endpoint: TxEndpoint,
         bytes: usize,
     },
     ReadCompleted {
+        at_us: u64,
         id: TransferId,
         endpoint: RxEndpoint,
         bytes: usize,
         packets: usize,
     },
     WriteCompleted {
+        at_us: u64,
         id: TransferId,
         endpoint: TxEndpoint,
         bytes: usize,
     },
     Cancelled {
+        at_us: u64,
         id: TransferId,
     },
-    DeviceGone,
+    DeviceGone {
+        at_us: u64,
+    },
     TransferFailed {
+        at_us: u64,
         id: Option<TransferId>,
     },
     Fault {
+        at_us: u64,
         kind: TransportTraceFault,
     },
 }
@@ -87,11 +95,13 @@ mod tests {
     #[test]
     fn raw_trace_is_bounded_and_preserves_recent_history() {
         let mut trace = TransportTrace::with_capacity(2);
-        trace.push(TransportTraceRecord::DeviceGone);
+        trace.push(TransportTraceRecord::DeviceGone { at_us: 1 });
         trace.push(TransportTraceRecord::Cancelled {
+            at_us: 2,
             id: TransferId(1),
         });
         trace.push(TransportTraceRecord::TransferFailed {
+            at_us: 3,
             id: Some(TransferId(2)),
         });
 

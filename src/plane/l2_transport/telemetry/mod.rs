@@ -25,12 +25,14 @@ pub struct TransportTelemetry {
 impl TransportTelemetry {
     pub fn observe_tx_submitted(
         &mut self,
+        at_us: u64,
         id: TransferId,
         endpoint: TxEndpoint,
         bytes: usize,
     ) {
         self.aggregate.observe_tx_packet();
         self.trace.push(TransportTraceRecord::TxSubmitted {
+            at_us,
             id,
             endpoint,
             bytes,
@@ -39,12 +41,14 @@ impl TransportTelemetry {
 
     pub fn observe_read_completed(
         &mut self,
+        at_us: u64,
         id: TransferId,
         endpoint: RxEndpoint,
         bytes: usize,
         packets: usize,
     ) {
         self.trace.push(TransportTraceRecord::ReadCompleted {
+            at_us,
             id,
             endpoint,
             bytes,
@@ -58,35 +62,45 @@ impl TransportTelemetry {
 
     pub fn observe_write_completed(
         &mut self,
+        at_us: u64,
         id: TransferId,
         endpoint: TxEndpoint,
         bytes: usize,
     ) {
         self.trace.push(TransportTraceRecord::WriteCompleted {
+            at_us,
             id,
             endpoint,
             bytes,
         });
     }
 
-    pub fn observe_cancelled(&mut self, id: TransferId) {
-        self.trace.push(TransportTraceRecord::Cancelled { id });
+    pub fn observe_cancelled(&mut self, at_us: u64, id: TransferId) {
+        self.trace.push(TransportTraceRecord::Cancelled { at_us, id });
     }
 
-    pub fn observe_device_gone(&mut self) {
-        self.trace.push(TransportTraceRecord::DeviceGone);
+    pub fn observe_device_gone(&mut self, at_us: u64) {
+        self.trace.push(TransportTraceRecord::DeviceGone { at_us });
     }
 
     pub fn observe_transfer_failed_completion(
         &mut self,
+        at_us: u64,
         id: Option<TransferId>,
     ) {
-        self.trace.push(TransportTraceRecord::TransferFailed { id });
+        self.trace.push(TransportTraceRecord::TransferFailed {
+            at_us,
+            id,
+        });
     }
 
-    pub fn observe_fault(&mut self, kind: TransportTraceFault) {
+    pub fn observe_fault(
+        &mut self,
+        at_us: u64,
+        kind: TransportTraceFault,
+    ) {
         self.aggregate.observe_fault();
-        self.trace.push(TransportTraceRecord::Fault { kind });
+        self.trace.push(TransportTraceRecord::Fault { at_us, kind });
     }
 
     pub fn snapshot(&self) -> TransportTelemetrySnapshot {
@@ -117,11 +131,13 @@ mod tests {
         let mut telemetry = TransportTelemetry::default();
 
         telemetry.observe_tx_submitted(
+            10,
             TransferId(1),
             TxEndpoint::Iso,
             100,
         );
         telemetry.observe_read_completed(
+            20,
             TransferId(2),
             RxEndpoint::Event,
             7,
@@ -129,6 +145,7 @@ mod tests {
         );
         telemetry.observe_rx_delivered(2);
         telemetry.observe_fault(
+            30,
             TransportTraceFault::Backend(BackendError::Failed),
         );
 
