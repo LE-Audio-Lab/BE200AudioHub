@@ -36,10 +36,14 @@ use crate::{
             iso::credit::IsoCreditSnapshot,
         },
         l1_media::{
+            interface::condition::{
+                MediaConditionState, MediaConditionUpdate, MediaState,
+            },
             live::{
                 LiveGain, LivePcmIsoWorker, LivePcmWorkerExit,
                 LivePcmWorkerSnapshot,
             },
+            telemetry::MediaTelemetrySnapshot,
             pcm::relay_boundary::PcmRelayBoundary,
             source::process_loopback::{
                 ProcessLoopbackSource, ProcessLoopbackSourceStats,
@@ -73,6 +77,7 @@ pub struct LiveRelayConfig {
     pub connect_timeout: Duration,
     pub live_duration: Duration,
     pub longevity_test: bool,
+    pub media_telemetry_hil: bool,
     pub teardown_policy: TeardownPolicy,
 }
 
@@ -115,10 +120,27 @@ impl LiveRelayRuntimeControl {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaTelemetryHilResult {
+    pub state_updates_applied: u64,
+    pub telemetry_updates_applied: u64,
+    pub publisher_dropped_updates: u64,
+    pub final_condition_epoch: u64,
+    pub final_state: MediaConditionState,
+    pub final_telemetry: MediaTelemetrySnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MediaTelemetryHilProgress {
+    state_updates_applied: u64,
+    telemetry_updates_applied: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRelayMediaResult {
     pub source: ProcessLoopbackSourceStats,
     pub capture: ProcessLoopbackCaptureStats,
     pub media: LivePcmWorkerExit,
+    pub media_telemetry_hil: Option<MediaTelemetryHilResult>,
     pub audit_before: IsoCreditSnapshot,
     pub audit_after: IsoCreditSnapshot,
 }
@@ -144,6 +166,7 @@ pub fn parse_live_relay_args(
         Duration::from_secs(DEFAULT_CONNECT_SECONDS);
     let mut requested_live_seconds = None;
     let mut longevity_test = false;
+    let mut media_telemetry_hil = false;
     let mut confirmed = false;
     let mut ungraceful_teardown = false;
     let mut index = 0usize;
@@ -201,6 +224,16 @@ pub fn parse_live_relay_args(
                     );
                 }
                 longevity_test = true;
+                index += 1;
+            }
+            "--media-telemetry-hil" => {
+                if media_telemetry_hil {
+                    return Err(
+                        "--media-telemetry-hil specified more than once"
+                            .into(),
+                    );
+                }
+                media_telemetry_hil = true;
                 index += 1;
             }
             "--ungraceful-teardown" => {
@@ -265,6 +298,7 @@ pub fn parse_live_relay_args(
         connect_timeout,
         live_duration,
         longevity_test,
+        media_telemetry_hil,
         teardown_policy: if ungraceful_teardown {
             TeardownPolicy::ControllerCleanUngraceful
         } else {
@@ -397,15 +431,137 @@ fn print_longevity_snapshot(
     );
 }
 
+fn drain_media_condition_hil(
+    media: &LivePcmIsoWorker,
+    driver: &mut CurrentPathControlDriver,
+    progress: &mut MediaTelemetryHilProgress,
+) -> Result<(), String> {
+    while let Some(update) = media.try_recv_condition_hil_update() {
+        match update {
+            MediaConditionUpdate::State(_) => {
+                progress.state_updates_applied = progress
+                    .state_updates_applied
+                    .saturating_add(1);
+            }
+            MediaConditionUpdate::Telemetry(_) => {
+                progress.telemetry_updates_applied = progress
+                    .telemetry_updates_applied
+                    .saturating_add(1);
+            }
+            MediaConditionUpdate::Final { .. } => {
+                return Err(
+                    "temporary Media HIL lane received unexpected Final update"
+                        .into(),
+                );
+            }
+        }
+        let _ = driver.apply_media_condition_hil(update)?;
+    }
+    Ok(())
+}
+
+fn validate_media_condition_hil_final(
+    media_exit: &LivePcmWorkerExit,
+    driver: &mut CurrentPathControlDriver,
+    progress: MediaTelemetryHilProgress,
+    publisher_dropped_updates: u64,
+) -> Result<MediaTelemetryHilResult, String> {
+    if publisher_dropped_updates != 0 {
+        return Err(format!(
+            "Media telemetry HIL publication lane dropped {publisher_dropped_updates} update(s)"
+        ));
+    }
+    if progress.state_updates_applied == 0 {
+        return Err(
+            "Media telemetry HIL observed no semantic State publication".into(),
+        );
+    }
+    if progress.telemetry_updates_applied == 0 {
+        return Err(
+            "Media telemetry HIL observed no coalesced Telemetry publication"
+                .into(),
+        );
+    }
+
+    let MediaConditionUpdate::Final {
+        state,
+        telemetry,
+    } = media_exit.condition_final
+    else {
+        return Err(
+            "Media worker exit did not carry forced Final Condition update"
+                .into(),
+        );
+    };
+
+    let snapshot =
+        driver.apply_media_condition_hil(media_exit.condition_final)?;
+    if snapshot.media.state != state
+        || snapshot.media.telemetry != Some(telemetry)
+    {
+        return Err(
+            "Condition did not materialize the forced Media Final update exactly"
+                .into(),
+        );
+    }
+    if state.state != MediaState::Stopped {
+        return Err(format!(
+            "Media Final state is not Stopped: {:?}",
+            state.state
+        ));
+    }
+    if telemetry.timing.produced_frame.is_none()
+        || telemetry.timing.intervals_consumed == 0
+        || telemetry.bridge.submitted_intervals == 0
+    {
+        return Err(format!(
+            "Media Final telemetry is incomplete: produced_frame={:?} intervals={} bridge_submitted={}",
+            telemetry.timing.produced_frame,
+            telemetry.timing.intervals_consumed,
+            telemetry.bridge.submitted_intervals,
+        ));
+    }
+    if telemetry.timing.trace.capacity != 256
+        || telemetry.bridge.trace.capacity != 256
+    {
+        return Err(format!(
+            "Media raw trace capacities do not match frozen policy: timing={} bridge={}",
+            telemetry.timing.trace.capacity,
+            telemetry.bridge.trace.capacity,
+        ));
+    }
+
+    Ok(MediaTelemetryHilResult {
+        state_updates_applied: progress.state_updates_applied,
+        telemetry_updates_applied: progress.telemetry_updates_applied,
+        publisher_dropped_updates,
+        final_condition_epoch: snapshot.epoch,
+        final_state: state,
+        final_telemetry: telemetry,
+    })
+}
+
 fn wait_live_duration(
     duration: Duration,
     longevity_test: bool,
+    media_telemetry_hil: bool,
     source: &ProcessLoopbackSource,
     media: &LivePcmIsoWorker,
     stack: &HciStack,
     driver: &mut CurrentPathControlDriver,
     audit_origin: &IsoCreditSnapshot,
+    hil_progress: &mut MediaTelemetryHilProgress,
 ) -> Result<(), String> {
+    if media_telemetry_hil {
+        let started = Instant::now();
+        while started.elapsed() < duration {
+            drain_media_condition_hil(media, driver, hil_progress)?;
+            thread::sleep(Duration::from_millis(5));
+        }
+        drain_media_condition_hil(media, driver, hil_progress)?;
+        return Ok(());
+    }
+
     if !longevity_test {
         thread::sleep(duration);
         return Ok(());
@@ -462,6 +618,7 @@ fn run_live_media_with_wait<F>(
     teardown_policy: TeardownPolicy,
     latency_profile: StreamLatencyProfile,
     gain: LiveGain,
+    media_telemetry_hil: bool,
     wait: F,
 ) -> Result<LiveRelayMediaResult, String>
 where
@@ -471,6 +628,7 @@ where
         &HciStack,
         &mut CurrentPathControlDriver,
         &IsoCreditSnapshot,
+        &mut MediaTelemetryHilProgress,
     ) -> Result<(), String>,
 {
     let mut driver =
@@ -483,11 +641,12 @@ where
     let audit_before = driver.iso_audit(stack)?;
 
     let (boundary, producer) = PcmRelayBoundary::relay_defaults();
-    let media = LivePcmIsoWorker::start_with_gain(
+    let media = LivePcmIsoWorker::start_with_gain_and_condition_hil(
         binding,
         boundary,
         stack.logical_iso_tx(),
         gain,
+        media_telemetry_hil,
     )
     .map_err(|error| {
         format!("live Media worker startup failed: {error:?}")
@@ -511,10 +670,35 @@ where
             }
         };
 
-    let wait_result =
-        wait(&source, &media, stack, &mut driver, &audit_before);
+    let mut hil_progress = MediaTelemetryHilProgress::default();
+    if media_telemetry_hil {
+        drain_media_condition_hil(
+            &media,
+            &mut driver,
+            &mut hil_progress,
+        )?;
+    }
+
+    let wait_result = wait(
+        &source,
+        &media,
+        stack,
+        &mut driver,
+        &audit_before,
+        &mut hil_progress,
+    );
+
+    if media_telemetry_hil {
+        drain_media_condition_hil(
+            &media,
+            &mut driver,
+            &mut hil_progress,
+        )?;
+    }
 
     let source_result = source.shutdown();
+    let publisher_dropped_updates =
+        media.condition_hil_dropped_updates();
     let media_result = media.shutdown();
 
     let audit_after_result =
@@ -529,6 +713,17 @@ where
     let media_exit = media_result.map_err(|error| {
         format!("live Media worker failed: {error:?}")
     })?;
+    let media_telemetry_hil_result = if media_telemetry_hil {
+        Some(validate_media_condition_hil_final(
+            &media_exit,
+            &mut driver,
+            hil_progress,
+            publisher_dropped_updates,
+        )?)
+    } else {
+        None
+    };
+
     let audit_after = audit_after_result?;
     stop_result?;
     wait_result?;
@@ -537,6 +732,7 @@ where
         source: source_stats,
         capture: capture_stats,
         media: media_exit,
+        media_telemetry_hil: media_telemetry_hil_result,
         audit_before,
         audit_after,
     })
@@ -548,6 +744,7 @@ fn run_live_media(
     connect_timeout: Duration,
     duration: Duration,
     longevity_test: bool,
+    media_telemetry_hil: bool,
     teardown_policy: TeardownPolicy,
 ) -> Result<LiveRelayMediaResult, String> {
     run_live_media_with_wait(
@@ -557,15 +754,18 @@ fn run_live_media(
         teardown_policy,
         StreamLatencyProfile::Daily,
         LiveGain::unity(),
-        |source, media, stack, driver, audit_before| {
+        media_telemetry_hil,
+        |source, media, stack, driver, audit_before, hil_progress| {
             wait_live_duration(
                 duration,
                 longevity_test,
+                media_telemetry_hil,
                 source,
                 media,
                 stack,
                 driver,
                 audit_before,
+                hil_progress,
             )
         },
     )
@@ -615,7 +815,8 @@ pub fn execute_live_relay_until_stop(
         config.teardown_policy,
         config.latency_profile,
         control.gain(),
-        move |_source, _media, _stack, _driver, _audit_before| {
+        false,
+        move |_source, _media, _stack, _driver, _audit_before, _hil_progress| {
             wait_until_stop(&wait_control);
             Ok(())
         },
@@ -674,6 +875,7 @@ pub fn execute_live_relay(
         config.connect_timeout,
         config.live_duration,
         config.longevity_test,
+        config.media_telemetry_hil,
         config.teardown_policy,
     );
     let exit = stack.shutdown();
@@ -728,7 +930,16 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(12));
         assert_eq!(config.live_duration, Duration::from_secs(7));
         assert_eq!(config.target_name, "Galaxy Buds3 Pro (2F23)");
+        assert!(!config.media_telemetry_hil);
         assert_eq!(config.teardown_policy, TeardownPolicy::Graceful);
+    }
+
+    #[test]
+    fn parser_accepts_temporary_media_telemetry_hil_flag() {
+        let mut value = args();
+        value.push("--media-telemetry-hil".into());
+        let config = parse_live_relay_args(&value).unwrap();
+        assert!(config.media_telemetry_hil);
     }
 
     #[test]

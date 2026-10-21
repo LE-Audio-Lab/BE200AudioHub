@@ -13,7 +13,7 @@ use std::{
 use crate::{
     core::{
         command::{execute_control, CoreCommand},
-        condition::{interface::ConditionScope, Condition},
+        condition::{interface::ConditionScope, Condition, ConditionSnapshot},
         lifecycle::{
             LifecycleSnapshot, LifecycleState, SessionId, SessionState,
             StreamId,
@@ -40,6 +40,7 @@ use crate::{
             },
             planning::iso::StreamLatencyProfile,
         },
+        l1_media::interface::condition::MediaConditionUpdate,
         l1_hci::{
             acl::security::StoredLeKeyMaterial,
             host::stack::{
@@ -718,6 +719,19 @@ impl CurrentPathControlDriver {
 
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
         self.condition.control_status()
+    }
+
+    pub(crate) fn apply_media_condition_hil(
+        &mut self,
+        update: MediaConditionUpdate,
+    ) -> Result<ConditionSnapshot, String> {
+        let change = self.condition.apply_media(self.scope, update);
+        if change.stale {
+            return Err(
+                "Media ConditionUpdate was rejected as stale".into(),
+            );
+        }
+        Ok(self.condition.snapshot())
     }
 
     pub(crate) fn iso_audit(

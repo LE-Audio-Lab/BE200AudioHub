@@ -92,6 +92,14 @@ fn main() {
                 config.teardown_policy
             );
             println!(
+                "Temporary Media telemetry HIL: {}",
+                if config.media_telemetry_hil {
+                    "ENABLED"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
                 "PCM boundary: 80 ms physical ring, 10 ms retained cushion, 40 ms startup hold, 20 ms activation threshold."
             );
             println!(
@@ -162,6 +170,31 @@ fn main() {
                         completed,
                         result.media.audit_after.in_flight,
                     );
+                    if let Some(hil) =
+                        result.media.media_telemetry_hil.as_ref()
+                    {
+                        println!(
+                            "Media telemetry HIL: PASS state_updates={} telemetry_updates={} dropped={} final_epoch={} final_state={:?}",
+                            hil.state_updates_applied,
+                            hil.telemetry_updates_applied,
+                            hil.publisher_dropped_updates,
+                            hil.final_condition_epoch,
+                            hil.final_state,
+                        );
+                        println!(
+                            "Media telemetry final: frame={:?} intervals={} pcm_fill={} underflow={} timing_trace={}/{} bridge_submitted={} bridge_drop={} bridge_trace={}/{}",
+                            hil.final_telemetry.timing.produced_frame,
+                            hil.final_telemetry.timing.intervals_consumed,
+                            hil.final_telemetry.timing.pcm_fill_frames,
+                            hil.final_telemetry.timing.pcm_underflow_frames,
+                            hil.final_telemetry.timing.trace.len,
+                            hil.final_telemetry.timing.trace.capacity,
+                            hil.final_telemetry.bridge.submitted_intervals,
+                            hil.final_telemetry.bridge.dropped_backpressure_intervals,
+                            hil.final_telemetry.bridge.trace.len,
+                            hil.final_telemetry.bridge.trace.capacity,
+                        );
+                    }
                     println!(
                         "StopControl reverse teardown -> Control Idle: PASS"
                     );
