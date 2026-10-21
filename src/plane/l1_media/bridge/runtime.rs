@@ -328,11 +328,7 @@ mod tests {
 
         let final_state = MediaConditionState {
             state: crate::plane::l1_media::interface::condition::MediaState::Draining,
-            produced_frame: Some(FrameId(1)),
-            source_ring_fill_frames: 0,
-            encoded_ring_fill_frames: 0,
-            asrc_ratio: 1.0,
-            clock: None,
+            clock_lock: crate::plane::l1_media::interface::condition::ClockLock::LocalMonotonic,
         };
         assert!(matches!(
             bridge.force_condition_update(final_state),
