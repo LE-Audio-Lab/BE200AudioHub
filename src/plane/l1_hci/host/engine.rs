@@ -814,6 +814,16 @@ impl HciEngine {
         }
     }
 
+    pub fn force_condition_stopped_update(&self) -> HciConditionUpdate {
+        HciConditionUpdate::Final {
+            state: HciConditionState {
+                state: HciHostState::Detached,
+                stream_id: None,
+            },
+            iso_telemetry: self.telemetry.iso_snapshot(),
+        }
+    }
+
     pub fn iso_path_state(&self) -> &IsoPathOperationState {
         &self.iso_path_state
     }

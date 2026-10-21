@@ -497,7 +497,9 @@ fn run_loop(
 
     if let Some(publisher) = condition_publisher.as_ref() {
         let final_update = match exit {
-            HciWorkerExit::Stopped => engine.force_condition_update(),
+            HciWorkerExit::Stopped => {
+                engine.force_condition_stopped_update()
+            },
             HciWorkerExit::Faulted(_) => {
                 engine.force_condition_fault_update()
             }

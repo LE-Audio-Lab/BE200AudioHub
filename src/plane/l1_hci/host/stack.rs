@@ -1,4 +1,7 @@
 use crate::{
+    core::condition::publication::{
+        HciConditionPublisher, TransportConditionPublisher,
+    },
     plane::l1_hci::interface::{
         command::HciControl,
         iso_tx::{HciIsoTx, HciLogicalIsoTx},
@@ -7,7 +10,8 @@ use crate::{
     },
     platform::backend::{BackendError, DeviceBackend},
     plane::l2_transport::worker::{
-        spawn_transport_worker_with_sink, TransportTx,
+        spawn_transport_worker_with_sink,
+        spawn_transport_worker_with_sink_and_condition, TransportTx,
         TransportWorkerExit, TransportWorkerJoin,
     },
 };
@@ -33,6 +37,11 @@ impl Default for HciStackConfig {
             report_inbox_capacity: 64,
         }
     }
+}
+
+pub struct HciStackConditionPublishers {
+    pub hci: HciConditionPublisher,
+    pub transport: TransportConditionPublisher,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +101,22 @@ where
     B: DeviceBackend + 'static,
     F: FnOnce() -> Result<B, BackendError> + Send + 'static,
 {
+    spawn_hci_stack_with_backend_and_condition(
+        factory,
+        config,
+        None,
+    )
+}
+
+pub fn spawn_hci_stack_with_backend_and_condition<B, F>(
+    factory: F,
+    config: HciStackConfig,
+    publishers: Option<HciStackConditionPublishers>,
+) -> HciStack
+where
+    B: DeviceBackend + 'static,
+    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
+{
     let (control, ingress, reports, ports) = hci_mailbox_with_iso(
         config.controller_inbox_capacity,
         config.control_inbox_capacity,
@@ -99,14 +124,21 @@ where
         config.iso_data_inbox_capacity,
     );
 
-    let (transport_tx, transport_join) = spawn_transport_worker_with_sink(
-        factory,
-        config.transport_tx_capacity,
-        ingress,
-    );
+    let (hci_publisher, transport_publisher) = match publishers {
+        Some(value) => (Some(value.hci), Some(value.transport)),
+        None => (None, None),
+    };
+
+    let (transport_tx, transport_join) =
+        spawn_transport_worker_with_sink_and_condition(
+            factory,
+            config.transport_tx_capacity,
+            ingress,
+            transport_publisher,
+        );
 
     let hci_join =
-        spawn_hci_worker(ports, transport_tx.clone(), None);
+        spawn_hci_worker(ports, transport_tx.clone(), hci_publisher);
 
     HciStack {
         control,
@@ -122,6 +154,18 @@ pub fn spawn_be200_hci_stack(config: HciStackConfig) -> HciStack {
     spawn_hci_stack_with_backend(
         crate::platform::windows::be200::open_backend,
         config,
+    )
+}
+
+#[cfg(windows)]
+pub fn spawn_be200_hci_stack_with_condition(
+    config: HciStackConfig,
+    publishers: HciStackConditionPublishers,
+) -> HciStack {
+    spawn_hci_stack_with_backend_and_condition(
+        crate::platform::windows::be200::open_backend,
+        config,
+        Some(publishers),
     )
 }
 
