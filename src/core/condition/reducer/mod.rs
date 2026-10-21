@@ -56,7 +56,7 @@ impl ConditionReducer {
     }
     pub(super) fn transport(bb: &mut Blackboard, scope: ConditionScope, update: TransportConditionUpdate) -> ConditionChange {
         if !Self::accepts_scope(bb, scope) { return Self::stale(bb); }
-        let changed = bb.transport.replace(update);
+        let changed = bb.transport.apply(update);
         Self::finish(bb, changed)
     }
 

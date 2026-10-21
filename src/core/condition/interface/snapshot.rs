@@ -10,7 +10,10 @@ use crate::{
             interface::condition::MediaConditionState,
             telemetry::MediaBridgeTelemetrySnapshot,
         },
-        l2_transport::interface::condition::TransportConditionUpdate,
+        l2_transport::{
+            interface::condition::TransportConditionState,
+            telemetry::TransportTelemetrySnapshot,
+        },
     },
     runtime::generation::Generation,
 };
@@ -27,6 +30,12 @@ pub struct MediaConditionView {
     pub bridge_telemetry: Option<MediaBridgeTelemetrySnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportConditionView {
+    pub state: TransportConditionState,
+    pub telemetry: Option<TransportTelemetrySnapshot>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConditionSnapshot {
     pub epoch: u64,
@@ -35,5 +44,5 @@ pub struct ConditionSnapshot {
     pub control: ControlConditionUpdate,
     pub hci: HciConditionView,
     pub media: MediaConditionView,
-    pub transport: TransportConditionUpdate,
+    pub transport: TransportConditionView,
 }

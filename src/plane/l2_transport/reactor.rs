@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     interface::condition::{
-        TransportConditionUpdate, TransportState,
+        TransportConditionState, TransportConditionUpdate, TransportState,
     },
     packet::{
         reassembly::{PacketReassembler, ReassemblyError},
@@ -77,7 +77,7 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
         self.state
     }
 
-    pub fn condition_update(&self) -> TransportConditionUpdate {
+    pub fn condition_state(&self) -> TransportConditionState {
         let state = match self.state {
             ReactorState::Stopped | ReactorState::Detached => {
                 TransportState::Detached
@@ -85,12 +85,28 @@ impl<B: DeviceBackend, S: ControllerPacketSink> TransportReactor<B, S> {
             ReactorState::Running => TransportState::Ready,
             ReactorState::Faulted => TransportState::Faulted,
         };
-        let telemetry = self.telemetry.snapshot();
-        TransportConditionUpdate {
-            state,
-            rx_packets: telemetry.rx_packets,
-            tx_packets: telemetry.tx_packets,
-            faults: telemetry.faults,
+        TransportConditionState { state }
+    }
+
+    pub fn condition_state_update(&self) -> TransportConditionUpdate {
+        TransportConditionUpdate::State(self.condition_state())
+    }
+
+    pub fn take_condition_telemetry_update(
+        &mut self,
+    ) -> Option<TransportConditionUpdate> {
+        if !self.telemetry.take_dirty() {
+            return None;
+        }
+        Some(TransportConditionUpdate::Telemetry(
+            self.telemetry.snapshot(),
+        ))
+    }
+
+    pub fn force_condition_update(&self) -> TransportConditionUpdate {
+        TransportConditionUpdate::Final {
+            state: self.condition_state(),
+            telemetry: self.telemetry.snapshot(),
         }
     }
 
@@ -382,14 +398,29 @@ mod tests {
         );
         assert_eq!(reactor.state(), ReactorState::Faulted);
         assert_eq!(
-            reactor.condition_update(),
-            TransportConditionUpdate {
+            reactor.condition_state_update(),
+            TransportConditionUpdate::State(TransportConditionState {
                 state: TransportState::Faulted,
-                rx_packets: 1,
-                tx_packets: 0,
-                faults: 1,
-            }
+            })
         );
+        let Some(TransportConditionUpdate::Telemetry(telemetry)) =
+            reactor.take_condition_telemetry_update()
+        else {
+            panic!("fault must leave aggregate telemetry dirty");
+        };
+        assert_eq!(telemetry.rx_packets, 1);
+        assert_eq!(telemetry.tx_packets, 0);
+        assert_eq!(telemetry.faults, 1);
+        assert!(reactor.take_condition_telemetry_update().is_none());
+        assert!(matches!(
+            reactor.force_condition_update(),
+            TransportConditionUpdate::Final {
+                state,
+                telemetry,
+            } if state.state == TransportState::Faulted
+                && telemetry.rx_packets == 1
+                && telemetry.faults == 1
+        ));
     }
 
     #[test]
@@ -412,7 +443,7 @@ mod tests {
 
         let writes = reactor.backend.recorded_writes();
         assert_eq!(writes.len(), 3);
-        assert_eq!(reactor.condition_update().tx_packets, 3);
+        assert_eq!(reactor.telemetry_snapshot().tx_packets, 3);
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Command));
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Acl));
         assert!(writes.iter().any(|w| w.endpoint == TxEndpoint::Iso));

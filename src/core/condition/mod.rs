@@ -119,6 +119,13 @@ mod tests {
                 },
                 telemetry::HciIsoTelemetrySnapshot,
             },
+            l2_transport::{
+                interface::condition::{
+                    TransportConditionState, TransportConditionUpdate,
+                    TransportState,
+                },
+                telemetry::TransportTelemetrySnapshot,
+            },
         },
         runtime::{
             generation::Generation,
@@ -139,7 +146,10 @@ mod tests {
     fn identical_update_does_not_churn_epoch() {
         let mut condition = Condition::new(lifecycle(7, None));
         let update = TransportConditionUpdate::initial();
-        let change = condition.apply_transport(ConditionScope::runtime(Generation(7)), update);
+        let change = condition.apply_transport(
+            ConditionScope::runtime(Generation(7)),
+            update,
+        );
         assert!(!change.changed);
         assert!(!change.stale);
         assert_eq!(change.epoch, 0);
@@ -201,6 +211,41 @@ mod tests {
         let snapshot = condition.snapshot();
         assert_eq!(snapshot.hci.state, semantic);
         assert_eq!(snapshot.hci.iso_telemetry, Some(telemetry));
+    }
+
+    #[test]
+    fn coalesced_transport_telemetry_does_not_clobber_newer_fault_state() {
+        let mut condition = Condition::new(lifecycle(7, None));
+        let scope = ConditionScope::runtime(Generation(7));
+
+        let faulted = TransportConditionState {
+            state: TransportState::Faulted,
+        };
+        condition.apply_transport(
+            scope,
+            TransportConditionUpdate::State(faulted),
+        );
+
+        let telemetry = TransportTelemetrySnapshot {
+            rx_packets: 20,
+            tx_packets: 10,
+            faults: 1,
+            trace: TelemetryRingStats {
+                capacity: 256,
+                len: 4,
+                stored: 4,
+                dropped_newest: 0,
+                overwritten_oldest: 0,
+            },
+        };
+        condition.apply_transport(
+            scope,
+            TransportConditionUpdate::Telemetry(telemetry),
+        );
+
+        let snapshot = condition.snapshot();
+        assert_eq!(snapshot.transport.state, faulted);
+        assert_eq!(snapshot.transport.telemetry, Some(telemetry));
     }
 
     #[test]
