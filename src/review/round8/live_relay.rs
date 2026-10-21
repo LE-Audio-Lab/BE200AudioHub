@@ -15,6 +15,13 @@ use std::{
 };
 
 use crate::{
+    core::condition::{
+        publication::{
+            ConditionPublicationInbox, ConditionPublishers,
+            MediaConditionPublisher,
+        },
+        ConditionSnapshot,
+    },
     platform::{
         firmware::{
             loader::FirmwareLoadOutcome,
@@ -30,8 +37,8 @@ use crate::{
         },
         l1_hci::{
             host::stack::{
-                spawn_be200_hci_stack, HciStack, HciStackConfig,
-                HciStackExit,
+                spawn_be200_hci_stack_with_condition, HciStack,
+                HciStackConditionPublishers, HciStackConfig, HciStackExit,
             },
             iso::credit::IsoCreditSnapshot,
         },
@@ -55,7 +62,8 @@ use crate::{
             fingerprint_bond_store, load_verified_bond_set,
         },
         round8::current_path::{
-            control_plan, CurrentPathControlDriver,
+            control_plan, current_path_condition_runtime,
+            CurrentPathControlDriver,
         },
     },
 };
@@ -121,8 +129,8 @@ impl LiveRelayRuntimeControl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaTelemetryHilResult {
-    pub state_updates_applied: u64,
-    pub telemetry_updates_applied: u64,
+    pub state_updates_observed: u64,
+    pub telemetry_updates_observed: u64,
     pub publisher_dropped_updates: u64,
     pub final_condition_epoch: u64,
     pub final_state: MediaConditionState,
@@ -131,8 +139,8 @@ pub struct MediaTelemetryHilResult {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MediaTelemetryHilProgress {
-    state_updates_applied: u64,
-    telemetry_updates_applied: u64,
+    state_updates_observed: u64,
+    telemetry_updates_observed: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,8 +159,14 @@ pub struct LiveRelayResult {
     pub controller_identity: String,
     pub duration: Duration,
     pub media: LiveRelayMediaResult,
+    pub final_condition: ConditionSnapshot,
     pub bond_unchanged: bool,
     pub exit: HciStackExit,
+}
+
+struct LiveMediaRun {
+    media: LiveRelayMediaResult,
+    driver: CurrentPathControlDriver,
 }
 
 pub fn parse_live_relay_args(
@@ -433,19 +447,18 @@ fn print_longevity_snapshot(
 
 fn drain_media_condition_hil(
     media: &LivePcmIsoWorker,
-    driver: &mut CurrentPathControlDriver,
     progress: &mut MediaTelemetryHilProgress,
 ) -> Result<(), String> {
     while let Some(update) = media.try_recv_condition_hil_update() {
         match update {
             MediaConditionUpdate::State(_) => {
-                progress.state_updates_applied = progress
-                    .state_updates_applied
+                progress.state_updates_observed = progress
+                    .state_updates_observed
                     .saturating_add(1);
             }
             MediaConditionUpdate::Telemetry(_) => {
-                progress.telemetry_updates_applied = progress
-                    .telemetry_updates_applied
+                progress.telemetry_updates_observed = progress
+                    .telemetry_updates_observed
                     .saturating_add(1);
             }
             MediaConditionUpdate::Final { .. } => {
@@ -455,7 +468,6 @@ fn drain_media_condition_hil(
                 );
             }
         }
-        let _ = driver.apply_media_condition_hil(update)?;
     }
     Ok(())
 }
@@ -471,12 +483,12 @@ fn validate_media_condition_hil_final(
             "Media telemetry HIL publication lane dropped {publisher_dropped_updates} update(s)"
         ));
     }
-    if progress.state_updates_applied == 0 {
+    if progress.state_updates_observed == 0 {
         return Err(
             "Media telemetry HIL observed no semantic State publication".into(),
         );
     }
-    if progress.telemetry_updates_applied == 0 {
+    if progress.telemetry_updates_observed == 0 {
         return Err(
             "Media telemetry HIL observed no coalesced Telemetry publication"
                 .into(),
@@ -494,13 +506,13 @@ fn validate_media_condition_hil_final(
         );
     };
 
-    let snapshot =
-        driver.apply_media_condition_hil(media_exit.condition_final)?;
+    driver.reconcile_condition_publications();
+    let snapshot = driver.condition_snapshot();
     if snapshot.media.state != state
         || snapshot.media.telemetry != Some(telemetry)
     {
         return Err(
-            "Condition did not materialize the forced Media Final update exactly"
+            "production Condition did not materialize the forced Media Final update exactly"
                 .into(),
         );
     }
@@ -532,13 +544,26 @@ fn validate_media_condition_hil_final(
     }
 
     Ok(MediaTelemetryHilResult {
-        state_updates_applied: progress.state_updates_applied,
-        telemetry_updates_applied: progress.telemetry_updates_applied,
+        state_updates_observed: progress.state_updates_observed,
+        telemetry_updates_observed: progress.telemetry_updates_observed,
         publisher_dropped_updates,
         final_condition_epoch: snapshot.epoch,
         final_state: state,
         final_telemetry: telemetry,
     })
+}
+
+fn service_condition_runtime(
+    media: &LivePcmIsoWorker,
+    driver: &mut CurrentPathControlDriver,
+    media_telemetry_hil: bool,
+    hil_progress: &mut MediaTelemetryHilProgress,
+) -> Result<(), String> {
+    driver.reconcile_condition_publications();
+    if media_telemetry_hil {
+        drain_media_condition_hil(media, hil_progress)?;
+    }
+    Ok(())
 }
 
 fn wait_live_duration(
@@ -552,22 +577,27 @@ fn wait_live_duration(
     audit_origin: &IsoCreditSnapshot,
     hil_progress: &mut MediaTelemetryHilProgress,
 ) -> Result<(), String> {
-    if media_telemetry_hil {
-        let started = Instant::now();
-        while started.elapsed() < duration {
-            drain_media_condition_hil(media, driver, hil_progress)?;
-            thread::sleep(Duration::from_millis(5));
-        }
-        drain_media_condition_hil(media, driver, hil_progress)?;
-        return Ok(());
-    }
+    let started = Instant::now();
 
     if !longevity_test {
-        thread::sleep(duration);
+        while started.elapsed() < duration {
+            service_condition_runtime(
+                media,
+                driver,
+                media_telemetry_hil,
+                hil_progress,
+            )?;
+            let remaining = duration.saturating_sub(started.elapsed());
+            thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
+        service_condition_runtime(
+            media,
+            driver,
+            media_telemetry_hil,
+            hil_progress,
+        )?;
         return Ok(());
     }
-
-    let started = Instant::now();
     let mut source_before = source.stats();
     let mut media_before = media.snapshot();
     let mut iso_before = audit_origin.clone();
@@ -580,10 +610,22 @@ fn wait_live_duration(
         let target = Duration::from_nanos(
             u64::try_from(target_nanos).unwrap_or(u64::MAX),
         );
-        let elapsed = started.elapsed();
-        if elapsed < target {
-            thread::sleep(target - elapsed);
+        while started.elapsed() < target {
+            service_condition_runtime(
+                media,
+                driver,
+                media_telemetry_hil,
+                hil_progress,
+            )?;
+            let remaining = target.saturating_sub(started.elapsed());
+            thread::sleep(remaining.min(Duration::from_millis(5)));
         }
+        service_condition_runtime(
+            media,
+            driver,
+            media_telemetry_hil,
+            hil_progress,
+        )?;
 
         let source_after = source.stats();
         let media_after = media.snapshot();
@@ -618,9 +660,11 @@ fn run_live_media_with_wait<F>(
     teardown_policy: TeardownPolicy,
     latency_profile: StreamLatencyProfile,
     gain: LiveGain,
+    publication: ConditionPublicationInbox,
+    media_publisher: MediaConditionPublisher,
     media_telemetry_hil: bool,
     wait: F,
-) -> Result<LiveRelayMediaResult, String>
+) -> Result<LiveMediaRun, String>
 where
     F: FnOnce(
         &ProcessLoopbackSource,
@@ -632,20 +676,22 @@ where
     ) -> Result<(), String>,
 {
     let mut driver =
-        CurrentPathControlDriver::new_with_latency_profile(
+        CurrentPathControlDriver::new_with_latency_profile_and_publication(
             plan,
             connect_timeout,
             latency_profile,
+            Some(publication),
         )?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
 
     let (boundary, producer) = PcmRelayBoundary::relay_defaults();
-    let media = LivePcmIsoWorker::start_with_gain_and_condition_hil(
+    let media = LivePcmIsoWorker::start_with_gain_and_condition(
         binding,
         boundary,
         stack.logical_iso_tx(),
         gain,
+        Some(media_publisher),
         media_telemetry_hil,
     )
     .map_err(|error| {
@@ -674,7 +720,6 @@ where
     if media_telemetry_hil {
         drain_media_condition_hil(
             &media,
-            &mut driver,
             &mut hil_progress,
         )?;
     }
@@ -691,7 +736,6 @@ where
     if media_telemetry_hil {
         drain_media_condition_hil(
             &media,
-            &mut driver,
             &mut hil_progress,
         )?;
     }
@@ -700,6 +744,7 @@ where
     let publisher_dropped_updates =
         media.condition_hil_dropped_updates();
     let media_result = media.shutdown();
+    driver.reconcile_condition_publications();
 
     let audit_after_result =
         driver.wait_iso_idle(stack, ISO_DRAIN_TIMEOUT);
@@ -728,13 +773,16 @@ where
     stop_result?;
     wait_result?;
 
-    Ok(LiveRelayMediaResult {
-        source: source_stats,
-        capture: capture_stats,
-        media: media_exit,
-        media_telemetry_hil: media_telemetry_hil_result,
-        audit_before,
-        audit_after,
+    Ok(LiveMediaRun {
+        media: LiveRelayMediaResult {
+            source: source_stats,
+            capture: capture_stats,
+            media: media_exit,
+            media_telemetry_hil: media_telemetry_hil_result,
+            audit_before,
+            audit_after,
+        },
+        driver,
     })
 }
 
@@ -746,7 +794,9 @@ fn run_live_media(
     longevity_test: bool,
     media_telemetry_hil: bool,
     teardown_policy: TeardownPolicy,
-) -> Result<LiveRelayMediaResult, String> {
+    publication: ConditionPublicationInbox,
+    media_publisher: MediaConditionPublisher,
+) -> Result<LiveMediaRun, String> {
     run_live_media_with_wait(
         stack,
         plan,
@@ -754,6 +804,8 @@ fn run_live_media(
         teardown_policy,
         StreamLatencyProfile::Daily,
         LiveGain::unity(),
+        publication,
+        media_publisher,
         media_telemetry_hil,
         |source, media, stack, driver, audit_before, hil_progress| {
             wait_live_duration(
@@ -771,10 +823,64 @@ fn run_live_media(
     )
 }
 
-fn wait_until_stop(control: &LiveRelayRuntimeControl) {
+fn wait_until_stop(
+    control: &LiveRelayRuntimeControl,
+    driver: &mut CurrentPathControlDriver,
+) {
     while !control.stop_requested() {
+        driver.reconcile_condition_publications();
         thread::sleep(Duration::from_millis(10));
     }
+    driver.reconcile_condition_publications();
+}
+
+fn validate_final_condition(
+    snapshot: &ConditionSnapshot,
+    exit: HciStackExit,
+) -> Result<(), String> {
+    use crate::plane::{
+        l1_control::interface::condition::ControlState,
+        l1_hci::interface::condition::HciHostState,
+        l2_transport::interface::condition::TransportState,
+    };
+
+    if snapshot.control.state != ControlState::Idle {
+        return Err(format!(
+            "final Condition Control state is not Idle: {:?}",
+            snapshot.control.state,
+        ));
+    }
+    if snapshot.media.state.state != MediaState::Stopped {
+        return Err(format!(
+            "final Condition Media state is not Stopped: {:?}",
+            snapshot.media.state.state,
+        ));
+    }
+    if snapshot.hci.state.state != HciHostState::Detached {
+        return Err(format!(
+            "final Condition HCI state is not Detached: {:?}; worker={:?}",
+            snapshot.hci.state.state,
+            exit.hci,
+        ));
+    }
+    if snapshot.transport.state.state != TransportState::Detached {
+        return Err(format!(
+            "final Condition Transport state is not Detached: {:?}; worker={:?}",
+            snapshot.transport.state.state,
+            exit.transport,
+        ));
+    }
+    if snapshot.media.telemetry.is_none()
+        || snapshot.hci.iso_telemetry.is_none()
+        || snapshot.transport.telemetry.is_none()
+    {
+        return Err(
+            "final Condition is missing one or more Plane telemetry projections"
+                .into(),
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -806,7 +912,17 @@ pub fn execute_live_relay_until_stop(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let (publishers, publication) =
+        current_path_condition_runtime();
+    let ConditionPublishers {
+        hci,
+        media,
+        transport,
+    } = publishers;
+    let stack = spawn_be200_hci_stack_with_condition(
+        HciStackConfig::default(),
+        HciStackConditionPublishers { hci, transport },
+    );
     let wait_control = control.clone();
     let run = run_live_media_with_wait(
         &stack,
@@ -815,13 +931,15 @@ pub fn execute_live_relay_until_stop(
         config.teardown_policy,
         config.latency_profile,
         control.gain(),
+        publication,
+        media,
         false,
-        move |_source, _media, _stack, _driver, _audit_before, _hil_progress| {
-            wait_until_stop(&wait_control);
+        move |_source, _media, _stack, driver, _audit_before, _hil_progress| {
+            wait_until_stop(&wait_control, driver);
             Ok(())
         },
     );
-    let _exit = stack.shutdown();
+    let exit = stack.shutdown();
 
     let bond_unchanged = fingerprint_bond_store(&config.bond_root)
         .map(|after| after == before)
@@ -832,7 +950,13 @@ pub fn execute_live_relay_until_stop(
             )
         })?;
 
-    run?;
+    let LiveMediaRun {
+        media: _media,
+        mut driver,
+    } = run?;
+    driver.reconcile_condition_publications();
+    validate_final_condition(&driver.condition_snapshot(), exit)?;
+
     if !bond_unchanged {
         return Err("bond store fingerprint changed".into());
     }
@@ -868,7 +992,17 @@ pub fn execute_live_relay(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let (publishers, publication) =
+        current_path_condition_runtime();
+    let ConditionPublishers {
+        hci,
+        media,
+        transport,
+    } = publishers;
+    let stack = spawn_be200_hci_stack_with_condition(
+        HciStackConfig::default(),
+        HciStackConditionPublishers { hci, transport },
+    );
     let run = run_live_media(
         &stack,
         plan,
@@ -877,6 +1011,8 @@ pub fn execute_live_relay(
         config.longevity_test,
         config.media_telemetry_hil,
         config.teardown_policy,
+        publication,
+        media,
     );
     let exit = stack.shutdown();
 
@@ -889,7 +1025,14 @@ pub fn execute_live_relay(
             )
         })?;
 
-    let media = run?;
+    let LiveMediaRun {
+        media,
+        mut driver,
+    } = run?;
+    driver.reconcile_condition_publications();
+    let final_condition = driver.condition_snapshot();
+    validate_final_condition(&final_condition, exit)?;
+
     if !bond_unchanged {
         return Err("bond store fingerprint changed".into());
     }
@@ -899,6 +1042,7 @@ pub fn execute_live_relay(
         controller_identity,
         duration: config.live_duration,
         media,
+        final_condition,
         bond_unchanged,
         exit,
     })
