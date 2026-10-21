@@ -1,6 +1,6 @@
 use std::{
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -18,6 +18,8 @@ use super::{
 };
 
 const TX_BUDGET_PER_TURN: usize = 32;
+const CONDITION_TELEMETRY_PUBLISH_INTERVAL: Duration =
+    Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportWorkerExit {
@@ -26,6 +28,7 @@ pub enum TransportWorkerExit {
     TxDisconnected,
     BackendOpenFailed(BackendError),
     Faulted(TransportFault),
+    ConditionPublication(ConditionPublishError),
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +111,25 @@ where
     F: FnOnce() -> Result<B, BackendError> + Send + 'static,
     S: ControllerPacketSink + Send + 'static,
 {
+    spawn_transport_worker_with_sink_and_condition(
+        factory,
+        tx_capacity,
+        hci_sink,
+        None,
+    )
+}
+
+pub fn spawn_transport_worker_with_sink_and_condition<B, F, S>(
+    factory: F,
+    tx_capacity: usize,
+    hci_sink: S,
+    condition_publisher: Option<TransportConditionPublisher>,
+) -> (TransportTx, TransportWorkerJoin)
+where
+    B: DeviceBackend + 'static,
+    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
+    S: ControllerPacketSink + Send + 'static,
+{
     let (tx, tx_rx) = mailbox::bounded(tx_capacity);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
@@ -118,17 +140,92 @@ where
             let backend = match factory() {
                 Ok(backend) => backend,
                 Err(error) => {
+                    if let Some(publisher) = condition_publisher.as_ref() {
+                        let telemetry =
+                            super::telemetry::TransportTelemetry::default()
+                                .snapshot();
+                        let update =
+                            super::interface::condition::TransportConditionUpdate::Final {
+                                state: super::interface::condition::TransportConditionState {
+                                    state: super::interface::condition::TransportState::Faulted,
+                                },
+                                telemetry,
+                            };
+                        if let Err(publish_error) =
+                            publisher.publish_reliable(update)
+                        {
+                            return TransportWorkerExit::ConditionPublication(
+                                publish_error,
+                            );
+                        }
+                    }
                     return TransportWorkerExit::BackendOpenFailed(error)
                 }
             };
 
             let mut reactor = TransportReactor::new(backend, hci_sink);
             if let Err(fault) = reactor.start() {
+                if let Some(publisher) = condition_publisher.as_ref() {
+                    if let Err(error) = publisher.publish_reliable(
+                        reactor.force_condition_update(),
+                    ) {
+                        return TransportWorkerExit::ConditionPublication(error);
+                    }
+                }
                 return TransportWorkerExit::Faulted(fault);
             }
 
-            let exit = run_loop(&mut reactor, &tx_rx, &worker_cancel);
-            reactor.stop();
+            let mut last_state = reactor.condition_state();
+            let mut last_telemetry_publish = Instant::now();
+            if let Some(publisher) = condition_publisher.as_ref() {
+                if let Err(error) =
+                    publisher.publish_reliable(reactor.condition_state_update())
+                {
+                    return TransportWorkerExit::ConditionPublication(error);
+                }
+            }
+
+            let exit = run_loop(
+                &mut reactor,
+                &tx_rx,
+                &worker_cancel,
+                condition_publisher.as_ref(),
+                &mut last_state,
+                &mut last_telemetry_publish,
+            );
+
+            let final_update = match exit {
+                TransportWorkerExit::Cancelled => {
+                    reactor.stop();
+                    reactor.force_condition_update()
+                }
+                TransportWorkerExit::Detached
+                | TransportWorkerExit::Faulted(_) => {
+                    let update = reactor.force_condition_update();
+                    reactor.stop();
+                    update
+                }
+                TransportWorkerExit::TxDisconnected
+                | TransportWorkerExit::BackendOpenFailed(_)
+                | TransportWorkerExit::ConditionPublication(_) => {
+                    let update =
+                        super::interface::condition::TransportConditionUpdate::Final {
+                            state: super::interface::condition::TransportConditionState {
+                                state: super::interface::condition::TransportState::Faulted,
+                            },
+                            telemetry: reactor.telemetry_snapshot(),
+                        };
+                    reactor.stop();
+                    update
+                }
+            };
+
+            if let Some(publisher) = condition_publisher.as_ref() {
+                if let Err(error) = publisher.publish_reliable(final_update) {
+                    return TransportWorkerExit::ConditionPublication(error);
+                }
+            }
+
             exit
         })
         .expect("failed to spawn USB reactor");
@@ -140,12 +237,44 @@ fn run_loop<B, S>(
     reactor: &mut TransportReactor<B, S>,
     tx_rx: &BoundedReceiver<HostPacket>,
     cancel: &CancellationToken,
+    condition_publisher: Option<&TransportConditionPublisher>,
+    last_state: &mut super::interface::condition::TransportConditionState,
+    last_telemetry_publish: &mut Instant,
 ) -> TransportWorkerExit
 where
     B: DeviceBackend,
     S: ControllerPacketSink,
 {
     loop {
+        if let Some(publisher) = condition_publisher {
+            let state = reactor.condition_state();
+            if state != *last_state {
+                if let Err(error) = publisher.publish_reliable(
+                    super::interface::condition::TransportConditionUpdate::State(
+                        state,
+                    ),
+                ) {
+                    return TransportWorkerExit::ConditionPublication(error);
+                }
+                *last_state = state;
+            }
+
+            if last_telemetry_publish.elapsed()
+                >= CONDITION_TELEMETRY_PUBLISH_INTERVAL
+            {
+                if let Some(update) =
+                    reactor.take_condition_telemetry_update()
+                {
+                    if let Err(error) =
+                        publisher.publish_telemetry(update)
+                    {
+                        return TransportWorkerExit::ConditionPublication(error);
+                    }
+                }
+                *last_telemetry_publish = Instant::now();
+            }
+        }
+
         if cancel.is_cancelled() {
             return TransportWorkerExit::Cancelled;
         }
