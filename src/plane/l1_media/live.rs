@@ -14,6 +14,9 @@ use std::{
 };
 
 use crate::{
+    core::condition::publication::{
+        ConditionPublishError, MediaConditionPublisher,
+    },
     plane::{
         l1_control::interface::stream::StreamBinding,
         l1_hci::interface::iso_tx::HciLogicalIsoTx,
@@ -109,6 +112,7 @@ pub enum LivePcmError {
     ThreadSpawn,
     StartupChannelClosed,
     ThreadPanicked,
+    ConditionPublication(ConditionPublishError),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -527,11 +531,12 @@ impl LivePcmIsoWorker {
         tx: HciLogicalIsoTx,
         gain: LiveGain,
     ) -> Result<Self, LivePcmError> {
-        Self::start_with_gain_and_condition_hil(
+        Self::start_with_gain_and_condition(
             binding,
             boundary,
             tx,
             gain,
+            None,
             false,
         )
     }
@@ -541,6 +546,24 @@ impl LivePcmIsoWorker {
         boundary: PcmRelayBoundary,
         tx: HciLogicalIsoTx,
         gain: LiveGain,
+        enable_condition_hil: bool,
+    ) -> Result<Self, LivePcmError> {
+        Self::start_with_gain_and_condition(
+            binding,
+            boundary,
+            tx,
+            gain,
+            None,
+            enable_condition_hil,
+        )
+    }
+
+    pub fn start_with_gain_and_condition(
+        binding: StreamBinding,
+        boundary: PcmRelayBoundary,
+        tx: HciLogicalIsoTx,
+        gain: LiveGain,
+        condition_publisher: Option<MediaConditionPublisher>,
         enable_condition_hil: bool,
     ) -> Result<Self, LivePcmError> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -580,11 +603,20 @@ impl LivePcmIsoWorker {
 
                 runtime.arm_source();
                 thread_telemetry.publish(&runtime);
-                if let Some(tx) = condition_hil_tx.as_ref() {
-                    if tx
-                        .try_send(runtime.condition_state_update())
-                        .is_err()
+
+                let running_update = runtime.condition_state_update();
+                if let Some(publisher) = condition_publisher.as_ref() {
+                    if let Err(error) =
+                        publisher.publish_reliable(running_update)
                     {
+                        let error =
+                            LivePcmError::ConditionPublication(error);
+                        let _ = startup_tx.send(Err(error.clone()));
+                        return Err(error);
+                    }
+                }
+                if let Some(tx) = condition_hil_tx.as_ref() {
+                    if tx.try_send(running_update).is_err() {
                         thread_condition_hil_dropped
                             .fetch_add(1, Ordering::Relaxed);
                     }
@@ -592,6 +624,8 @@ impl LivePcmIsoWorker {
                 let _ = startup_tx.send(Ok(()));
 
                 let mut hil_publish_intervals = 0u64;
+                let run_result: Result<(), LivePcmError> =
+                    (|| {
                 while !thread_stop.load(Ordering::Acquire) {
                     let now_us = u64::try_from(
                         origin.elapsed().as_micros(),
@@ -676,15 +710,26 @@ impl LivePcmIsoWorker {
 
                             thread_telemetry.publish(&runtime);
 
-                            if let Some(tx) = condition_hil_tx.as_ref() {
-                                hil_publish_intervals =
-                                    hil_publish_intervals.saturating_add(1);
-                                if hil_publish_intervals
-                                    >= MEDIA_CONDITION_HIL_PUBLISH_EVERY_INTERVALS
+                            hil_publish_intervals =
+                                hil_publish_intervals.saturating_add(1);
+                            if hil_publish_intervals
+                                >= MEDIA_CONDITION_HIL_PUBLISH_EVERY_INTERVALS
+                            {
+                                hil_publish_intervals = 0;
+                                if let Some(update) = runtime
+                                    .take_condition_telemetry_update()
                                 {
-                                    hil_publish_intervals = 0;
-                                    if let Some(update) = runtime
-                                        .take_condition_telemetry_update()
+                                    if let Some(publisher) =
+                                        condition_publisher.as_ref()
+                                    {
+                                        publisher
+                                            .publish_telemetry(update)
+                                            .map_err(
+                                                LivePcmError::ConditionPublication,
+                                            )?;
+                                    }
+                                    if let Some(tx) =
+                                        condition_hil_tx.as_ref()
                                     {
                                         if tx.try_send(update).is_err() {
                                             thread_condition_hil_dropped
@@ -699,20 +744,43 @@ impl LivePcmIsoWorker {
                         }
                     }
                 }
+                Ok(())
+                })();
 
                 runtime.disable_source();
                 thread_telemetry.publish(&runtime);
-                let condition_final = runtime.force_condition_update(
+                let final_state = if run_result.is_ok() {
                     MediaConditionState {
                         state: MediaState::Stopped,
                         clock_lock: ClockLock::Unlocked,
-                    },
-                );
-                Ok(LivePcmWorkerExit {
-                    pcm: runtime.stats(),
-                    bridge: runtime.bridge_telemetry(),
-                    condition_final,
-                })
+                    }
+                } else {
+                    MediaConditionState {
+                        state: MediaState::Faulted,
+                        clock_lock: ClockLock::LocalMonotonic,
+                    }
+                };
+                let condition_final =
+                    runtime.force_condition_update(final_state);
+
+                if let Some(publisher) = condition_publisher.as_ref() {
+                    if let Err(error) =
+                        publisher.publish_reliable(condition_final)
+                    {
+                        return Err(
+                            LivePcmError::ConditionPublication(error),
+                        );
+                    }
+                }
+
+                match run_result {
+                    Ok(()) => Ok(LivePcmWorkerExit {
+                        pcm: runtime.stats(),
+                        bridge: runtime.bridge_telemetry(),
+                        condition_final,
+                    }),
+                    Err(error) => Err(error),
+                }
             })
             .map_err(|_| LivePcmError::ThreadSpawn)?;
 
@@ -920,6 +988,61 @@ mod tests {
         assert_eq!(snapshot.bridge_submitted_intervals, 1);
         assert_eq!(snapshot.bridge_dropped_backpressure_intervals, 0);
         assert_eq!(snapshot.pcm_fill_frames, 480);
+    }
+
+    #[test]
+    fn production_condition_publisher_receives_running_and_final() {
+        let (boundary, _producer) = PcmRelayBoundary::relay_defaults();
+        let (control, _ingress, _reports, _ports) =
+            hci_mailbox_with_iso(1, 1, 1, 4);
+        let (publishers, inbox) =
+            crate::core::condition::publication::runtime_channels(
+                crate::runtime::generation::Generation(7),
+                SessionId(7),
+            );
+        let mut condition = crate::core::condition::Condition::new(
+            crate::core::lifecycle::LifecycleSnapshot {
+                generation: crate::runtime::generation::Generation(7),
+                session_id: Some(SessionId(7)),
+                lifecycle: crate::core::lifecycle::LifecycleState::Running,
+                session: crate::core::lifecycle::SessionState::Streaming,
+            },
+        );
+
+        let worker = LivePcmIsoWorker::start_with_gain_and_condition(
+            binding(),
+            boundary,
+            control.logical_iso_tx(),
+            LiveGain::unity(),
+            Some(publishers.media),
+            false,
+        )
+        .unwrap();
+
+        let first = inbox.reconcile(&mut condition);
+        assert_eq!(first.reliable_applied, 1);
+        assert_eq!(
+            condition.snapshot().media.state.state,
+            MediaState::Running
+        );
+
+        let exit = worker.shutdown().unwrap();
+        assert!(matches!(
+            exit.condition_final,
+            MediaConditionUpdate::Final {
+                state: MediaConditionState {
+                    state: MediaState::Stopped,
+                    ..
+                },
+                ..
+            }
+        ));
+        let final_stats = inbox.reconcile(&mut condition);
+        assert_eq!(final_stats.reliable_applied, 1);
+        assert_eq!(
+            condition.snapshot().media.state.state,
+            MediaState::Stopped
+        );
     }
 
     #[test]
