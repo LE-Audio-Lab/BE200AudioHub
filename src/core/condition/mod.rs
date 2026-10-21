@@ -119,6 +119,16 @@ mod tests {
                 },
                 telemetry::HciIsoTelemetrySnapshot,
             },
+            l1_media::{
+                interface::condition::{
+                    ClockLock, MediaConditionState, MediaConditionUpdate,
+                    MediaState, StreamClockSnapshot,
+                },
+                telemetry::{
+                    MediaBridgeTelemetrySnapshot, MediaTelemetrySnapshot,
+                    MediaTimingTelemetrySnapshot,
+                },
+            },
             l2_transport::{
                 interface::condition::{
                     TransportConditionState, TransportConditionUpdate,
@@ -211,6 +221,71 @@ mod tests {
         let snapshot = condition.snapshot();
         assert_eq!(snapshot.hci.state, semantic);
         assert_eq!(snapshot.hci.iso_telemetry, Some(telemetry));
+    }
+
+    #[test]
+    fn coalesced_media_telemetry_does_not_clobber_newer_semantic_state() {
+        let mut condition = Condition::new(lifecycle(7, Some(11)));
+        let scope = ConditionScope::session(Generation(7), SessionId(11));
+
+        let semantic = MediaConditionState {
+            state: MediaState::Draining,
+            clock_lock: ClockLock::LocalMonotonic,
+        };
+        condition.apply_media(
+            scope,
+            MediaConditionUpdate::State(semantic),
+        );
+
+        let telemetry = MediaTelemetrySnapshot {
+            timing: MediaTimingTelemetrySnapshot {
+                produced_frame: Some(crate::plane::l1_media::clock::frame::FrameId(12)),
+                clock: Some(StreamClockSnapshot {
+                    period_us: 10_000,
+                    current_frame: crate::plane::l1_media::clock::frame::FrameId(12),
+                    lock: ClockLock::LocalMonotonic,
+                    rate_error_ppm: 0,
+                }),
+                pcm_fill_frames: 480,
+                intervals_consumed: 13,
+                source_intervals_skipped: 1,
+                keepalive_intervals: 0,
+                pcm_frames_read: 6_240,
+                pcm_underflow_frames: 0,
+                startup_trim_frames: 480,
+                gradual_drift_trim_frames: 1,
+                emergency_drift_trim_frames: 0,
+                trace: TelemetryRingStats {
+                    capacity: 256,
+                    len: 1,
+                    stored: 1,
+                    dropped_newest: 0,
+                    overwritten_oldest: 0,
+                },
+            },
+            bridge: MediaBridgeTelemetrySnapshot {
+                submitted_intervals: 13,
+                dropped_backpressure_intervals: 0,
+                fallback_intervals: 0,
+                skipped_intervals: 0,
+                stale_frames_dropped: 0,
+                trace: TelemetryRingStats {
+                    capacity: 256,
+                    len: 13,
+                    stored: 13,
+                    dropped_newest: 0,
+                    overwritten_oldest: 0,
+                },
+            },
+        };
+        condition.apply_media(
+            scope,
+            MediaConditionUpdate::Telemetry(telemetry),
+        );
+
+        let snapshot = condition.snapshot();
+        assert_eq!(snapshot.media.state, semantic);
+        assert_eq!(snapshot.media.telemetry, Some(telemetry));
     }
 
     #[test]

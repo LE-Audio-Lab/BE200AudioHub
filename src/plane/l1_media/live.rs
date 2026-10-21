@@ -31,12 +31,19 @@ use crate::{
             codec::lc3::{
                 encode_lc3_silence, Lc3StereoEncoder, MediaLc3Error,
             },
+            interface::condition::{
+                ClockLock, MediaConditionState, MediaConditionUpdate,
+                MediaState,
+            },
             pcm::relay_boundary::{
                 PcmConsumeResult, PcmRelayBoundary,
                 LIVE_PCM_CONSUMER_FRAMES,
             },
             source::synthetic::SAMPLES_PER_FRAME,
-            telemetry::MediaBridgeTelemetrySnapshot,
+            telemetry::{
+                MediaBridgeTelemetrySnapshot, MediaTelemetrySnapshot,
+                MediaTimingAnomaly, MediaTimingTelemetry,
+            },
         },
     },
 };
@@ -136,7 +143,7 @@ pub struct LivePcmIsoRuntime {
     bridge: LogicalIsoTxBridge,
     gain: LiveGain,
     scratch: [[f32; 2]; SAMPLES_PER_FRAME],
-    stats: LivePcmStats,
+    timing_telemetry: MediaTimingTelemetry,
 }
 
 impl LivePcmIsoRuntime {
@@ -189,7 +196,7 @@ impl LivePcmIsoRuntime {
             bridge,
             gain,
             scratch: [[0.0; 2]; SAMPLES_PER_FRAME],
-            stats: LivePcmStats::default(),
+            timing_telemetry: MediaTimingTelemetry::default(),
         })
     }
 
@@ -202,11 +209,66 @@ impl LivePcmIsoRuntime {
     }
 
     pub fn stats(&self) -> LivePcmStats {
-        self.stats
+        let timing = self.timing_telemetry.snapshot();
+        LivePcmStats {
+            intervals_consumed: timing.intervals_consumed,
+            source_intervals_skipped: timing.source_intervals_skipped,
+            keepalive_intervals: timing.keepalive_intervals,
+            pcm_frames_read: timing.pcm_frames_read,
+            pcm_underflow_frames: timing.pcm_underflow_frames,
+            startup_trim_frames: timing.startup_trim_frames,
+            gradual_drift_trim_frames: timing.gradual_drift_trim_frames,
+            emergency_drift_trim_frames: timing.emergency_drift_trim_frames,
+        }
     }
 
     pub fn bridge_telemetry(&self) -> MediaBridgeTelemetrySnapshot {
         self.bridge.telemetry_snapshot()
+    }
+
+    pub fn telemetry_snapshot(&self) -> MediaTelemetrySnapshot {
+        MediaTelemetrySnapshot {
+            timing: self.timing_telemetry.snapshot(),
+            bridge: self.bridge.telemetry_snapshot(),
+        }
+    }
+
+    pub fn timing_trace_snapshot(&self) -> Vec<MediaTimingAnomaly> {
+        self.timing_telemetry.trace_snapshot()
+    }
+
+    pub fn condition_state(&self) -> MediaConditionState {
+        MediaConditionState {
+            state: MediaState::Running,
+            clock_lock: ClockLock::LocalMonotonic,
+        }
+    }
+
+    pub fn condition_state_update(&self) -> MediaConditionUpdate {
+        MediaConditionUpdate::State(self.condition_state())
+    }
+
+    pub fn take_condition_telemetry_update(
+        &mut self,
+    ) -> Option<MediaConditionUpdate> {
+        let timing_dirty = self.timing_telemetry.take_dirty();
+        let bridge_dirty = self.bridge.take_telemetry_dirty();
+        if !timing_dirty && !bridge_dirty {
+            return None;
+        }
+        Some(MediaConditionUpdate::Telemetry(
+            self.telemetry_snapshot(),
+        ))
+    }
+
+    pub fn force_condition_update(
+        &self,
+        state: MediaConditionState,
+    ) -> MediaConditionUpdate {
+        MediaConditionUpdate::Final {
+            state,
+            telemetry: self.telemetry_snapshot(),
+        }
     }
 
     pub fn pcm_fill_frames(&self) -> usize {
@@ -220,36 +282,7 @@ impl LivePcmIsoRuntime {
     }
 
     fn observe_consume(&mut self, result: PcmConsumeResult) {
-        self.stats.intervals_consumed =
-            self.stats.intervals_consumed.saturating_add(1);
-        self.stats.pcm_frames_read = self
-            .stats
-            .pcm_frames_read
-            .saturating_add(result.read_frames as u64);
-        self.stats.pcm_underflow_frames = self
-            .stats
-            .pcm_underflow_frames
-            .saturating_add(
-                result
-                    .requested_frames
-                    .saturating_sub(result.read_frames) as u64,
-            );
-        self.stats.startup_trim_frames = self
-            .stats
-            .startup_trim_frames
-            .saturating_add(result.startup_trim_frames as u64);
-        self.stats.gradual_drift_trim_frames = self
-            .stats
-            .gradual_drift_trim_frames
-            .saturating_add(result.drift_trim.gradual_frames as u64);
-        self.stats.emergency_drift_trim_frames = self
-            .stats
-            .emergency_drift_trim_frames
-            .saturating_add(result.drift_trim.emergency_frames as u64);
-        if result.keepalive {
-            self.stats.keepalive_intervals =
-                self.stats.keepalive_intervals.saturating_add(1);
-        }
+        self.timing_telemetry.observe_consume(result);
     }
 
     fn consume_discarded_interval(&mut self) {
@@ -280,11 +313,6 @@ impl LivePcmIsoRuntime {
         for _ in 0..skipped {
             self.consume_discarded_interval();
         }
-        self.stats.source_intervals_skipped = self
-            .stats
-            .source_intervals_skipped
-            .saturating_add(skipped);
-
         let pcm = self.boundary.consume(&mut self.scratch);
         self.observe_consume(pcm);
 
@@ -309,6 +337,32 @@ impl LivePcmIsoRuntime {
             .bridge
             .on_wake(now_us)
             .map_err(LivePcmError::Bridge)?;
+
+        let (bridge_intervals_skipped, stale_frames_dropped) =
+            match bridge {
+                BridgeTxStep::Submitted {
+                    skipped_intervals,
+                    stale_frames_dropped,
+                    ..
+                }
+                | BridgeTxStep::DroppedBackpressure {
+                    skipped_intervals,
+                    stale_frames_dropped,
+                    ..
+                } => (skipped_intervals, stale_frames_dropped),
+                BridgeTxStep::Wait { .. } => (0, 0),
+            };
+        let clock = self.clock.snapshot(now_us).map_err(LivePcmError::Clock)?;
+        self.timing_telemetry.observe_interval(
+            current,
+            now_us,
+            clock,
+            self.boundary.fill_frames(),
+            skipped,
+            bridge_intervals_skipped,
+            stale_frames_dropped,
+            pcm,
+        );
 
         Ok(LivePcmStep::Interval {
             frame_id: current,
@@ -783,6 +837,84 @@ mod tests {
         assert_eq!(snapshot.bridge_submitted_intervals, 1);
         assert_eq!(snapshot.bridge_dropped_backpressure_intervals, 0);
         assert_eq!(snapshot.pcm_fill_frames, 480);
+    }
+
+    #[test]
+    fn media_condition_provider_combines_timing_and_bridge_telemetry() {
+        let (boundary, producer) = PcmRelayBoundary::relay_defaults();
+        let (control, _ingress, _reports, _ports) =
+            hci_mailbox_with_iso(1, 1, 1, 4);
+        let mut runtime = LivePcmIsoRuntime::new(
+            binding(),
+            boundary,
+            EPOCH_US,
+            control.logical_iso_tx(),
+        )
+        .unwrap();
+        runtime.arm_source();
+
+        assert_eq!(
+            runtime.condition_state_update(),
+            MediaConditionUpdate::State(MediaConditionState {
+                state: MediaState::Running,
+                clock_lock: ClockLock::LocalMonotonic,
+            })
+        );
+
+        let frames = vec![[0.2, -0.2]; 960];
+        assert_eq!(producer.push(&frames, false).written_frames, 960);
+        runtime.on_wake(EPOCH_US).unwrap();
+
+        let Some(MediaConditionUpdate::Telemetry(telemetry)) =
+            runtime.take_condition_telemetry_update()
+        else {
+            panic!("Media owner must publish one coalesced telemetry update");
+        };
+        assert_eq!(telemetry.timing.produced_frame, Some(FrameId(0)));
+        assert_eq!(telemetry.timing.intervals_consumed, 1);
+        assert_eq!(telemetry.timing.pcm_fill_frames, 480);
+        assert_eq!(telemetry.bridge.submitted_intervals, 1);
+        assert!(runtime.take_condition_telemetry_update().is_none());
+
+        let draining = MediaConditionState {
+            state: MediaState::Draining,
+            clock_lock: ClockLock::LocalMonotonic,
+        };
+        assert!(matches!(
+            runtime.force_condition_update(draining),
+            MediaConditionUpdate::Final { state, telemetry }
+                if state == draining
+                    && telemetry.timing.produced_frame == Some(FrameId(0))
+                    && telemetry.bridge.submitted_intervals == 1
+        ));
+    }
+
+    #[test]
+    fn clean_interval_has_no_timing_anomaly_but_late_wake_is_recorded() {
+        let (boundary, producer) = PcmRelayBoundary::relay_defaults();
+        let (control, _ingress, _reports, _ports) =
+            hci_mailbox_with_iso(1, 1, 1, 4);
+        let mut runtime = LivePcmIsoRuntime::new(
+            binding(),
+            boundary,
+            EPOCH_US,
+            control.logical_iso_tx(),
+        )
+        .unwrap();
+        runtime.arm_source();
+
+        let frames = vec![[0.1, -0.1]; 1_920];
+        assert_eq!(producer.push(&frames, false).written_frames, 1_920);
+
+        runtime.on_wake(EPOCH_US).unwrap();
+        assert!(runtime.timing_trace_snapshot().is_empty());
+
+        runtime.on_wake(EPOCH_US + 20_000).unwrap();
+        let trace = runtime.timing_trace_snapshot();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].frame_id, FrameId(2));
+        assert_eq!(trace[0].source_intervals_skipped, 1);
+        assert_eq!(trace[0].at_us, EPOCH_US + 20_000);
     }
 
     #[test]

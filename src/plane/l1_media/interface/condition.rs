@@ -3,7 +3,7 @@
 //! State and aggregate telemetry are separate so coalesced metrics can never
 //! overwrite a newer semantic Media state.
 
-use crate::plane::l1_media::telemetry::MediaBridgeTelemetrySnapshot;
+use crate::plane::l1_media::telemetry::MediaTelemetrySnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaState {
@@ -48,9 +48,9 @@ impl MediaConditionState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MediaConditionUpdate {
     State(MediaConditionState),
-    Telemetry(MediaBridgeTelemetrySnapshot),
+    Telemetry(MediaTelemetrySnapshot),
     Final {
         state: MediaConditionState,
-        bridge_telemetry: MediaBridgeTelemetrySnapshot,
+        telemetry: MediaTelemetrySnapshot,
     },
 }

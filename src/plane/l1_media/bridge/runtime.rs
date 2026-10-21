@@ -15,9 +15,6 @@ use crate::{
                 MediaBridgeTelemetrySnapshot, MediaBridgeTraceRecord,
                 MediaTelemetry,
             },
-            interface::condition::{
-                MediaConditionState, MediaConditionUpdate,
-            },
         },
     },
     runtime::mailbox::SendError,
@@ -102,27 +99,6 @@ impl LogicalIsoTxBridge {
 
     pub fn take_telemetry_dirty(&mut self) -> bool {
         self.telemetry.take_bridge_dirty()
-    }
-
-    pub fn take_condition_telemetry_update(
-        &mut self,
-    ) -> Option<MediaConditionUpdate> {
-        if !self.telemetry.take_bridge_dirty() {
-            return None;
-        }
-        Some(MediaConditionUpdate::Telemetry(
-            self.telemetry.bridge_snapshot(),
-        ))
-    }
-
-    pub fn force_condition_update(
-        &self,
-        state: MediaConditionState,
-    ) -> MediaConditionUpdate {
-        MediaConditionUpdate::Final {
-            state,
-            bridge_telemetry: self.telemetry.bridge_snapshot(),
-        }
     }
 
     pub fn next_deadline_us(
@@ -317,28 +293,8 @@ mod tests {
         assert_eq!(telemetry.submitted_intervals, 1);
         assert_eq!(telemetry.dropped_backpressure_intervals, 1);
         assert_eq!(telemetry.fallback_intervals, 0);
-        let Some(MediaConditionUpdate::Telemetry(published)) =
-            bridge.take_condition_telemetry_update()
-        else {
-            panic!("dirty bridge telemetry must publish one coalesced update");
-        };
-        assert_eq!(published.submitted_intervals, 1);
-        assert_eq!(published.dropped_backpressure_intervals, 1);
-        assert!(bridge.take_condition_telemetry_update().is_none());
-
-        let final_state = MediaConditionState {
-            state: crate::plane::l1_media::interface::condition::MediaState::Draining,
-            clock_lock: crate::plane::l1_media::interface::condition::ClockLock::LocalMonotonic,
-        };
-        assert!(matches!(
-            bridge.force_condition_update(final_state),
-            MediaConditionUpdate::Final {
-                state,
-                bridge_telemetry,
-            } if state == final_state
-                && bridge_telemetry.submitted_intervals == 1
-                && bridge_telemetry.dropped_backpressure_intervals == 1
-        ));
+        assert!(bridge.take_telemetry_dirty());
+        assert!(!bridge.take_telemetry_dirty());
 
         assert!(matches!(
             bridge.telemetry_trace_snapshot().last(),

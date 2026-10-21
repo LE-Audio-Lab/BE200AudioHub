@@ -8,7 +8,7 @@ use crate::{
         },
         l1_media::{
             interface::condition::MediaConditionState,
-            telemetry::MediaBridgeTelemetrySnapshot,
+            telemetry::MediaTelemetrySnapshot,
         },
         l2_transport::{
             interface::condition::TransportConditionState,
@@ -27,7 +27,7 @@ pub struct HciConditionView {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaConditionView {
     pub state: MediaConditionState,
-    pub bridge_telemetry: Option<MediaBridgeTelemetrySnapshot>,
+    pub telemetry: Option<MediaTelemetrySnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -15,7 +15,7 @@ impl MediaBlackboard {
         Self {
             value: MediaConditionView {
                 state: MediaConditionState::initial(),
-                bridge_telemetry: None,
+                telemetry: None,
             },
         }
     }
@@ -31,28 +31,31 @@ impl MediaBlackboard {
         let next = match update {
             MediaConditionUpdate::State(state) => MediaConditionView {
                 state,
-                bridge_telemetry: self.value.bridge_telemetry,
+                telemetry: self.value.telemetry,
             },
-            MediaConditionUpdate::Telemetry(bridge_telemetry) => MediaConditionView {
+            MediaConditionUpdate::Telemetry(telemetry) => MediaConditionView {
                 state: self.value.state,
-                bridge_telemetry: Some(bridge_telemetry),
+                telemetry: Some(telemetry),
             },
-            MediaConditionUpdate::Final {
-                state,
-                bridge_telemetry,
-            } => MediaConditionView {
-                state,
-                bridge_telemetry: Some(bridge_telemetry),
-            },
+            MediaConditionUpdate::Final { state, telemetry } => {
+                MediaConditionView {
+                    state,
+                    telemetry: Some(telemetry),
+                }
+            }
         };
-        if self.value == next { return false; }
+        if self.value == next {
+            return false;
+        }
         self.value = next;
         true
     }
 
     pub(in crate::core::condition) fn reset(&mut self) -> bool {
         let next = Self::initial();
-        if *self == next { return false; }
+        if *self == next {
+            return false;
+        }
         *self = next;
         true
     }
