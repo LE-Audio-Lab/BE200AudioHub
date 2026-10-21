@@ -4,6 +4,9 @@ use std::{
 };
 
 use crate::{
+    core::condition::publication::{
+        ConditionPublishError, TransportConditionPublisher,
+    },
     platform::backend::{BackendError, DeviceBackend},
     runtime::{
         cancellation::CancellationToken,

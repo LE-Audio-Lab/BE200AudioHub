@@ -1351,7 +1351,7 @@ mod tests {
         let (control, ingress, reports, ports) = hci_mailbox(16, 4, 8);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(16);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         control.try_begin_operational_attach().unwrap();
 
@@ -1412,7 +1412,7 @@ mod tests {
         let (control, ingress, reports, ports) = hci_mailbox(32, 8, 16);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(32);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         // Minimal resetless attach to Ready.
         control.try_begin_operational_attach().unwrap();
@@ -1513,7 +1513,7 @@ mod tests {
         let (control, ingress, reports, ports) = hci_mailbox(48, 8, 24);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(48);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         // Minimal resetless attach to Ready.
         control.try_begin_operational_attach().unwrap();
@@ -1667,7 +1667,7 @@ mod tests {
             hci_mailbox(32, 8, 24);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(32);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         control.try_begin_operational_attach().unwrap();
         let _ = recv_host_packet(&transport_rx);
@@ -1763,7 +1763,7 @@ mod tests {
             hci_mailbox(32, 8, 24);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(32);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         control.try_begin_operational_attach().unwrap();
         let _ = recv_host_packet(&transport_rx);
@@ -1840,7 +1840,7 @@ mod tests {
         let (control, ingress, reports, ports) = hci_mailbox(32, 8, 16);
         let (transport_tx, transport_rx) =
             TransportTx::test_channel(32);
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
 
         // Bring the synthetic controller to the minimal resetless Ready state.
         control.try_begin_operational_attach().unwrap();
@@ -1973,7 +1973,7 @@ mod tests {
         );
         control.request_stop().unwrap();
 
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
         assert_eq!(join.join(), HciWorkerExit::Stopped);
     }
 
@@ -1988,7 +1988,7 @@ mod tests {
         control.try_begin_operational_attach().unwrap();
         iso.try_submit_group(iso_test_group()).unwrap();
 
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
         assert_eq!(
             recv_host_packet(&transport_rx),
             HostPacket::Command(vec![0x02, 0x10, 0x00])
@@ -2013,7 +2013,7 @@ mod tests {
             .unwrap();
         control.request_stop().unwrap();
 
-        let join = spawn_hci_worker(ports, transport_tx);
+        let join = spawn_hci_worker(ports, transport_tx, None);
         assert_eq!(join.join(), HciWorkerExit::Stopped);
     }
 }
