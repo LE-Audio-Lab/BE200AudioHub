@@ -51,6 +51,8 @@ use crate::{
 const LIVE_ENCODED_CAPACITY: usize = 4;
 pub const LIVE_BRIDGE_START_LEAD_US: u64 = 20_000;
 const WORKER_MAX_SLEEP_US: u64 = 2_000;
+const MEDIA_CONDITION_HIL_CAPACITY: usize = 8;
+const MEDIA_CONDITION_HIL_PUBLISH_EVERY_INTERVALS: u64 = 10;
 
 #[derive(Clone)]
 pub struct LiveGain {
@@ -378,6 +380,7 @@ impl LivePcmIsoRuntime {
 pub struct LivePcmWorkerExit {
     pub pcm: LivePcmStats,
     pub bridge: MediaBridgeTelemetrySnapshot,
+    pub condition_final: MediaConditionUpdate,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -499,6 +502,8 @@ impl LivePcmWorkerTelemetry {
 pub struct LivePcmIsoWorker {
     stop: Arc<AtomicBool>,
     telemetry: Arc<LivePcmWorkerTelemetry>,
+    condition_hil_rx: Option<mpsc::Receiver<MediaConditionUpdate>>,
+    condition_hil_dropped: Arc<AtomicU64>,
     join: Option<thread::JoinHandle<Result<LivePcmWorkerExit, LivePcmError>>>,
 }
 
@@ -522,10 +527,37 @@ impl LivePcmIsoWorker {
         tx: HciLogicalIsoTx,
         gain: LiveGain,
     ) -> Result<Self, LivePcmError> {
+        Self::start_with_gain_and_condition_hil(
+            binding,
+            boundary,
+            tx,
+            gain,
+            false,
+        )
+    }
+
+    pub fn start_with_gain_and_condition_hil(
+        binding: StreamBinding,
+        boundary: PcmRelayBoundary,
+        tx: HciLogicalIsoTx,
+        gain: LiveGain,
+        enable_condition_hil: bool,
+    ) -> Result<Self, LivePcmError> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let telemetry = Arc::new(LivePcmWorkerTelemetry::default());
         let thread_telemetry = Arc::clone(&telemetry);
+        let condition_hil_dropped = Arc::new(AtomicU64::new(0));
+        let thread_condition_hil_dropped =
+            Arc::clone(&condition_hil_dropped);
+        let (condition_hil_tx, condition_hil_rx) =
+            if enable_condition_hil {
+                let (tx, rx) =
+                    mpsc::sync_channel(MEDIA_CONDITION_HIL_CAPACITY);
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
         let (startup_tx, startup_rx) = mpsc::sync_channel(1);
 
         let join = thread::Builder::new()
@@ -548,8 +580,18 @@ impl LivePcmIsoWorker {
 
                 runtime.arm_source();
                 thread_telemetry.publish(&runtime);
+                if let Some(tx) = condition_hil_tx.as_ref() {
+                    if tx
+                        .try_send(runtime.condition_state_update())
+                        .is_err()
+                    {
+                        thread_condition_hil_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 let _ = startup_tx.send(Ok(()));
 
+                let mut hil_publish_intervals = 0u64;
                 while !thread_stop.load(Ordering::Acquire) {
                     let now_us = u64::try_from(
                         origin.elapsed().as_micros(),
@@ -633,15 +675,43 @@ impl LivePcmIsoWorker {
                             }
 
                             thread_telemetry.publish(&runtime);
+
+                            if let Some(tx) = condition_hil_tx.as_ref() {
+                                hil_publish_intervals =
+                                    hil_publish_intervals.saturating_add(1);
+                                if hil_publish_intervals
+                                    >= MEDIA_CONDITION_HIL_PUBLISH_EVERY_INTERVALS
+                                {
+                                    hil_publish_intervals = 0;
+                                    if let Some(update) = runtime
+                                        .take_condition_telemetry_update()
+                                    {
+                                        if tx.try_send(update).is_err() {
+                                            thread_condition_hil_dropped
+                                                .fetch_add(
+                                                    1,
+                                                    Ordering::Relaxed,
+                                                );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
                 runtime.disable_source();
                 thread_telemetry.publish(&runtime);
+                let condition_final = runtime.force_condition_update(
+                    MediaConditionState {
+                        state: MediaState::Stopped,
+                        clock_lock: ClockLock::Unlocked,
+                    },
+                );
                 Ok(LivePcmWorkerExit {
                     pcm: runtime.stats(),
                     bridge: runtime.bridge_telemetry(),
+                    condition_final,
                 })
             })
             .map_err(|_| LivePcmError::ThreadSpawn)?;
@@ -650,6 +720,8 @@ impl LivePcmIsoWorker {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 telemetry,
+                condition_hil_rx,
+                condition_hil_dropped,
                 join: Some(join),
             }),
             Ok(Err(error)) => {
@@ -665,6 +737,17 @@ impl LivePcmIsoWorker {
 
     pub fn snapshot(&self) -> LivePcmWorkerSnapshot {
         self.telemetry.snapshot()
+    }
+
+    pub fn try_recv_condition_hil_update(
+        &self,
+    ) -> Option<MediaConditionUpdate> {
+        let rx = self.condition_hil_rx.as_ref()?;
+        rx.try_recv().ok()
+    }
+
+    pub fn condition_hil_dropped_updates(&self) -> u64 {
+        self.condition_hil_dropped.load(Ordering::Relaxed)
     }
 
     pub fn shutdown(
@@ -837,6 +920,33 @@ mod tests {
         assert_eq!(snapshot.bridge_submitted_intervals, 1);
         assert_eq!(snapshot.bridge_dropped_backpressure_intervals, 0);
         assert_eq!(snapshot.pcm_fill_frames, 480);
+    }
+
+    #[test]
+    fn default_worker_constructor_keeps_condition_hil_disabled() {
+        let (boundary, _producer) = PcmRelayBoundary::relay_defaults();
+        let (control, _ingress, _reports, _ports) =
+            hci_mailbox_with_iso(1, 1, 1, 4);
+        let worker = LivePcmIsoWorker::start(
+            binding(),
+            boundary,
+            control.logical_iso_tx(),
+        )
+        .unwrap();
+
+        assert!(worker.try_recv_condition_hil_update().is_none());
+        assert_eq!(worker.condition_hil_dropped_updates(), 0);
+        let exit = worker.shutdown().unwrap();
+        assert!(matches!(
+            exit.condition_final,
+            MediaConditionUpdate::Final {
+                state: MediaConditionState {
+                    state: MediaState::Stopped,
+                    clock_lock: ClockLock::Unlocked,
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

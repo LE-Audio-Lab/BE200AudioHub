@@ -45,7 +45,7 @@ impl MediaConditionState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaConditionUpdate {
     State(MediaConditionState),
     Telemetry(MediaTelemetrySnapshot),
