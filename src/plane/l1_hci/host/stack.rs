@@ -10,7 +10,6 @@ use crate::{
     },
     platform::backend::{BackendError, DeviceBackend},
     plane::l2_transport::worker::{
-        spawn_transport_worker_with_sink,
         spawn_transport_worker_with_sink_and_condition, TransportTx,
         TransportWorkerExit, TransportWorkerJoin,
     },
@@ -171,7 +170,23 @@ pub fn spawn_be200_hci_stack_with_condition(
 
 #[cfg(test)]
 mod tests {
-    use crate::platform::backend::test::TestBackend;
+    use crate::{
+        core::{
+            condition::{
+                publication::{runtime_channels, ConditionPublishers},
+                Condition,
+            },
+            lifecycle::{
+                LifecycleSnapshot, LifecycleState, SessionId, SessionState,
+            },
+        },
+        platform::backend::test::TestBackend,
+        plane::{
+            l1_hci::interface::condition::HciHostState,
+            l2_transport::interface::condition::TransportState,
+        },
+        runtime::generation::Generation,
+    };
 
     use super::*;
 
@@ -191,6 +206,52 @@ mod tests {
         let exit = stack.shutdown();
         assert_eq!(exit.hci, HciWorkerExit::Stopped);
         assert_eq!(exit.transport, TransportWorkerExit::Cancelled);
+    }
+
+    #[test]
+    fn stack_shutdown_forces_hci_and_transport_final_condition() {
+        let (publishers, inbox) =
+            runtime_channels(Generation(7), SessionId(11));
+        let ConditionPublishers {
+            hci,
+            media: _media,
+            transport,
+        } = publishers;
+
+        let stack = spawn_hci_stack_with_backend_and_condition(
+            || Ok(TestBackend::default()),
+            HciStackConfig {
+                transport_tx_capacity: 8,
+                controller_inbox_capacity: 8,
+                control_inbox_capacity: 4,
+                iso_data_inbox_capacity: 2,
+                report_inbox_capacity: 4,
+            },
+            Some(HciStackConditionPublishers { hci, transport }),
+        );
+
+        let exit = stack.shutdown();
+        assert_eq!(exit.hci, HciWorkerExit::Stopped);
+        assert_eq!(exit.transport, TransportWorkerExit::Cancelled);
+
+        let mut condition = Condition::new(LifecycleSnapshot {
+            generation: Generation(7),
+            session_id: Some(SessionId(11)),
+            lifecycle: LifecycleState::Running,
+            session: SessionState::Streaming,
+        });
+        let stats = inbox.reconcile(&mut condition);
+        assert!(stats.reliable_applied >= 2);
+
+        let snapshot = condition.snapshot();
+        assert_eq!(snapshot.hci.state.state, HciHostState::Detached);
+        assert_eq!(snapshot.hci.state.stream_id, None);
+        assert!(snapshot.hci.iso_telemetry.is_some());
+        assert_eq!(
+            snapshot.transport.state.state,
+            TransportState::Detached
+        );
+        assert!(snapshot.transport.telemetry.is_some());
     }
 
     #[test]

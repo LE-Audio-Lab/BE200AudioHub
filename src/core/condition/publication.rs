@@ -399,6 +399,24 @@ mod tests {
     }
 
     #[test]
+    fn reliable_mailbox_full_is_an_explicit_fault() {
+        let (publishers, _inbox) =
+            runtime_channels(Generation(7), SessionId(11));
+        let update = HciConditionUpdate::State(HciConditionState {
+            state: HciHostState::Ready,
+            stream_id: None,
+        });
+
+        for _ in 0..CONDITION_RELIABLE_CAPACITY {
+            publishers.hci.publish_reliable(update).unwrap();
+        }
+        assert_eq!(
+            publishers.hci.publish_reliable(update),
+            Err(ConditionPublishError::ReliableFull)
+        );
+    }
+
+    #[test]
     fn telemetry_cannot_enter_reliable_lane() {
         let (publishers, _inbox) =
             runtime_channels(Generation(7), SessionId(11));
