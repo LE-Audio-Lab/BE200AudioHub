@@ -1,6 +1,7 @@
 //! Generic bounded runtime mailbox primitive.
 
 pub mod contract;
+pub mod latest;
 
 use std::sync::mpsc::{
     self, Receiver, SyncSender, TryRecvError, TrySendError,

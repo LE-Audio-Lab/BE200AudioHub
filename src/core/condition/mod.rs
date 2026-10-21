@@ -5,6 +5,7 @@
 
 mod blackboard;
 pub mod interface;
+pub mod publication;
 mod reducer;
 
 use blackboard::Blackboard;
