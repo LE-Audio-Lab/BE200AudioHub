@@ -776,12 +776,9 @@ impl HciEngine {
             OperationalAttachState::Ready => HciHostState::Ready,
             OperationalAttachState::Failed(_) => HciHostState::Faulted,
         };
-        let iso = self.iso_credit_audit.snapshot();
         HciConditionState {
             state,
             stream_id: None,
-            controller_iso_capacity: iso.limit,
-            controller_iso_in_flight: iso.in_flight,
         }
     }
 

@@ -22,8 +22,6 @@ pub enum HciHostState {
 pub struct HciConditionState {
     pub state: HciHostState,
     pub stream_id: Option<StreamId>,
-    pub controller_iso_capacity: Option<usize>,
-    pub controller_iso_in_flight: usize,
 }
 
 impl HciConditionState {
@@ -31,8 +29,6 @@ impl HciConditionState {
         Self {
             state: HciHostState::Detached,
             stream_id: None,
-            controller_iso_capacity: None,
-            controller_iso_in_flight: 0,
         }
     }
 }

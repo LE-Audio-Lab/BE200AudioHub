@@ -178,8 +178,6 @@ mod tests {
         let semantic = HciConditionState {
             state: HciHostState::StreamBound,
             stream_id: Some(StreamId(99)),
-            controller_iso_capacity: Some(8),
-            controller_iso_in_flight: 2,
         };
         condition.apply_hci(scope, HciConditionUpdate::State(semantic));
 
