@@ -770,16 +770,17 @@ impl HciEngine {
     }
 
     pub fn condition_state(&self) -> HciConditionState {
+        let stream_id = self.stream_routes.single_bound_stream_id();
         let state = match self.attach_state {
             OperationalAttachState::Idle => HciHostState::Detached,
             OperationalAttachState::Discovering => HciHostState::Attaching,
+            OperationalAttachState::Ready if stream_id.is_some() => {
+                HciHostState::StreamBound
+            }
             OperationalAttachState::Ready => HciHostState::Ready,
             OperationalAttachState::Failed(_) => HciHostState::Faulted,
         };
-        HciConditionState {
-            state,
-            stream_id: None,
-        }
+        HciConditionState { state, stream_id }
     }
 
     pub fn condition_state_update(&self) -> HciConditionUpdate {
@@ -800,6 +801,15 @@ impl HciEngine {
     pub fn force_condition_update(&self) -> HciConditionUpdate {
         HciConditionUpdate::Final {
             state: self.condition_state(),
+            iso_telemetry: self.telemetry.iso_snapshot(),
+        }
+    }
+
+    pub fn force_condition_fault_update(&self) -> HciConditionUpdate {
+        let mut state = self.condition_state();
+        state.state = HciHostState::Faulted;
+        HciConditionUpdate::Final {
+            state,
             iso_telemetry: self.telemetry.iso_snapshot(),
         }
     }
@@ -3683,6 +3693,13 @@ mod tests {
 
         engine.bind_stream_route(route).unwrap();
         assert_eq!(
+            engine.condition_state(),
+            HciConditionState {
+                state: HciHostState::StreamBound,
+                stream_id: Some(route.stream_id),
+            }
+        );
+        assert_eq!(
             engine.resolve_stream_cis(
                 route.session_id,
                 route.stream_id,
@@ -3822,6 +3839,14 @@ mod tests {
             ),
             None,
             "removing a live Input Path must invalidate its logical route",
+        );
+        assert_eq!(
+            engine.condition_state(),
+            HciConditionState {
+                state: HciHostState::Ready,
+                stream_id: None,
+            },
+            "Condition must drop StreamBound as soon as one route side is invalidated",
         );
         assert_eq!(
             engine

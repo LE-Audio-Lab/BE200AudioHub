@@ -105,7 +105,8 @@ where
         ingress,
     );
 
-    let hci_join = spawn_hci_worker(ports, transport_tx.clone());
+    let hci_join =
+        spawn_hci_worker(ports, transport_tx.clone(), None);
 
     HciStack {
         control,

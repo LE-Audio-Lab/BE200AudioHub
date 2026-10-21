@@ -1,11 +1,15 @@
 use std::{
     collections::BTreeSet,
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{select_biased, TryRecvError, TrySendError};
 
 use crate::{
+    core::condition::publication::{
+        ConditionPublishError, HciConditionPublisher,
+    },
     plane::l1_hci::interface::{command::HciCommand, mailbox::HciWorkerPorts, report::HciReport},
     plane::{
         l1_hci::{
@@ -44,6 +48,8 @@ use super::engine::{
 const CONTROL_BUDGET_PER_TURN: usize = 4;
 const CONTROLLER_BUDGET_PER_TURN: usize = 64;
 const ISO_GROUP_BUDGET_PER_TURN: usize = 4;
+const CONDITION_TELEMETRY_PUBLISH_INTERVAL: Duration =
+    Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HciWorkerFault {
@@ -53,6 +59,7 @@ pub enum HciWorkerFault {
     ControlDisconnected,
     ControllerDisconnected,
     IsoDataDisconnected,
+    ConditionPublication(ConditionPublishError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,10 +83,13 @@ impl HciWorkerJoin {
 pub(crate) fn spawn_hci_worker(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
+    condition_publisher: Option<HciConditionPublisher>,
 ) -> HciWorkerJoin {
     let join = thread::Builder::new()
         .name("HciHost".into())
-        .spawn(move || run_loop(ports, transport_tx))
+        .spawn(move || {
+            run_loop(ports, transport_tx, condition_publisher)
+        })
         .expect("failed to spawn HCI host worker");
 
     HciWorkerJoin { join }
@@ -88,6 +98,7 @@ pub(crate) fn spawn_hci_worker(
 fn run_loop(
     ports: HciWorkerPorts,
     transport_tx: TransportTx,
+    condition_publisher: Option<HciConditionPublisher>,
 ) -> HciWorkerExit {
     let HciWorkerPorts {
         control_rx,
@@ -98,6 +109,20 @@ fn run_loop(
     } = ports;
 
     let mut engine = HciEngine::new(transport_tx);
+    let mut last_condition_state = engine.condition_state();
+    let mut last_condition_telemetry_publish = Instant::now();
+
+    if let Some(publisher) = condition_publisher.as_ref() {
+        if let Err(error) = publisher.publish_reliable(
+            engine.condition_state_update(),
+        ) {
+            return HciWorkerExit::Faulted(
+                HciWorkerFault::ConditionPublication(error),
+            );
+        }
+    }
+
+    let exit = (|| -> HciWorkerExit {
     let mut last_attach_state = engine.attach_state();
     let mut last_scan_state = engine.passive_scan_state();
     let mut last_privacy_state = engine.controller_privacy_state().clone();
@@ -125,6 +150,15 @@ fn run_loop(
     let mut last_iso_drain_state = IsoDrainState::Idle;
 
     loop {
+        if let Err(fault) = publish_condition_runtime(
+            &mut engine,
+            condition_publisher.as_ref(),
+            &mut last_condition_state,
+            &mut last_condition_telemetry_publish,
+        ) {
+            return HciWorkerExit::Faulted(fault);
+        }
+
         match stop_rx.try_recv() {
             Ok(()) => return HciWorkerExit::Stopped,
             Err(TryRecvError::Disconnected) => return HciWorkerExit::Stopped,
@@ -459,6 +493,59 @@ fn run_loop(
             }
         }
     }
+    })();
+
+    if let Some(publisher) = condition_publisher.as_ref() {
+        let final_update = match exit {
+            HciWorkerExit::Stopped => engine.force_condition_update(),
+            HciWorkerExit::Faulted(_) => {
+                engine.force_condition_fault_update()
+            }
+        };
+        if let Err(error) = publisher.publish_reliable(final_update) {
+            return HciWorkerExit::Faulted(
+                HciWorkerFault::ConditionPublication(error),
+            );
+        }
+    }
+
+    exit
+}
+
+fn publish_condition_runtime(
+    engine: &mut HciEngine,
+    publisher: Option<&HciConditionPublisher>,
+    last_state: &mut crate::plane::l1_hci::interface::condition::HciConditionState,
+    last_telemetry_publish: &mut Instant,
+) -> Result<(), HciWorkerFault> {
+    let Some(publisher) = publisher else {
+        return Ok(());
+    };
+
+    let state = engine.condition_state();
+    if state != *last_state {
+        publisher
+            .publish_reliable(
+                crate::plane::l1_hci::interface::condition::HciConditionUpdate::State(
+                    state,
+                ),
+            )
+            .map_err(HciWorkerFault::ConditionPublication)?;
+        *last_state = state;
+    }
+
+    if last_telemetry_publish.elapsed()
+        >= CONDITION_TELEMETRY_PUBLISH_INTERVAL
+    {
+        if let Some(update) = engine.take_condition_telemetry_update() {
+            publisher
+                .publish_telemetry(update)
+                .map_err(HciWorkerFault::ConditionPublication)?;
+        }
+        *last_telemetry_publish = Instant::now();
+    }
+
+    Ok(())
 }
 
 fn iso_data_group_should_drop(

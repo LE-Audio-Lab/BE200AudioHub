@@ -178,6 +178,22 @@ impl StreamRouteTable {
                 )
                 .is_some()
     }
+
+    pub fn single_bound_stream_id(&self) -> Option<StreamId> {
+        let mut candidate: Option<(SessionId, StreamId)> = None;
+        for key in self.routes.keys() {
+            let current = (key.session_id, key.stream_id);
+            match candidate {
+                None => candidate = Some(current),
+                Some(existing) if existing == current => {}
+                Some(_) => return None,
+            }
+        }
+
+        let (session_id, stream_id) = candidate?;
+        self.contains_stream(session_id, stream_id)
+            .then_some(stream_id)
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +213,22 @@ mod tests {
                 cis_id: 2,
             },
         }
+    }
+
+    #[test]
+    fn single_bound_stream_id_requires_one_complete_stereo_route() {
+        let mut routes = StreamRouteTable::default();
+        assert_eq!(routes.single_bound_stream_id(), None);
+
+        let value = binding();
+        routes.bind(value).unwrap();
+        assert_eq!(
+            routes.single_bound_stream_id(),
+            Some(value.stream_id)
+        );
+
+        routes.remove_cis(value.left);
+        assert_eq!(routes.single_bound_stream_id(), None);
     }
 
     #[test]
