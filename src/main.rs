@@ -174,9 +174,9 @@ fn main() {
                         result.media.media_telemetry_hil.as_ref()
                     {
                         println!(
-                            "Media telemetry HIL: PASS state_updates={} telemetry_updates={} dropped={} final_epoch={} final_state={:?}",
-                            hil.state_updates_applied,
-                            hil.telemetry_updates_applied,
+                            "Media telemetry HIL oracle: PASS state_updates={} telemetry_updates={} dropped={} production_final_epoch={} final_state={:?}",
+                            hil.state_updates_observed,
+                            hil.telemetry_updates_observed,
                             hil.publisher_dropped_updates,
                             hil.final_condition_epoch,
                             hil.final_state,
@@ -195,6 +195,20 @@ fn main() {
                             hil.final_telemetry.bridge.trace.capacity,
                         );
                     }
+                    println!(
+                        "Condition final: epoch={} control={:?} media={:?} hci={:?} transport={:?}",
+                        result.final_condition.epoch,
+                        result.final_condition.control.state,
+                        result.final_condition.media.state.state,
+                        result.final_condition.hci.state.state,
+                        result.final_condition.transport.state.state,
+                    );
+                    println!(
+                        "Condition telemetry final: hci={} media={} transport={}",
+                        result.final_condition.hci.iso_telemetry.is_some(),
+                        result.final_condition.media.telemetry.is_some(),
+                        result.final_condition.transport.telemetry.is_some(),
+                    );
                     println!(
                         "StopControl reverse teardown -> Control Idle: PASS"
                     );

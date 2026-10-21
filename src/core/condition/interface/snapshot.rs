@@ -24,7 +24,7 @@ pub struct HciConditionView {
     pub iso_telemetry: Option<HciIsoTelemetrySnapshot>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaConditionView {
     pub state: MediaConditionState,
     pub telemetry: Option<MediaTelemetrySnapshot>,
@@ -36,7 +36,7 @@ pub struct TransportConditionView {
     pub telemetry: Option<TransportTelemetrySnapshot>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConditionSnapshot {
     pub epoch: u64,
     pub generation: Generation,
