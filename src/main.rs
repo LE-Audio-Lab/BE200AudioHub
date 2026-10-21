@@ -307,6 +307,18 @@ fn main() {
                         result.audit_before.limit
                     );
                     println!(
+                        "Condition final: epoch={} control={:?} hci={:?} transport={:?}",
+                        result.final_condition.epoch,
+                        result.final_condition.control.state,
+                        result.final_condition.hci.state.state,
+                        result.final_condition.transport.state.state,
+                    );
+                    println!(
+                        "Condition telemetry final: hci={} transport={}",
+                        result.final_condition.hci.iso_telemetry.is_some(),
+                        result.final_condition.transport.telemetry.is_some(),
+                    );
+                    println!(
                         "StopControl reverse teardown -> Control Idle: PASS"
                     );
                     println!(

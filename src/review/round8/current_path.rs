@@ -47,12 +47,11 @@ use crate::{
             },
             planning::iso::StreamLatencyProfile,
         },
-        l1_media::interface::condition::MediaConditionUpdate,
         l1_hci::{
             acl::security::StoredLeKeyMaterial,
             host::stack::{
-                spawn_be200_hci_stack, HciStack, HciStackConfig,
-                HciStackExit,
+                spawn_be200_hci_stack_with_condition, HciStack,
+                HciStackConditionPublishers, HciStackConfig, HciStackExit,
             },
             interface::report::HciReport,
             iso::credit::IsoCreditSnapshot,
@@ -108,8 +107,15 @@ pub struct CurrentPathResult {
     pub frames: usize,
     pub audit_before: IsoCreditSnapshot,
     pub audit_after: IsoCreditSnapshot,
+    pub final_condition: ConditionSnapshot,
     pub bond_unchanged: bool,
     pub exit: HciStackExit,
+}
+
+struct CurrentPathRun {
+    audit_before: IsoCreditSnapshot,
+    audit_after: IsoCreditSnapshot,
+    driver: CurrentPathControlDriver,
 }
 
 pub fn parse_current_path_args(
@@ -783,19 +789,6 @@ impl CurrentPathControlDriver {
         self.condition.control_status()
     }
 
-    pub(crate) fn apply_media_condition_hil(
-        &mut self,
-        update: MediaConditionUpdate,
-    ) -> Result<ConditionSnapshot, String> {
-        let change = self.condition.apply_media(self.scope, update);
-        if change.stale {
-            return Err(
-                "Media ConditionUpdate was rejected as stale".into(),
-            );
-        }
-        Ok(self.condition.snapshot())
-    }
-
     pub(crate) fn iso_audit(
         &mut self,
         stack: &HciStack,
@@ -890,9 +883,15 @@ fn run_current_path(
     connect_timeout: Duration,
     frames: usize,
     teardown_policy: TeardownPolicy,
-) -> Result<(IsoCreditSnapshot, IsoCreditSnapshot), String> {
+    publication: ConditionPublicationInbox,
+) -> Result<CurrentPathRun, String> {
     let mut driver =
-        CurrentPathControlDriver::new(plan, connect_timeout)?;
+        CurrentPathControlDriver::new_with_latency_profile_and_publication(
+            plan,
+            connect_timeout,
+            StreamLatencyProfile::Daily,
+            Some(publication),
+        )?;
     let binding = driver.start_and_bind(stack)?;
     let audit_before = driver.iso_audit(stack)?;
 
@@ -901,7 +900,11 @@ fn run_current_path(
         driver.wait_media_completion(stack, &audit_before, frames)?;
 
     driver.stop(stack, teardown_policy)?;
-    Ok((audit_before, audit_after))
+    Ok(CurrentPathRun {
+        audit_before,
+        audit_after,
+        driver,
+    })
 }
 
 #[cfg(windows)]
@@ -933,13 +936,24 @@ pub fn execute_current_path(
         format!("firmware bypass failed: {error:?}")
     })?;
 
-    let stack = spawn_be200_hci_stack(HciStackConfig::default());
+    let (publishers, publication) =
+        current_path_condition_runtime();
+    let ConditionPublishers {
+        hci,
+        media: _media,
+        transport,
+    } = publishers;
+    let stack = spawn_be200_hci_stack_with_condition(
+        HciStackConfig::default(),
+        HciStackConditionPublishers { hci, transport },
+    );
     let run = run_current_path(
         &stack,
         plan,
         config.connect_timeout,
         config.frames,
         config.teardown_policy,
+        publication,
     );
     let exit = stack.shutdown();
 
@@ -952,7 +966,36 @@ pub fn execute_current_path(
             )
         })?;
 
-    let (audit_before, audit_after) = run?;
+    let CurrentPathRun {
+        audit_before,
+        audit_after,
+        mut driver,
+    } = run?;
+    driver.reconcile_condition_publications();
+    let final_condition = driver.condition_snapshot();
+
+    use crate::plane::{
+        l1_control::interface::condition::ControlState,
+        l1_hci::interface::condition::HciHostState,
+        l2_transport::interface::condition::TransportState,
+    };
+    if final_condition.control.state != ControlState::Idle
+        || final_condition.hci.state.state != HciHostState::Detached
+        || final_condition.transport.state.state
+            != TransportState::Detached
+        || final_condition.hci.iso_telemetry.is_none()
+        || final_condition.transport.telemetry.is_none()
+    {
+        return Err(format!(
+            "final current-path Condition is incomplete: control={:?} hci={:?} transport={:?} hci_telemetry={} transport_telemetry={}",
+            final_condition.control.state,
+            final_condition.hci.state.state,
+            final_condition.transport.state.state,
+            final_condition.hci.iso_telemetry.is_some(),
+            final_condition.transport.telemetry.is_some(),
+        ));
+    }
+
     if !bond_unchanged {
         return Err("bond store fingerprint changed".into());
     }
@@ -963,6 +1006,7 @@ pub fn execute_current_path(
         frames: config.frames,
         audit_before,
         audit_after,
+        final_condition,
         bond_unchanged,
         exit,
     })
