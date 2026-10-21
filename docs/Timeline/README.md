@@ -1,8 +1,8 @@
 # BE200AudioHub — Engineering Timeline
 
-本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 完成 R5.3 Experiment 封板与 Review-1；Round6 完成 Review-2A/2B/2C/2D software + real HIL；Round7 完成 Control semantic path、产品 Media/Clock/Bridge/logical-HCI 数据面并通过 valid-LC3 First Sound real HIL；Round8 完成 V2 Structural / Ownership Refactor，并打通 Windows live Process Loopback → LC3 → logical HCI ISO → BE200 → Buds3 Pro，建立首个 longevity baseline；Round9 追踪 long-session graceful teardown 并最终把故障边界推进到 controller-global Host-facing ACL RX cessation；Round10 完成最终 falsification、全量归档、45-commit 审计与 investigation scaffolding deprecation。Round10 不在本轮冻结最终 teardown architecture decision。旧 Round 原文不回写，新阶段以独立 Round 追加。
+本目录是 BE200AudioHub 的**活动工程时间线**。Round1–4 从 sealed Experiment 归档字节级恢复；Round5 完成 R5.3 Experiment 封板与 Review-1；Round6 完成 Review-2A/2B/2C/2D software + real HIL；Round7 完成 Control semantic path、产品 Media/Clock/Bridge/logical-HCI 数据面并通过 valid-LC3 First Sound real HIL；Round8 完成 V2 Structural / Ownership Refactor，并打通 Windows live Process Loopback → LC3 → logical HCI ISO → BE200 → Buds3 Pro，建立首个 longevity baseline；Round9 追踪 long-session graceful teardown 并最终把故障边界推进到 controller-global Host-facing ACL RX cessation；Round10 完成最终 falsification、全量归档、45-commit 审计与 investigation scaffolding deprecation；Round11 冻结最终 teardown policy、加入最小 GUI/live gain 与低延迟 profile，完成 live-path latency/long-run 审查并开始 Lifecycle 前置的 producer telemetry 收口。旧 Round 原文不回写，新阶段以独立 Round 追加。
 
-**时间范围**：2026-10-11—持续更新；**当前 V2 工作分支**：`refactor/v2-architecture`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
+**时间范围**：2026-10-11—持续更新；**当前权威分支**：`main`。`deprecated/r5/docs/Timeline/` 保留 Round1–4 的 immutable 原副本；本目录是后续 Review 的连续时间线。
 
 ## 目录
 
@@ -19,11 +19,11 @@
 | [Round6.md](./Round6.md) | **Round6**：Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部发生 chat migration，但 Round6 最终在 Review-2D HIL 后封板 |
 | [Round7.md](./Round7.md) | **Round7（CLOSED）**：Control semantic path、StreamBinding/route ACK、LocalStreamClock、valid LC3、IsoTxBridge、logical HCI ISO lane；valid-LC3 First Sound real HIL PASS |
 | [Round8.md](./Round8.md) | **Round8（CLOSED）**：V2 ownership refactor、current-path First Sound、Windows live relay、两轮 10 s live HIL、首个 300 s data-window / longevity baseline |
-| [Round9.md](./Round9.md) | **Round9（HISTORICAL INVESTIGATION）**：long-session graceful teardown、ACL RX boundary、crash recovery；文件保留当时阶段状态 |\n| [Round10.md](./Round10.md) | **Round10（CURRENT HANDOFF）**：final falsification、deprecated snapshot、45-commit audit、investigation-code cleanup；最终 teardown architecture decision 延后到下一对话 |
+| [Round9.md](./Round9.md) | **Round9（HISTORICAL INVESTIGATION）**：long-session graceful teardown、ACL RX boundary、crash recovery；文件保留当时阶段状态 |\n| [Round10.md](./Round10.md) | **Round10（CLOSED）**：final falsification、deprecated snapshot、45-commit audit、investigation-code cleanup |\n| [Round11.md](./Round11.md) | **Round11（CURRENT HANDOFF）**：teardown policy、GUI/live gain、低延迟与长跑、runtime fault、stereo-image/packet-loss observation、Lifecycle/Condition/telemetry handoff |
 
 ## 推荐阅读顺序
 
-需要快速接手当前工程：**README → TIMELINE → Round10 → deprecated/graceful-teardown-bug/README → Round9 → Round8 → docs/design/IMPLEMENTATION_PLAN_V2.md → BUG_FIX_REGISTER → docs/reference-index/README.md**。需要追溯 Experiment 成功基线再看 Round5/Round4/Round3；调查固件/硬件再看 Round1。
+需要快速接手当前工程：**README → TIMELINE → Round11 → Round10 → docs/design/BE200_TEARDOWN_POLICY.md → docs/design/IMPLEMENTATION_PLAN_V2.md → BUG_FIX_REGISTER → docs/reference-index/README.md**。需要追溯 Experiment 成功基线再看 Round5/Round4/Round3；调查固件/硬件再看 Round1。
 
 需要完整追溯：直接阅读 **AllRounds.md**，或四份 Round 原文。它们是**历史快照**：Round1 文档的“尚无 ACL”和 Round2 文档的“尚无 SMP”是当时真实状态，但都已在后续 Round 得到新的 HIL 证明；**不得**截取早期状态冒充项目当前状态。遇新旧结论矛盾，以更晚的独立 HIL/源码证据更新当前视图，同时保留原文。
 
@@ -61,7 +61,7 @@
 | **Round7 valid-LC3 Media/Clock/Bridge/logical-HCI data plane** | **Software + real First Sound HIL PASS** |
 | **Round8 V2 Structural / Ownership Refactor** | **Software CLOSED** |
 | **Round8 Windows live relay / first longevity baseline** | **Real HIL PASS ×2 @10 s；300 s data window reached 100%；full-session teardown handed open to Round9** |
-| **Round9 long-session teardown diagnosis** | **Investigation complete / root cause unresolved；dual ACL Host-facing RX cessation localized** |\n| **Round10 investigation-code deprecation** | **Software cleanup PASS；408/408 tests + check/build PASS；final teardown architecture decision intentionally deferred** |
+| **Round9 long-session teardown diagnosis** | **Investigation complete / root cause unresolved；dual ACL Host-facing RX cessation localized** |\n| **Round10 investigation-code deprecation** | **Software cleanup PASS；408/408 tests + check/build PASS** |\n| **Round11 product policy / live-daily hardening** | **Teardown policy frozen；GUI/live gain/RTN2 profile landed；Transport producer telemetry landed；current-head cargo test 420/420 PASS；L0 Lifecycle still open** |
 
 Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Review 状态以 Round6 的软件/HIL 证据为准。不要重新做 Pairing，不要清 Bond；所有 HIL 继续由用户在 Windows 本机显式执行，助手可提交代码/执行 allowlisted Build，但不能将 Build 当成 HIL。
 
@@ -78,11 +78,11 @@ Experiment 的 historical HIL baseline 继续保留在 Round4/Round5；当前 Re
 
 ## Review continuation
 
-Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Review-1 的历史截止点；当前状态以 [Round10.md](./Round10.md) 与 [TIMELINE.md](./TIMELINE.md) 为准。
+Round1–4 的历史状态口径仍按原文理解；Round5 是 Experiment→Review-1 的历史截止点；当前状态以 [Round11.md](./Round11.md) 与 [TIMELINE.md](./TIMELINE.md) 为准。
 
 当前最短阅读顺序：
 
-**README → TIMELINE → Round10 → deprecated graceful-teardown index → Round9 → Round8 → IMPLEMENTATION_PLAN_V2 → BUG_FIX_REGISTER → docs/reference-index/README.md**
+**README → TIMELINE → Round11 → Round10 → BE200_TEARDOWN_POLICY → IMPLEMENTATION_PLAN_V2 → BUG_FIX_REGISTER → docs/reference-index/README.md**
 
 当前工程门槛：
 

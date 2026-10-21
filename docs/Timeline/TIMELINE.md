@@ -1,8 +1,8 @@
 # BE200AudioHub — 跨 Round 工程时间线 / Timeline
 
-> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–10 Review / product-path continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
+> **活动时间线**：Round1–4 历史 Experiment 归档 + Round5–11 Review / product-path continuation · Windows 用户态 Intel BE200 + Galaxy Buds3 Pro。
 >
-> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 在 Review-2D real HIL 后封板，Round7 完成 product semantic/data path，Round8 完成 V2 structural + live-relay baseline，Round9 完成 long-session teardown / ACL boundary investigation；Round10 完成 final falsification、investigation-code archive/deprecation，并把最终 teardown architecture decision 留给下一对话。
+> 本文件是导航和对照索引，**不替代各 Round 原始纪要**。历史文档中“当前 / 下一步 / 未完成”的字样只对该 Round 当时成立。尤其 §1–§6 保留早期 Experiment/Round4 截点视角，其中的“下一步 R5.3”等不是当前 roadmap。Experiment historical baseline 与 Review current baseline 必须分开理解；Round6 在 Review-2D real HIL 后封板，Round7 完成 product semantic/data path，Round8 完成 V2 structural + live-relay baseline，Round9 完成 long-session teardown / ACL boundary investigation；Round10 完成 final falsification、investigation-code archive/deprecation；Round11 冻结 teardown policy，并把 live product path 推进到 GUI/low-latency/long-run 与 Lifecycle/Condition/telemetry handoff。
 
 ## 阅读入口
 
@@ -18,7 +18,7 @@
 | [Round6.md](./Round6.md) | Review-2A/2B/2C/2D software + real HIL、ToolHub locked workflow、Apache-2.0 governance；内部 chat migration 后继续完成 2D | Review-2A / 2B / 2C / 2D closure |
 | [Round7.md](./Round7.md) | Control semantic path、valid LC3 Media/Clock/Bridge、logical HCI ISO、First Sound | Round7 closure |
 | [Round8.md](./Round8.md) | V2 Structural / Ownership Refactor + Windows live relay + first longevity baseline | Round8 closure |
-| [Round9.md](./Round9.md) | Long-session teardown、crash recovery、ASCS/ACL lower-boundary diagnosis | historical investigation state |\n| [Round10.md](./Round10.md) | Final falsification、deprecated snapshot、45-commit audit、investigation-code cleanup | **current handoff** |
+| [Round9.md](./Round9.md) | Long-session teardown、crash recovery、ASCS/ACL lower-boundary diagnosis | historical investigation state |\n| [Round10.md](./Round10.md) | Final falsification、deprecated snapshot、45-commit audit、investigation-code cleanup | Round10 closure |\n| [Round11.md](./Round11.md) | Teardown policy、GUI/live gain、低延迟/长跑、runtime fault、stereo-image observation、Lifecycle/telemetry handoff | **current handoff** |
 | [BUG_FIX_REGISTER.md](./BUG_FIX_REGISTER.md) | **跨 Round Bug、Quirk、失败假设、修复和验证总账** | 排障与回归时阅读 |
 
 ## 1. 全程里程碑（实际实施顺序）
@@ -757,59 +757,94 @@ decision.** The next chat must make that decision explicitly and only then updat
 
 See [Round10.md](./Round10.md) for the authoritative handoff.
 
-## 13. Round 11 / Teardown architecture decision — 2026-10-20
+## 13. Round 11 / Product policy + live daily hardening + Lifecycle handoff — 2026-10-20 至 2026-10-22
 
-Round11 closes the architecture decision intentionally deferred by Round10.
-
-The generic Control architecture remains Bluetooth/LE-Audio graceful:
+Round11 first closes the teardown architecture decision deferred by Round10:
 
 ```text
-route unbind
-→ ASCS Release
-→ CP SUCCESS + ASE RELEASING
-→ Remove ISO Data Path
-→ Disconnect CIS
-→ Remove CIG
-→ Disconnect ACL
-→ clear privacy/FAL
+normal:
+route → ASCS Release / RELEASING → path → CIS → CIG → ACL/privacy
+
+BE200 explicit workaround:
+route → path → CIS → CIG → ACL/privacy
 ```
 
-The repeatable BE200-path controller-global Host-facing ACL-RX cessation is
-recorded as a known hardware/controller-path defect class for product policy,
-without claiming a proven silicon or firmware root cause.
+`Graceful` remains the generic default; `--ungraceful-teardown` explicitly selects
+`ControllerCleanUngraceful`.
 
-Current BE200 runs may explicitly select:
+The round then lands the minimal egui daily surface and live gain, exposes the explicit
+extreme-low-latency profile, records Buds3 Pro peer QoS constraints, and measures controller-selected
+CIS timing. Current extreme profile uses RTN2 / 2M / 10 ms SDU / 40 ms peer-required PD, with
+controller C→P transport measured at 4.674 ms.
+
+Process Loopback exposes a 480-frame / 10 ms shared buffer. Temporary QPC instrumentation measured
+roughly 10.4–11.9 ms first-frame age and 0.4–1.9 ms tail age, then was removed. The resulting
+nominal scheduled latency model is about 65.6 ms, explicitly not an acoustic E2E measurement.
+
+Long playback remained usable for at least an hour by user observation; the pasted excerpt itself
+covers about 36.6 minutes. It showed occasional 480-frame underflow/emergency drift corrections but
+no stale-media accumulation. ASRC remains the planned clock-discipline improvement.
+
+Two new runtime issues were exposed rather than hidden:
+
+1. spontaneous hard audio/CIS loss followed by `HCI report lane disconnected`; code audit shows
+   the HCI report sender disappeared because the HCI worker had already terminated, while the
+   first-order `HciStackExit` fault is currently discarded;
+2. the old wide/hollow stereo-image anomaly also reproduces under the custom Host, with audible
+   packet-loss seams at bad↔good transitions. This weakens a Windows-Host-only explanation but does
+   not yet prove a specific inter-CIS offset mechanism.
+
+The Lifecycle/Condition audit then established the next architecture boundary:
 
 ```text
---ungraceful-teardown
+Lifecycle vocabulary/model             present
+Lifecycle orchestration                not composed
+
+Condition private Blackboard/reducers  present
+Control → Condition current path       active
+HCI/Media/Transport → Condition        contracts exist, runtime wiring incomplete
 ```
 
-which uses the controller-clean workaround:
+Telemetry status at Round11 close:
 
 ```text
-route
-→ path
-→ CIS
-→ CIG
-→ ACL
-→ privacy
+HCI ISO raw/aggregate telemetry        256-record ring, already present
+Media Bridge raw/aggregate telemetry   256-record ring, already present
+L2 Transport telemetry                 landed in 26cd6322 + 8d27d5ca
+WASAPI capture raw ring                intentionally not planned
+Media RT anomaly ring                  approved next step, not yet landed
 ```
 
-The workaround is opt-in and must not become the generic architecture default.
+The Transport trace now records timestamped producer-local TX submissions, read/write completions,
+cancel/device-gone/fault events under the same 256-record overwrite-oldest policy.
 
-Implementation seam:
+Current remote code checkpoint before Round11 docs-only closure:
 
 ```text
-CoreCommand::StopControl { policy }
-→ ControlIntent::Stop { policy }
-→ ControlMachine::begin_teardown_with_policy(policy)
+8d27d5ca61486bfe5c1bfdb7d51349bd51156110
+transport: timestamp raw telemetry events
 ```
 
-Initial locked software gate after the policy split:
+Compared with Round10 handoff `773a2f2`, `main` is 53 commits ahead / 0 behind.
+
+Latest test evidence tied to that exact code checkpoint:
 
 ```text
 cargo test --workspace --locked
-410 passed / 0 failed
+420 passed / 0 failed
 ```
 
-See [../design/BE200_TEARDOWN_POLICY.md](../design/BE200_TEARDOWN_POLICY.md).
+The final two Transport telemetry commits did not receive a fresh check/build gate in this
+conversation; the prior full checkpoint had 416/416 tests plus cargo check/build PASS.
+
+Next engineering order:
+
+```text
+Media RT anomaly ring
+→ Plane→Condition reliable/coalesced/final publication
+→ truthful whole-runtime Condition
+→ real L0 Lifecycle supervisor/recovery
+→ ASRC / media controls / ISO sync-quality research
+```
+
+See [Round11.md](./Round11.md) for the authoritative Round11 handoff.
