@@ -155,6 +155,9 @@ pub enum IsoTxSyncReport {
         connection_handle: u16,
         status: u8,
     },
+    HostRejected {
+        connection_handle: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -810,6 +813,18 @@ impl HciEngine {
         &mut self,
     ) -> Vec<IsoTxSyncReport> {
         self.iso_tx_sync_reports.drain(..).collect()
+    }
+
+    pub fn report_iso_tx_sync_host_rejected(
+        &mut self,
+        connection_handle: u16,
+    ) {
+        if self.iso_tx_sync_reports.len() < MAX_ISO_TX_SYNC_REPORTS {
+            self.iso_tx_sync_reports
+                .push_back(IsoTxSyncReport::HostRejected {
+                    connection_handle,
+                });
+        }
     }
 
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
