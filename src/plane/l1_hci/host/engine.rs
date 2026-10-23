@@ -3352,6 +3352,9 @@ mod tests {
         let mut supported =
             vec![0x0e, 0x44, 0x01, 0x02, 0x10, 0x00];
         supported.resize(2 + 0x44, 0);
+        // Test controller advertises LE Read ISO TX Sync:
+        // Supported Commands octet 41, bit 6.
+        supported[6 + 41] |= 1 << 6;
         engine
             .ingest(ControllerPacket::Event(supported))
             .unwrap();
