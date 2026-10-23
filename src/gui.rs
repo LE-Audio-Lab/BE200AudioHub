@@ -16,7 +16,8 @@ use crate::{
     },
     review::round8::live_relay::{
         execute_live_relay_until_stop, LiveRelayConditionSample,
-        LiveRelayRuntimeControl, LiveRelaySessionConfig,
+        LiveRelayImagingSample, LiveRelayRuntimeControl,
+        LiveRelaySessionConfig,
     },
 };
 
@@ -177,6 +178,12 @@ impl SessionWorker {
         self.control.latest_condition_sample()
     }
 
+    fn latest_imaging_sample(
+        &self,
+    ) -> Option<LiveRelayImagingSample> {
+        self.control.latest_imaging_sample()
+    }
+
     fn try_result(&self) -> Option<Result<(), String>> {
         match self.result_rx.try_recv() {
             Ok(result) => Some(result),
@@ -199,6 +206,7 @@ struct RelayGuiApp {
     volume_percent: f32,
     session: Option<SessionWorker>,
     last_condition_sample: Option<LiveRelayConditionSample>,
+    last_imaging_sample: Option<LiveRelayImagingSample>,
     last_error: Option<String>,
 }
 
@@ -209,6 +217,7 @@ impl RelayGuiApp {
             volume_percent: DEFAULT_VOLUME_PERCENT,
             session: None,
             last_condition_sample: None,
+            last_imaging_sample: None,
             last_error: None,
         }
     }
@@ -225,6 +234,21 @@ impl RelayGuiApp {
                 .unwrap_or(true);
             if is_new {
                 self.last_condition_sample = Some(sample);
+            }
+        }
+
+        if let Some(sample) = self
+            .session
+            .as_ref()
+            .and_then(SessionWorker::latest_imaging_sample)
+        {
+            let is_new = self
+                .last_imaging_sample
+                .as_ref()
+                .map(|previous| previous.sequence != sample.sequence)
+                .unwrap_or(true);
+            if is_new {
+                self.last_imaging_sample = Some(sample);
             }
         }
 
@@ -254,6 +278,7 @@ impl RelayGuiApp {
         if self.session.is_none() {
             self.last_error = None;
             self.last_condition_sample = None;
+            self.last_imaging_sample = None;
             self.session = Some(SessionWorker::start(
                 self.config.clone(),
                 self.volume_percent,
@@ -556,6 +581,301 @@ fn render_condition_dashboard(
     });
 }
 
+
+fn iso_handle_counters(
+    sample: &LiveRelayImagingSample,
+    handle: u16,
+) -> (u64, u64, usize) {
+    (
+        sample
+            .iso
+            .submitted_per_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(0),
+        sample
+            .iso
+            .completed_per_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(0),
+        sample
+            .iso
+            .in_flight_per_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(0),
+    )
+}
+
+fn signed_delta_u64(right: u64, left: u64) -> i128 {
+    right as i128 - left as i128
+}
+
+fn signed_delta_u32(right: u32, left: u32) -> i64 {
+    i64::from(right) - i64::from(left)
+}
+
+fn render_cis_raw_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    cis: Option<crate::review::round8::current_path::CisRawDiagnostics>,
+    sample: &LiveRelayImagingSample,
+) {
+    dashboard_card(ui, title, |ui| {
+        egui::Grid::new(format!("raw_{title}"))
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                let Some(cis) = cis else {
+                    metric_row(ui, "CIS", "waiting");
+                    return;
+                };
+
+                let (submitted, completed, in_flight) =
+                    iso_handle_counters(sample, cis.cis_handle);
+
+                metric_row(
+                    ui,
+                    "Handles",
+                    format!(
+                        "CIS 0x{:04X} / ACL 0x{:04X}",
+                        cis.cis_handle, cis.acl_handle
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "Transport",
+                    format!("{} us", cis.transport_latency_c_to_p_us),
+                );
+                metric_row(
+                    ui,
+                    "Sync",
+                    format!(
+                        "CIG {} us / CIS {} us",
+                        cis.cig_sync_delay_us, cis.cis_sync_delay_us
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "ISO geom",
+                    format!(
+                        "PHY {} / NSE {} / BN {} / FT {}",
+                        cis.phy_c_to_p,
+                        cis.nse,
+                        cis.bn_c_to_p,
+                        cis.ft_c_to_p,
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "PDU / interval",
+                    format!(
+                        "{} B / {} ({:.2} ms)",
+                        cis.max_pdu_c_to_p,
+                        cis.iso_interval,
+                        f64::from(cis.iso_interval) * 1.25,
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "Host packets",
+                    format!(
+                        "tx {} / done {} / flight {}",
+                        submitted, completed, in_flight
+                    ),
+                );
+                metric_row(
+                    ui,
+                    "Pending",
+                    submitted.saturating_sub(completed).to_string(),
+                );
+            });
+    });
+}
+
+fn render_imaging_dashboard(
+    ui: &mut egui::Ui,
+    sample: &LiveRelayImagingSample,
+) {
+    ui.add_space(8.0);
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Imaging / ISO Raw · 4 Hz");
+                ui.separator();
+                ui.monospace(format!("#{}", sample.sequence));
+                ui.label(format!("epoch {}", sample.snapshot.epoch));
+                ui.label(format!(
+                    "ISO total tx {} / done {} / flight {}",
+                    sample.iso.total_submitted,
+                    sample.iso.total_completed,
+                    sample.iso.in_flight,
+                ));
+            });
+        });
+
+    ui.add_space(8.0);
+    ui.columns(2, |columns| {
+        render_cis_raw_card(
+            &mut columns[0],
+            "Left CIS",
+            sample.cis.left,
+            sample,
+        );
+        render_cis_raw_card(
+            &mut columns[1],
+            "Right CIS",
+            sample.cis.right,
+            sample,
+        );
+    });
+
+    ui.add_space(8.0);
+    dashboard_card(ui, "Stereo deltas / Media raw", |ui| {
+        egui::Grid::new("dashboard_imaging_delta")
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                if let (Some(left), Some(right)) =
+                    (sample.cis.left, sample.cis.right)
+                {
+                    let (ltx, ldone, lflight) =
+                        iso_handle_counters(sample, left.cis_handle);
+                    let (rtx, rdone, rflight) =
+                        iso_handle_counters(sample, right.cis_handle);
+
+                    metric_row(
+                        ui,
+                        "Transport Δ R-L",
+                        format!(
+                            "{:+} us",
+                            signed_delta_u32(
+                                right.transport_latency_c_to_p_us,
+                                left.transport_latency_c_to_p_us,
+                            )
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "CIS sync Δ R-L",
+                        format!(
+                            "{:+} us",
+                            signed_delta_u32(
+                                right.cis_sync_delay_us,
+                                left.cis_sync_delay_us,
+                            )
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "CIG sync Δ R-L",
+                        format!(
+                            "{:+} us",
+                            signed_delta_u32(
+                                right.cig_sync_delay_us,
+                                left.cig_sync_delay_us,
+                            )
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "NSE / FT L:R",
+                        format!(
+                            "{}:{} / {}:{}",
+                            left.nse,
+                            right.nse,
+                            left.ft_c_to_p,
+                            right.ft_c_to_p,
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "Host tx Δ R-L",
+                        format!("{:+}", signed_delta_u64(rtx, ltx)),
+                    );
+                    metric_row(
+                        ui,
+                        "Host done Δ R-L",
+                        format!("{:+}", signed_delta_u64(rdone, ldone)),
+                    );
+                    metric_row(
+                        ui,
+                        "Host flight L:R",
+                        format!("{}:{}", lflight, rflight),
+                    );
+                } else {
+                    metric_row(ui, "Stereo CIS", "waiting");
+                }
+
+                if let Some(media) = sample.snapshot.media.telemetry {
+                    metric_row(
+                        ui,
+                        "Media frame",
+                        media
+                            .timing
+                            .produced_frame
+                            .map(|frame| frame.0.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    );
+                    metric_row(
+                        ui,
+                        "PCM",
+                        format!(
+                            "fill {} / underflow {}",
+                            media.timing.pcm_fill_frames,
+                            media.timing.pcm_underflow_frames,
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "Source / bridge",
+                        format!(
+                            "src-skip {} / bridge-skip {} / stale {}",
+                            media.timing.source_intervals_skipped,
+                            media.bridge.skipped_intervals,
+                            media.bridge.stale_frames_dropped,
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "Fallback / drop",
+                        format!(
+                            "{} / {}",
+                            media.bridge.fallback_intervals,
+                            media.bridge.dropped_backpressure_intervals,
+                        ),
+                    );
+                    metric_row(
+                        ui,
+                        "Drift trim",
+                        format!(
+                            "gradual {} / emergency {}",
+                            media.timing.gradual_drift_trim_frames,
+                            media.timing.emergency_drift_trim_frames,
+                        ),
+                    );
+                }
+
+                if let Some(hci) = sample.snapshot.hci.iso_telemetry {
+                    metric_row(
+                        ui,
+                        "HCI retired",
+                        hci.retired_packets.to_string(),
+                    );
+                }
+                if let Some(transport) = sample.snapshot.transport.telemetry {
+                    metric_row(
+                        ui,
+                        "Transport faults",
+                        transport.faults.to_string(),
+                    );
+                }
+            });
+    });
+}
+
 impl Drop for RelayGuiApp {
     fn drop(&mut self) {
         if let Some(mut session) = self.session.take() {
@@ -625,7 +945,15 @@ impl eframe::App for RelayGuiApp {
 
             ui.add_space(10.0);
             match self.last_condition_sample {
-                Some(sample) => render_condition_dashboard(ui, sample),
+                Some(sample) => {
+                    render_condition_dashboard(ui, sample);
+                    if let Some(raw) = self.last_imaging_sample.as_ref() {
+                        render_imaging_dashboard(ui, raw);
+                    } else if running {
+                        ui.add_space(8.0);
+                        ui.label("Waiting for ISO raw diagnostics…");
+                    }
+                }
                 None => {
                     egui::Frame::group(ui.style())
                         .inner_margin(egui::Margin::same(12))

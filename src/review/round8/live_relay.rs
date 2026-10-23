@@ -63,7 +63,7 @@ use crate::{
         },
         round8::current_path::{
             control_plan, current_path_condition_runtime,
-            CurrentPathControlDriver,
+            CurrentPathControlDriver, StereoCisRawDiagnostics,
         },
     },
 };
@@ -76,6 +76,7 @@ const MAX_LONGEVITY_SECONDS: u64 = 86_400;
 const LONGEVITY_HEARTBEAT_STEPS: u64 = 10;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
 const GUI_CONDITION_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+const GUI_IMAGING_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRelayConfig {
@@ -107,12 +108,22 @@ pub struct LiveRelayConditionSample {
     pub snapshot: ConditionSnapshot,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveRelayImagingSample {
+    pub sequence: u64,
+    pub snapshot: ConditionSnapshot,
+    pub cis: StereoCisRawDiagnostics,
+    pub iso: IsoCreditSnapshot,
+}
+
 #[derive(Clone)]
 pub struct LiveRelayRuntimeControl {
     stop: Arc<AtomicBool>,
     gain: LiveGain,
     condition_sample_sequence: Arc<AtomicU64>,
     latest_condition_sample: Arc<Mutex<Option<LiveRelayConditionSample>>>,
+    imaging_sample_sequence: Arc<AtomicU64>,
+    latest_imaging_sample: Arc<Mutex<Option<LiveRelayImagingSample>>>,
 }
 
 impl LiveRelayRuntimeControl {
@@ -122,6 +133,8 @@ impl LiveRelayRuntimeControl {
             gain: LiveGain::new(initial_gain),
             condition_sample_sequence: Arc::new(AtomicU64::new(0)),
             latest_condition_sample: Arc::new(Mutex::new(None)),
+            imaging_sample_sequence: Arc::new(AtomicU64::new(0)),
+            latest_imaging_sample: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -144,6 +157,35 @@ impl LiveRelayRuntimeControl {
             .lock()
             .ok()
             .and_then(|sample| *sample)
+    }
+
+    pub(crate) fn latest_imaging_sample(
+        &self,
+    ) -> Option<LiveRelayImagingSample> {
+        self.latest_imaging_sample
+            .lock()
+            .ok()
+            .and_then(|sample| sample.clone())
+    }
+
+    fn publish_imaging_snapshot(
+        &self,
+        snapshot: ConditionSnapshot,
+        cis: StereoCisRawDiagnostics,
+        iso: IsoCreditSnapshot,
+    ) {
+        let sequence = self
+            .imaging_sample_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if let Ok(mut slot) = self.latest_imaging_sample.lock() {
+            *slot = Some(LiveRelayImagingSample {
+                sequence,
+                snapshot,
+                cis,
+                iso,
+            });
+        }
     }
 
     fn publish_condition_snapshot(&self, snapshot: ConditionSnapshot) {
@@ -858,22 +900,47 @@ fn run_live_media(
 
 fn wait_until_stop(
     control: &LiveRelayRuntimeControl,
+    stack: &HciStack,
     driver: &mut CurrentPathControlDriver,
+    audit_before: &IsoCreditSnapshot,
 ) {
     driver.reconcile_condition_publications();
-    control.publish_condition_snapshot(driver.condition_snapshot());
+    let initial_snapshot = driver.condition_snapshot();
+    control.publish_condition_snapshot(initial_snapshot);
+    control.publish_imaging_snapshot(
+        initial_snapshot,
+        driver.cis_raw_diagnostics(),
+        audit_before.clone(),
+    );
 
-    let mut next_snapshot_at =
-        Instant::now() + GUI_CONDITION_SNAPSHOT_INTERVAL;
+    let now = Instant::now();
+    let mut next_condition_snapshot_at =
+        now + GUI_CONDITION_SNAPSHOT_INTERVAL;
+    let mut next_imaging_snapshot_at =
+        now + GUI_IMAGING_SNAPSHOT_INTERVAL;
+
     while !control.stop_requested() {
         driver.reconcile_condition_publications();
 
         let now = Instant::now();
-        if now >= next_snapshot_at {
+        if now >= next_imaging_snapshot_at {
+            if let Ok(iso) = driver.iso_audit(stack) {
+                driver.reconcile_condition_publications();
+                control.publish_imaging_snapshot(
+                    driver.condition_snapshot(),
+                    driver.cis_raw_diagnostics(),
+                    iso,
+                );
+            }
+            next_imaging_snapshot_at =
+                now + GUI_IMAGING_SNAPSHOT_INTERVAL;
+        }
+
+        if now >= next_condition_snapshot_at {
             control.publish_condition_snapshot(
                 driver.condition_snapshot(),
             );
-            next_snapshot_at =
+            next_condition_snapshot_at =
                 now + GUI_CONDITION_SNAPSHOT_INTERVAL;
         }
 
@@ -984,8 +1051,13 @@ pub fn execute_live_relay_until_stop(
         publication,
         media,
         false,
-        move |_source, _media, _stack, driver, _audit_before, _hil_progress| {
-            wait_until_stop(&wait_control, driver);
+        move |_source, _media, stack, driver, audit_before, _hil_progress| {
+            wait_until_stop(
+                &wait_control,
+                stack,
+                driver,
+                audit_before,
+            );
             Ok(())
         },
     );
