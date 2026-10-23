@@ -64,6 +64,7 @@ use crate::{
         round8::current_path::{
             control_plan, current_path_condition_runtime,
             CurrentPathControlDriver, StereoCisRawDiagnostics,
+            StereoIsoTxSyncDiagnostics,
         },
     },
 };
@@ -114,6 +115,7 @@ pub(crate) struct LiveRelayImagingSample {
     pub snapshot: ConditionSnapshot,
     pub cis: StereoCisRawDiagnostics,
     pub iso: IsoCreditSnapshot,
+    pub tx_sync: Option<StereoIsoTxSyncDiagnostics>,
 }
 
 #[derive(Clone)]
@@ -173,6 +175,7 @@ impl LiveRelayRuntimeControl {
         snapshot: ConditionSnapshot,
         cis: StereoCisRawDiagnostics,
         iso: IsoCreditSnapshot,
+        tx_sync: Option<StereoIsoTxSyncDiagnostics>,
     ) {
         let sequence = self
             .imaging_sample_sequence
@@ -184,6 +187,7 @@ impl LiveRelayRuntimeControl {
                 snapshot,
                 cis,
                 iso,
+                tx_sync,
             });
         }
     }
@@ -898,6 +902,26 @@ fn run_live_media(
     )
 }
 
+fn stereo_flight_mismatch(
+    cis: StereoCisRawDiagnostics,
+    iso: &IsoCreditSnapshot,
+) -> bool {
+    let (Some(left), Some(right)) = (cis.left, cis.right) else {
+        return false;
+    };
+    let left_flight = iso
+        .in_flight_per_handle
+        .get(&left.cis_handle)
+        .copied()
+        .unwrap_or(0);
+    let right_flight = iso
+        .in_flight_per_handle
+        .get(&right.cis_handle)
+        .copied()
+        .unwrap_or(0);
+    left_flight != right_flight
+}
+
 fn wait_until_stop(
     control: &LiveRelayRuntimeControl,
     stack: &HciStack,
@@ -911,6 +935,7 @@ fn wait_until_stop(
         initial_snapshot,
         driver.cis_raw_diagnostics(),
         audit_before.clone(),
+        None,
     );
 
     let now = Instant::now();
@@ -918,6 +943,7 @@ fn wait_until_stop(
         now + GUI_CONDITION_SNAPSHOT_INTERVAL;
     let mut next_imaging_snapshot_at =
         now + GUI_IMAGING_SNAPSHOT_INTERVAL;
+    let mut desync_active = false;
 
     while !control.stop_requested() {
         driver.reconcile_condition_publications();
@@ -926,10 +952,29 @@ fn wait_until_stop(
         if now >= next_imaging_snapshot_at {
             if let Ok(iso) = driver.iso_audit(stack) {
                 driver.reconcile_condition_publications();
+                let cis = driver.cis_raw_diagnostics();
+                let desync = stereo_flight_mismatch(cis, &iso);
+                let tx_sync = if desync && !desync_active {
+                    Some(
+                        driver
+                            .stereo_iso_tx_sync(stack)
+                            .unwrap_or_else(|error| {
+                                StereoIsoTxSyncDiagnostics {
+                                    left: Err(error.clone()),
+                                    right: Err(error),
+                                }
+                            }),
+                    )
+                } else {
+                    None
+                };
+                desync_active = desync;
+                driver.reconcile_condition_publications();
                 control.publish_imaging_snapshot(
                     driver.condition_snapshot(),
-                    driver.cis_raw_diagnostics(),
+                    cis,
                     iso,
+                    tx_sync,
                 );
             }
             next_imaging_snapshot_at =

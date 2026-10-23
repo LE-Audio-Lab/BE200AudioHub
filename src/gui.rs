@@ -632,22 +632,43 @@ fn stereo_flight_pair(
     Some((left_flight, right_flight))
 }
 
+fn signed_sequence_delta(right: u16, left: u16) -> i32 {
+    i32::from(right.wrapping_sub(left) as i16)
+}
+
+fn signed_u32_delta(right: u32, left: u32) -> i32 {
+    right.wrapping_sub(left) as i32
+}
+
+fn format_tx_sync(
+    side: &str,
+    result: &Result<
+        crate::plane::l1_hci::host::engine::IsoTxSyncSnapshot,
+        String,
+    >,
+) -> String {
+    match result {
+        Ok(sync) => format!(
+            "{side}: psn={} tx_timestamp={} time_offset={}",
+            sync.packet_sequence_number,
+            sync.tx_time_stamp,
+            sync.time_offset,
+        ),
+        Err(error) => format!("{side}: ERROR {error}"),
+    }
+}
+
 fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
     let mut out = String::new();
     use std::fmt::Write as _;
 
+    let _ = writeln!(out, "BE200AudioHub Desync Snapshot");
     let _ = writeln!(
         out,
-        "BE200AudioHub Desync Snapshot"
-    );
-    let _ = writeln!(
-        out,
-        "sample={} epoch={} generation={} lifecycle={:?} session={:?}",
+        "sample={} epoch={} generation={}",
         sample.sequence,
         sample.snapshot.epoch,
         sample.snapshot.generation.0,
-        sample.snapshot.lifecycle.lifecycle,
-        sample.snapshot.lifecycle.session,
     );
 
     if let (Some(left), Some(right)) = (sample.cis.left, sample.cis.right) {
@@ -658,46 +679,14 @@ fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
 
         let _ = writeln!(
             out,
-            "trigger: flight L:R={}:{} (different={})",
+            "trigger: flight L:R={}:{}",
             lflight,
             rflight,
-            lflight != rflight,
         );
         let _ = writeln!(
             out,
-            "L: cis=0x{:04X} acl=0x{:04X} transport={}us cig_sync={}us cis_sync={}us phy={} nse={} bn={} ft={} max_pdu={} iso_interval={} ({:.2}ms)",
+            "L CIS 0x{:04X}: tx={} done={} flight={} pending={}",
             left.cis_handle,
-            left.acl_handle,
-            left.transport_latency_c_to_p_us,
-            left.cig_sync_delay_us,
-            left.cis_sync_delay_us,
-            left.phy_c_to_p,
-            left.nse,
-            left.bn_c_to_p,
-            left.ft_c_to_p,
-            left.max_pdu_c_to_p,
-            left.iso_interval,
-            f64::from(left.iso_interval) * 1.25,
-        );
-        let _ = writeln!(
-            out,
-            "R: cis=0x{:04X} acl=0x{:04X} transport={}us cig_sync={}us cis_sync={}us phy={} nse={} bn={} ft={} max_pdu={} iso_interval={} ({:.2}ms)",
-            right.cis_handle,
-            right.acl_handle,
-            right.transport_latency_c_to_p_us,
-            right.cig_sync_delay_us,
-            right.cis_sync_delay_us,
-            right.phy_c_to_p,
-            right.nse,
-            right.bn_c_to_p,
-            right.ft_c_to_p,
-            right.max_pdu_c_to_p,
-            right.iso_interval,
-            f64::from(right.iso_interval) * 1.25,
-        );
-        let _ = writeln!(
-            out,
-            "Host L: tx={} done={} flight={} pending={}",
             ltx,
             ldone,
             lflight,
@@ -705,7 +694,8 @@ fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
         );
         let _ = writeln!(
             out,
-            "Host R: tx={} done={} flight={} pending={}",
+            "R CIS 0x{:04X}: tx={} done={} flight={} pending={}",
+            right.cis_handle,
             rtx,
             rdone,
             rflight,
@@ -713,119 +703,59 @@ fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
         );
         let _ = writeln!(
             out,
-            "Delta R-L: transport={:+}us cis_sync={:+}us cig_sync={:+}us tx={:+} done={:+} flight={:+}",
-            signed_delta_u32(
-                right.transport_latency_c_to_p_us,
-                left.transport_latency_c_to_p_us,
-            ),
-            signed_delta_u32(
-                right.cis_sync_delay_us,
-                left.cis_sync_delay_us,
-            ),
-            signed_delta_u32(
-                right.cig_sync_delay_us,
-                left.cig_sync_delay_us,
-            ),
+            "Delta R-L: tx={:+} done={:+} flight={:+}",
             signed_delta_u64(rtx, ltx),
             signed_delta_u64(rdone, ldone),
             right_flight_delta(rflight, lflight),
         );
+    }
+
+    if let Some(tx_sync) = &sample.tx_sync {
+        let _ = writeln!(out, "ISO TX Sync:");
+        let _ = writeln!(out, "{}", format_tx_sync("L", &tx_sync.left));
+        let _ = writeln!(out, "{}", format_tx_sync("R", &tx_sync.right));
+        if let (Ok(left), Ok(right)) =
+            (&tx_sync.left, &tx_sync.right)
+        {
+            let _ = writeln!(
+                out,
+                "TX Sync Delta R-L: psn={:+} tx_timestamp={:+} time_offset={:+}",
+                signed_sequence_delta(
+                    right.packet_sequence_number,
+                    left.packet_sequence_number,
+                ),
+                signed_u32_delta(
+                    right.tx_time_stamp,
+                    left.tx_time_stamp,
+                ),
+                signed_u32_delta(
+                    right.time_offset,
+                    left.time_offset,
+                ),
+            );
+        }
     } else {
-        let _ = writeln!(out, "CIS: incomplete");
+        let _ = writeln!(out, "ISO TX Sync: not captured");
     }
 
-    let _ = writeln!(
-        out,
-        "ISO total: tx={} done={} flight={} limit={:?}",
-        sample.iso.total_submitted,
-        sample.iso.total_completed,
-        sample.iso.in_flight,
-        sample.iso.limit,
-    );
-
-    let s = sample.snapshot;
-    let _ = writeln!(
-        out,
-        "States: control={:?} hci={:?} media={:?} transport={:?}",
-        s.control.state,
-        s.hci.state.state,
-        s.media.state.state,
-        s.transport.state.state,
-    );
-
-    if let Some(media) = s.media.telemetry {
+    if let Some(hci) = sample.snapshot.hci.iso_telemetry {
         let _ = writeln!(
             out,
-            "Media: frame={:?} pcm_fill={} intervals={} underflow={} source_skip={} keepalive={}",
-            media.timing.produced_frame.map(|frame| frame.0),
-            media.timing.pcm_fill_frames,
-            media.timing.intervals_consumed,
-            media.timing.pcm_underflow_frames,
-            media.timing.source_intervals_skipped,
-            media.timing.keepalive_intervals,
-        );
-        let _ = writeln!(
-            out,
-            "Media bridge: tx={} drop={} fallback={} skip={} stale={}",
-            media.bridge.submitted_intervals,
-            media.bridge.dropped_backpressure_intervals,
-            media.bridge.fallback_intervals,
-            media.bridge.skipped_intervals,
-            media.bridge.stale_frames_dropped,
-        );
-        let _ = writeln!(
-            out,
-            "Media trim: startup={} gradual={} emergency={} timing_trace={}/{} bridge_trace={}/{}",
-            media.timing.startup_trim_frames,
-            media.timing.gradual_drift_trim_frames,
-            media.timing.emergency_drift_trim_frames,
-            media.timing.trace.len,
-            media.timing.trace.capacity,
-            media.bridge.trace.len,
-            media.bridge.trace.capacity,
-        );
-    }
-
-    if let Some(hci) = s.hci.iso_telemetry {
-        let _ = writeln!(
-            out,
-            "HCI: window={:?} tx={} done={} retired={} flight={} peak={} trace={}/{}",
-            hci.controller_limit,
-            hci.submitted_packets,
-            hci.completed_packets,
+            "HCI retired={} total_flight={} peak={}",
             hci.retired_packets,
             hci.in_flight_packets,
             hci.peak_in_flight_packets,
-            hci.trace.len,
-            hci.trace.capacity,
         );
     }
-
-    if let Some(transport) = s.transport.telemetry {
+    if let Some(transport) = sample.snapshot.transport.telemetry {
         let _ = writeln!(
             out,
-            "Transport: rx={} tx={} faults={} trace={}/{}",
-            transport.rx_packets,
-            transport.tx_packets,
+            "Transport faults={}",
             transport.faults,
-            transport.trace.len,
-            transport.trace.capacity,
         );
     }
 
     out
-}
-
-fn right_flight_delta(right: usize, left: usize) -> i128 {
-    right as i128 - left as i128
-}
-
-fn signed_delta_u64(right: u64, left: u64) -> i128 {
-    right as i128 - left as i128
-}
-
-fn signed_delta_u32(right: u32, left: u32) -> i64 {
-    i64::from(right) - i64::from(left)
 }
 
 fn render_cis_raw_card(
@@ -846,48 +776,10 @@ fn render_cis_raw_card(
 
                 let (submitted, completed, in_flight) =
                     iso_handle_counters(sample, cis.cis_handle);
-
                 metric_row(
                     ui,
-                    "Handles",
-                    format!(
-                        "CIS 0x{:04X} / ACL 0x{:04X}",
-                        cis.cis_handle, cis.acl_handle
-                    ),
-                );
-                metric_row(
-                    ui,
-                    "Transport",
-                    format!("{} us", cis.transport_latency_c_to_p_us),
-                );
-                metric_row(
-                    ui,
-                    "Sync",
-                    format!(
-                        "CIG {} us / CIS {} us",
-                        cis.cig_sync_delay_us, cis.cis_sync_delay_us
-                    ),
-                );
-                metric_row(
-                    ui,
-                    "ISO geom",
-                    format!(
-                        "PHY {} / NSE {} / BN {} / FT {}",
-                        cis.phy_c_to_p,
-                        cis.nse,
-                        cis.bn_c_to_p,
-                        cis.ft_c_to_p,
-                    ),
-                );
-                metric_row(
-                    ui,
-                    "PDU / interval",
-                    format!(
-                        "{} B / {} ({:.2} ms)",
-                        cis.max_pdu_c_to_p,
-                        cis.iso_interval,
-                        f64::from(cis.iso_interval) * 1.25,
-                    ),
+                    "Handle",
+                    format!("0x{:04X}", cis.cis_handle),
                 );
                 metric_row(
                     ui,
@@ -971,9 +863,7 @@ fn render_imaging_dashboard(
                 ui.monospace(format!("#{}", sample.sequence));
                 ui.label(format!("epoch {}", sample.snapshot.epoch));
                 ui.label(format!(
-                    "ISO total tx {} / done {} / flight {}",
-                    sample.iso.total_submitted,
-                    sample.iso.total_completed,
+                    "flight {}",
                     sample.iso.in_flight,
                 ));
             });
@@ -997,146 +887,54 @@ fn render_imaging_dashboard(
 
     ui.add_space(8.0);
     ui.columns(2, |columns| {
-        dashboard_card(&mut columns[0], "Stereo deltas / Media raw", |ui| {
-                egui::Grid::new("dashboard_imaging_delta")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        if let (Some(left), Some(right)) =
-                            (sample.cis.left, sample.cis.right)
-                        {
-                            let (ltx, ldone, lflight) =
-                                iso_handle_counters(sample, left.cis_handle);
-                            let (rtx, rdone, rflight) =
-                                iso_handle_counters(sample, right.cis_handle);
-        
-                            metric_row(
-                                ui,
-                                "Transport Δ R-L",
-                                format!(
-                                    "{:+} us",
-                                    signed_delta_u32(
-                                        right.transport_latency_c_to_p_us,
-                                        left.transport_latency_c_to_p_us,
-                                    )
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "CIS sync Δ R-L",
-                                format!(
-                                    "{:+} us",
-                                    signed_delta_u32(
-                                        right.cis_sync_delay_us,
-                                        left.cis_sync_delay_us,
-                                    )
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "CIG sync Δ R-L",
-                                format!(
-                                    "{:+} us",
-                                    signed_delta_u32(
-                                        right.cig_sync_delay_us,
-                                        left.cig_sync_delay_us,
-                                    )
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "NSE / FT L:R",
-                                format!(
-                                    "{}:{} / {}:{}",
-                                    left.nse,
-                                    right.nse,
-                                    left.ft_c_to_p,
-                                    right.ft_c_to_p,
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "Host tx Δ R-L",
-                                format!("{:+}", signed_delta_u64(rtx, ltx)),
-                            );
-                            metric_row(
-                                ui,
-                                "Host done Δ R-L",
-                                format!("{:+}", signed_delta_u64(rdone, ldone)),
-                            );
-                            metric_row(
-                                ui,
-                                "Host flight L:R",
-                                format!("{}:{}", lflight, rflight),
-                            );
-                        } else {
-                            metric_row(ui, "Stereo CIS", "waiting");
-                        }
-        
-                        if let Some(media) = sample.snapshot.media.telemetry {
-                            metric_row(
-                                ui,
-                                "Media frame",
-                                media
-                                    .timing
-                                    .produced_frame
-                                    .map(|frame| frame.0.to_string())
-                                    .unwrap_or_else(|| "-".into()),
-                            );
-                            metric_row(
-                                ui,
-                                "PCM",
-                                format!(
-                                    "fill {} / underflow {}",
-                                    media.timing.pcm_fill_frames,
-                                    media.timing.pcm_underflow_frames,
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "Source / bridge",
-                                format!(
-                                    "src-skip {} / bridge-skip {} / stale {}",
-                                    media.timing.source_intervals_skipped,
-                                    media.bridge.skipped_intervals,
-                                    media.bridge.stale_frames_dropped,
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "Fallback / drop",
-                                format!(
-                                    "{} / {}",
-                                    media.bridge.fallback_intervals,
-                                    media.bridge.dropped_backpressure_intervals,
-                                ),
-                            );
-                            metric_row(
-                                ui,
-                                "Drift trim",
-                                format!(
-                                    "gradual {} / emergency {}",
-                                    media.timing.gradual_drift_trim_frames,
-                                    media.timing.emergency_drift_trim_frames,
-                                ),
-                            );
-                        }
-        
-                        if let Some(hci) = sample.snapshot.hci.iso_telemetry {
-                            metric_row(
-                                ui,
-                                "HCI retired",
-                                hci.retired_packets.to_string(),
-                            );
-                        }
-                        if let Some(transport) = sample.snapshot.transport.telemetry {
-                            metric_row(
-                                ui,
-                                "Transport faults",
-                                transport.faults.to_string(),
-                            );
-                        }
-                    });
+        dashboard_card(&mut columns[0], "Stereo phase", |ui| {
+            egui::Grid::new("dashboard_imaging_delta")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    if let (Some(left), Some(right)) =
+                        (sample.cis.left, sample.cis.right)
+                    {
+                        let (ltx, ldone, lflight) =
+                            iso_handle_counters(sample, left.cis_handle);
+                        let (rtx, rdone, rflight) =
+                            iso_handle_counters(sample, right.cis_handle);
+                        metric_row(
+                            ui,
+                            "Host tx Δ R-L",
+                            format!("{:+}", signed_delta_u64(rtx, ltx)),
+                        );
+                        metric_row(
+                            ui,
+                            "Host done Δ R-L",
+                            format!("{:+}", signed_delta_u64(rdone, ldone)),
+                        );
+                        metric_row(
+                            ui,
+                            "Host flight L:R",
+                            format!("{}:{}", lflight, rflight),
+                        );
+                    } else {
+                        metric_row(ui, "Stereo CIS", "waiting");
+                    }
+
+                    if let Some(hci) = sample.snapshot.hci.iso_telemetry {
+                        metric_row(
+                            ui,
+                            "HCI retired",
+                            hci.retired_packets.to_string(),
+                        );
+                    }
+                    if let Some(transport) =
+                        sample.snapshot.transport.telemetry
+                    {
+                        metric_row(
+                            ui,
+                            "Transport faults",
+                            transport.faults.to_string(),
+                        );
+                    }
+                });
         });
         render_desync_snapshot_card(
             &mut columns[1],
