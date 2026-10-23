@@ -775,11 +775,20 @@ impl HciEngine {
             .map(|_| entry.link.connection_handle)
     }
 
+    pub fn iso_tx_sync_supported(&self) -> bool {
+        self.capabilities()
+            .map(|caps| {
+                caps.supported_commands[41] & (1 << 6) != 0
+            })
+            .unwrap_or(false)
+    }
+
     pub fn begin_iso_tx_sync(
         &mut self,
         connection_handle: u16,
     ) -> Result<(), EngineFault> {
         if self.attach_state != OperationalAttachState::Ready
+            || !self.iso_tx_sync_supported()
             || self.pending_iso_tx_sync.contains(&connection_handle)
             || self.device.cis_link(connection_handle).is_none()
         {

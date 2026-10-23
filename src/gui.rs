@@ -640,32 +640,6 @@ fn right_flight_delta(right: usize, left: usize) -> i128 {
     right as i128 - left as i128
 }
 
-fn signed_sequence_delta(right: u16, left: u16) -> i32 {
-    i32::from(right.wrapping_sub(left) as i16)
-}
-
-fn signed_u32_delta(right: u32, left: u32) -> i32 {
-    right.wrapping_sub(left) as i32
-}
-
-fn format_tx_sync(
-    side: &str,
-    result: &Result<
-        crate::plane::l1_hci::host::engine::IsoTxSyncSnapshot,
-        String,
-    >,
-) -> String {
-    match result {
-        Ok(sync) => format!(
-            "{side}: psn={} tx_timestamp={} time_offset={}",
-            sync.packet_sequence_number,
-            sync.tx_time_stamp,
-            sync.time_offset,
-        ),
-        Err(error) => format!("{side}: ERROR {error}"),
-    }
-}
-
 fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
     let mut out = String::new();
     use std::fmt::Write as _;
@@ -714,34 +688,6 @@ fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
             signed_delta_u64(rdone, ldone),
             right_flight_delta(rflight, lflight),
         );
-    }
-
-    if let Some(tx_sync) = &sample.tx_sync {
-        let _ = writeln!(out, "ISO TX Sync:");
-        let _ = writeln!(out, "{}", format_tx_sync("L", &tx_sync.left));
-        let _ = writeln!(out, "{}", format_tx_sync("R", &tx_sync.right));
-        if let (Ok(left), Ok(right)) =
-            (&tx_sync.left, &tx_sync.right)
-        {
-            let _ = writeln!(
-                out,
-                "TX Sync Delta R-L: psn={:+} tx_timestamp={:+} time_offset={:+}",
-                signed_sequence_delta(
-                    right.packet_sequence_number,
-                    left.packet_sequence_number,
-                ),
-                signed_u32_delta(
-                    right.tx_time_stamp,
-                    left.tx_time_stamp,
-                ),
-                signed_u32_delta(
-                    right.time_offset,
-                    left.time_offset,
-                ),
-            );
-        }
-    } else {
-        let _ = writeln!(out, "ISO TX Sync: not captured");
     }
 
     if let Some(hci) = sample.snapshot.hci.iso_telemetry {

@@ -458,6 +458,12 @@ fn process_report(
     report: HciReport,
 ) -> Result<(), String> {
     cis_raw.observe_hci_report(&report);
+    if let HciReport::CapabilitiesReady(capabilities) = &report {
+        eprintln!(
+            "[hci][caps] le_read_iso_tx_sync_supported={}",
+            capabilities.supported_commands[41] & (1 << 6) != 0,
+        );
+    }
     let step = control
         .handle_lower_report(ControlLowerReport::Hci(report))
         .map_err(|error| {

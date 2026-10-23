@@ -717,7 +717,15 @@ fn process_command(
         }
         HciCommand::ReadIsoTxAudit => Ok(()),
         HciCommand::ReadIsoTxSync { connection_handle } => {
-            engine.begin_iso_tx_sync(connection_handle)
+            match engine.begin_iso_tx_sync(connection_handle) {
+                Ok(()) => Ok(()),
+                Err(fault) => {
+                    eprintln!(
+                        "[hci][diag] ISO TX sync probe rejected for CIS 0x{connection_handle:04X}: {fault:?}"
+                    );
+                    Ok(())
+                }
+            }
         }
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
