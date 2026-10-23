@@ -693,21 +693,19 @@ fn desync_snapshot_text(sample: &LiveRelayImagingSample) -> String {
         );
         let _ = writeln!(
             out,
-            "L CIS 0x{:04X}: tx={} done={} flight={} pending={}",
+            "L CIS 0x{:04X}: tx={} done={} flight={}",
             left.cis_handle,
             ltx,
             ldone,
             lflight,
-            ltx.saturating_sub(ldone),
         );
         let _ = writeln!(
             out,
-            "R CIS 0x{:04X}: tx={} done={} flight={} pending={}",
+            "R CIS 0x{:04X}: tx={} done={} flight={}",
             right.cis_handle,
             rtx,
             rdone,
             rflight,
-            rtx.saturating_sub(rdone),
         );
         let _ = writeln!(
             out,
@@ -796,11 +794,6 @@ fn render_cis_raw_card(
                         "tx {} / done {} / flight {}",
                         submitted, completed, in_flight
                     ),
-                );
-                metric_row(
-                    ui,
-                    "Pending",
-                    submitted.saturating_sub(completed).to_string(),
                 );
             });
     });
