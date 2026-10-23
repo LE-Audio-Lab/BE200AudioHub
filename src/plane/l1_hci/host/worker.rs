@@ -495,6 +495,10 @@ fn run_loop(
     }
     })();
 
+    if let HciWorkerExit::Faulted(fault) = exit {
+        eprintln!("[hci][worker] faulted: {fault:?}");
+    }
+
     if let Some(publisher) = condition_publisher.as_ref() {
         let final_update = match exit {
             HciWorkerExit::Stopped => {

@@ -1995,15 +1995,33 @@ impl HciEngine {
                             .iso_credit_audit
                             .in_flight_on(*connection_handle)
                             > 0
+                        || self
+                            .iso_credit_audit
+                            .retired_completion_allowance_on(
+                                *connection_handle,
+                            )
+                            > 0
                     {
-                        self.iso_credit_audit
-                            .completed(*connection_handle, completed)
+                        let accounting = self.iso_credit_audit
+                            .completed_accounting(
+                                *connection_handle,
+                                completed,
+                            )
                             .map_err(EngineFault::IsoCredit)?;
-                        self.telemetry.observe_iso_completed(
-                            *connection_handle,
-                            completed,
-                            self.iso_credit_audit.in_flight(),
-                        );
+                        if accounting.live_completed != 0 {
+                            self.telemetry.observe_iso_completed(
+                                *connection_handle,
+                                accounting.live_completed,
+                                self.iso_credit_audit.in_flight(),
+                            );
+                        }
+                        if accounting.retired_completed != 0 {
+                            eprintln!(
+                                "[hci][iso] accepted late completion for retired CIS handle=0x{:04X} count={}",
+                                connection_handle,
+                                accounting.retired_completed,
+                            );
+                        }
                     } else {
                         return Err(EngineFault::AclCredit(
                             AclCreditFault::UnknownCompletion {
@@ -2909,6 +2927,11 @@ impl HciEngine {
 
         if let Some((connection_handle, reason)) = successful_disconnect {
             if self.retire_established_cis(connection_handle) {
+                eprintln!(
+                    "[hci][cis] unsolicited disconnect handle=0x{:04X} reason=0x{:02X}",
+                    connection_handle,
+                    reason,
+                );
                 self.cis_disconnect_state =
                     CisDisconnectState::Disconnected {
                         connection_handle,
@@ -4028,6 +4051,29 @@ mod tests {
                 in_flight: 0,
             })
         ));
+
+        // Controllers may return the retired HCI ISO buffer credit after the
+        // CIS has already disconnected. This completion is bounded by the
+        // exact retired allowance and must not kill the HCI worker/engine.
+        engine
+            .ingest(ControllerPacket::Event(vec![
+                0x13, 0x05, 0x01,
+                0x00, 0x09, 0x01, 0x00,
+            ]))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        let telemetry = engine.iso_telemetry_snapshot();
+        assert_eq!(telemetry.submitted_packets, 1);
+        assert_eq!(telemetry.completed_packets, 0);
+        assert_eq!(telemetry.retired_packets, 1);
+        assert_eq!(telemetry.in_flight_packets, 0);
+        assert_eq!(
+            engine
+                .iso_credit_audit
+                .retired_completion_allowance_on(0x0900),
+            0
+        );
     }
 
     #[test]
