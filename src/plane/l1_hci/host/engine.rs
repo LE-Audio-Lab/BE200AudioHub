@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bumble_hci::{
     codes::{
@@ -98,6 +98,7 @@ use crate::{
 const DEFAULT_POLL_BUDGET: usize = 64;
 const MAX_DEFERRED_DEVICE_EVENTS: usize = 64;
 const MAX_GATT_REPORTS: usize = 64;
+const MAX_ISO_TX_SYNC_REPORTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineFault {
@@ -137,6 +138,23 @@ pub enum EngineFault {
     GattSendRejected { connection_handle: u16 },
     GattReportBacklogFull,
     DeviceEventBacklogFull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsoTxSyncSnapshot {
+    pub connection_handle: u16,
+    pub packet_sequence_number: u16,
+    pub tx_time_stamp: u32,
+    pub time_offset: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IsoTxSyncReport {
+    Complete(IsoTxSyncSnapshot),
+    Failed {
+        connection_handle: u16,
+        status: u8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +259,8 @@ pub struct HciEngine {
     iso_path_setup_transaction: Option<IsoPathSetupTransaction>,
     iso_path_remove_transaction: Option<IsoPathRemoveTransaction>,
     semantic_iso_path_target: Option<CisRef>,
+    pending_iso_tx_sync: BTreeSet<u16>,
+    iso_tx_sync_reports: VecDeque<IsoTxSyncReport>,
     stream_routes: StreamRouteTable,
     deferred_device_events: VecDeque<DeviceEvent>,
 }
@@ -290,6 +310,8 @@ impl HciEngine {
             iso_path_setup_transaction: None,
             iso_path_remove_transaction: None,
             semantic_iso_path_target: None,
+            pending_iso_tx_sync: BTreeSet::new(),
+            iso_tx_sync_reports: VecDeque::new(),
             stream_routes: StreamRouteTable::default(),
             deferred_device_events: VecDeque::new(),
         }
@@ -751,6 +773,34 @@ impl HciEngine {
         self.device
             .cis_link(entry.link.connection_handle)
             .map(|_| entry.link.connection_handle)
+    }
+
+    pub fn begin_iso_tx_sync(
+        &mut self,
+        connection_handle: u16,
+    ) -> Result<(), EngineFault> {
+        if self.attach_state != OperationalAttachState::Ready
+            || self.pending_iso_tx_sync.contains(&connection_handle)
+            || self.device.cis_link(connection_handle).is_none()
+        {
+            return Err(EngineFault::InvalidState);
+        }
+
+        if !self
+            .device
+            .read_iso_tx_sync(&mut self.link, connection_handle)
+        {
+            return Err(EngineFault::InvalidState);
+        }
+        self.check_link_fault()?;
+        self.pending_iso_tx_sync.insert(connection_handle);
+        Ok(())
+    }
+
+    pub fn take_iso_tx_sync_reports(
+        &mut self,
+    ) -> Vec<IsoTxSyncReport> {
+        self.iso_tx_sync_reports.drain(..).collect()
     }
 
     pub fn iso_credit_snapshot(&self) -> IsoCreditSnapshot {
@@ -1865,8 +1915,49 @@ impl HciEngine {
                         }
                     }
                 }
-                IsoControlEvent::TxSync { .. } => {
-                    return Err(EngineFault::UnexpectedIsoControlEvent);
+                IsoControlEvent::TxSync {
+                    status,
+                    connection_handle,
+                    sync,
+                } => {
+                    if !self
+                        .pending_iso_tx_sync
+                        .remove(&connection_handle)
+                    {
+                        return Err(EngineFault::UnexpectedIsoControlEvent);
+                    }
+                    if self.iso_tx_sync_reports.len()
+                        >= MAX_ISO_TX_SYNC_REPORTS
+                    {
+                        return Err(EngineFault::DeviceEventBacklogFull);
+                    }
+
+                    let report = match sync {
+                        Some(sync) if status == 0 => {
+                            if sync.connection_handle != connection_handle {
+                                return Err(
+                                    EngineFault::IsoControlJournalMismatch {
+                                        connection_handle,
+                                    },
+                                );
+                            }
+                            IsoTxSyncReport::Complete(
+                                IsoTxSyncSnapshot {
+                                    connection_handle,
+                                    packet_sequence_number:
+                                        sync.packet_sequence_number,
+                                    tx_time_stamp:
+                                        sync.tx_time_stamp,
+                                    time_offset: sync.time_offset,
+                                },
+                            )
+                        }
+                        _ => IsoTxSyncReport::Failed {
+                            connection_handle,
+                            status,
+                        },
+                    };
+                    self.iso_tx_sync_reports.push_back(report);
                 }
             }
         }
@@ -4073,6 +4164,81 @@ mod tests {
                 .iso_credit_audit
                 .retired_completion_allowance_on(0x0900),
             0
+        );
+    }
+
+    #[test]
+    fn engine_reads_iso_tx_sync_through_typed_control_journal() {
+        let (mut engine, rx) = engine(32);
+        make_minimal_attach_ready(&mut engine, &rx);
+
+        engine
+            .ingest(le_connection_complete(
+                0x0800,
+                [1, 2, 3, 4, 5, 6],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+        let acl = engine.connection_set_snapshot().connections[0].token();
+
+        engine.begin_cig_configuration(single_cig_config()).unwrap();
+        assert_eq!(command_opcode(rx.try_recv().unwrap()), 0x2062);
+        engine
+            .ingest(complete(
+                0x2062,
+                0,
+                &[1, 1, 0x00, 0x09],
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine
+            .begin_cis_creation(
+                crate::plane::l1_hci::iso::cig_cis::CisCreateRequest {
+                    cig_id: 1,
+                    bindings: vec![
+                        crate::plane::l1_hci::iso::cig_cis::CisAclBinding {
+                            cis_id: 1,
+                            acl,
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        let create_opcode = command_opcode(rx.try_recv().unwrap());
+        engine.ingest(command_status(create_opcode, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+        engine.ingest(cis_established(0x0900, 0)).unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        engine.begin_iso_tx_sync(0x0900).unwrap();
+        assert_eq!(
+            command_opcode(rx.try_recv().unwrap()),
+            bumble_hci::codes::HCI_LE_READ_ISO_TX_SYNC_COMMAND
+        );
+
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0900u16.to_le_bytes());
+        extra.extend_from_slice(&0x1234u16.to_le_bytes());
+        extra.extend_from_slice(&0x11223344u32.to_le_bytes());
+        extra.extend_from_slice(&0x00005566u32.to_le_bytes());
+        engine
+            .ingest(complete(
+                bumble_hci::codes::HCI_LE_READ_ISO_TX_SYNC_COMMAND,
+                0,
+                &extra,
+            ))
+            .unwrap();
+        engine.poll_until_quiescent().unwrap();
+
+        assert_eq!(
+            engine.take_iso_tx_sync_reports(),
+            vec![IsoTxSyncReport::Complete(IsoTxSyncSnapshot {
+                connection_handle: 0x0900,
+                packet_sequence_number: 0x1234,
+                tx_time_stamp: 0x11223344,
+                time_offset: 0x00005566,
+            })]
         );
     }
 

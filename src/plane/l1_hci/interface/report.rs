@@ -13,7 +13,8 @@ use crate::{
         gatt::transaction::GattReport,
         host::engine::{
             ControllerCapabilities, ControllerIdentity,
-            ControllerIdentityFailure, OperationalAttachState, PassiveScanState,
+            ControllerIdentityFailure, IsoTxSyncReport,
+            OperationalAttachState, PassiveScanState,
         },
         iso::{
             cig_cis::{CigConfigureState, CisCreateState, SemanticCisCreateState},
@@ -45,6 +46,7 @@ pub enum HciReport {
     StoredEncryptionState(StoredEncryptionState),
     CisHostFeatureState(CisHostFeatureState),
     IsoTxAudit(IsoCreditSnapshot),
+    IsoTxSync(IsoTxSyncReport),
     CigConfigureState(CigConfigureState),
     CisCreateState(CisCreateState),
     SemanticCisCreateState(SemanticCisCreateState),

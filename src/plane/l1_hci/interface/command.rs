@@ -34,6 +34,7 @@ pub enum HciCommand {
     BeginStoredEncryption(StoredEncryptionRequest),
     EnsureCisHostFeature,
     ReadIsoTxAudit,
+    ReadIsoTxSync { connection_handle: u16 },
     ConfigureCig(CigConfig),
     CreateCis(CisCreateRequest),
     DisconnectCis { connection_handle: u16 },
@@ -174,6 +175,17 @@ impl HciControl {
     ) -> Result<(), SendError> {
         self.tx
             .try_send(HciCommand::ReadIsoTxAudit)
+            .map_err(map_send_error)
+    }
+
+    pub fn try_read_iso_tx_sync(
+        &self,
+        connection_handle: u16,
+    ) -> Result<(), SendError> {
+        self.tx
+            .try_send(HciCommand::ReadIsoTxSync {
+                connection_handle,
+            })
             .map_err(map_send_error)
     }
 

@@ -716,6 +716,9 @@ fn process_command(
             engine.begin_cis_host_feature()
         }
         HciCommand::ReadIsoTxAudit => Ok(()),
+        HciCommand::ReadIsoTxSync { connection_handle } => {
+            engine.begin_iso_tx_sync(connection_handle)
+        }
         HciCommand::ConfigureCig(config) => {
             engine.begin_cig_configuration(config)
         }
@@ -1057,6 +1060,12 @@ fn publish_state_transitions(
             ))
             .map_err(map_report_error)?;
         *last_connection_set = connection_set;
+    }
+
+    for report in engine.take_iso_tx_sync_reports() {
+        report_tx
+            .try_send(HciReport::IsoTxSync(report))
+            .map_err(map_report_error)?;
     }
 
     for report in engine.take_gatt_reports() {
