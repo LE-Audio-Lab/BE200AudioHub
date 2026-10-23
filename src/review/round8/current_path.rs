@@ -45,7 +45,10 @@ use crate::{
             model::set_plan::{
                 ControlMemberPlan, ControlSetPlan,
             },
-            planning::iso::StreamLatencyProfile,
+            planning::iso::{
+                StreamLatencyProfile, FIRST_LEFT_CIS_ID,
+                FIRST_RIGHT_CIS_ID,
+            },
         },
         l1_hci::{
             acl::security::StoredLeKeyMaterial,
@@ -54,7 +57,10 @@ use crate::{
                 HciStackConditionPublishers, HciStackConfig, HciStackExit,
             },
             interface::report::HciReport,
-            iso::credit::IsoCreditSnapshot,
+            iso::{
+                cig_cis::CisCreateState,
+                credit::IsoCreditSnapshot,
+            },
         },
     },
     platform::firmware::{
@@ -98,6 +104,64 @@ pub struct CurrentPathConfig {
     pub connect_timeout: Duration,
     pub frames: usize,
     pub teardown_policy: TeardownPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CisRawDiagnostics {
+    pub cis_id: u8,
+    pub acl_handle: u16,
+    pub cis_handle: u16,
+    pub transport_latency_c_to_p_us: u32,
+    pub cig_sync_delay_us: u32,
+    pub cis_sync_delay_us: u32,
+    pub phy_c_to_p: u8,
+    pub nse: u8,
+    pub bn_c_to_p: u8,
+    pub ft_c_to_p: u8,
+    pub max_pdu_c_to_p: u16,
+    pub iso_interval: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StereoCisRawDiagnostics {
+    pub left: Option<CisRawDiagnostics>,
+    pub right: Option<CisRawDiagnostics>,
+}
+
+impl StereoCisRawDiagnostics {
+    fn observe_hci_report(&mut self, report: &HciReport) {
+        let HciReport::CisCreateState(CisCreateState::Ready {
+            established,
+            ..
+        }) = report
+        else {
+            return;
+        };
+
+        for cis in established {
+            let raw = CisRawDiagnostics {
+                cis_id: cis.cis_id,
+                acl_handle: cis.acl.connection_handle,
+                cis_handle: cis.link.connection_handle,
+                transport_latency_c_to_p_us:
+                    cis.link.transport_latency_c_to_p,
+                cig_sync_delay_us: cis.link.cig_sync_delay,
+                cis_sync_delay_us: cis.link.cis_sync_delay,
+                phy_c_to_p: cis.link.phy_c_to_p,
+                nse: cis.link.nse,
+                bn_c_to_p: cis.link.bn_c_to_p,
+                ft_c_to_p: cis.link.ft_c_to_p,
+                max_pdu_c_to_p: cis.link.max_pdu_c_to_p,
+                iso_interval: cis.link.iso_interval,
+            };
+
+            match cis.cis_id {
+                FIRST_LEFT_CIS_ID => self.left = Some(raw),
+                FIRST_RIGHT_CIS_ID => self.right = Some(raw),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -403,8 +467,10 @@ fn process_report(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cis_raw: &mut StereoCisRawDiagnostics,
     report: HciReport,
 ) -> Result<(), String> {
+    cis_raw.observe_hci_report(&report);
     let step = control
         .handle_lower_report(ControlLowerReport::Hci(report))
         .map_err(|error| {
@@ -467,6 +533,7 @@ fn drive_until(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cis_raw: &mut StereoCisRawDiagnostics,
     publication: Option<&ConditionPublicationInbox>,
     target: DriveTarget,
 ) -> Result<(), String> {
@@ -490,7 +557,7 @@ fn drive_until(
                 Ok(report) => {
                     process_report(
                         stack, control, condition, scope, timers,
-                        binding, report,
+                        binding, cis_raw, report,
                     )?;
                     progressed = true;
                     if target_reached(condition, *binding, target) {
@@ -528,6 +595,7 @@ fn read_iso_audit(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cis_raw: &mut StereoCisRawDiagnostics,
     publication: Option<&ConditionPublicationInbox>,
 ) -> Result<IsoCreditSnapshot, String> {
     stack
@@ -548,7 +616,7 @@ fn read_iso_audit(
             Ok(report) => {
                 process_report(
                     stack, control, condition, scope, timers,
-                    binding, report,
+                    binding, cis_raw, report,
                 )?;
             }
             Err(RecvError::Empty) => {
@@ -571,6 +639,7 @@ fn wait_media_completion(
     scope: ConditionScope,
     timers: &mut TimerBook,
     binding: &mut Option<StreamBinding>,
+    cis_raw: &mut StereoCisRawDiagnostics,
     publication: Option<&ConditionPublicationInbox>,
     before: &IsoCreditSnapshot,
     frames: usize,
@@ -588,6 +657,7 @@ fn wait_media_completion(
             scope,
             timers,
             binding,
+            cis_raw,
             publication,
         )?;
         let submitted = after
@@ -624,6 +694,7 @@ pub(crate) struct CurrentPathControlDriver {
     scope: ConditionScope,
     timers: TimerBook,
     binding: Option<StreamBinding>,
+    cis_raw: StereoCisRawDiagnostics,
     latency_profile: StreamLatencyProfile,
     publication: Option<ConditionPublicationInbox>,
 }
@@ -684,6 +755,7 @@ impl CurrentPathControlDriver {
             scope,
             timers: TimerBook::new(connect_timeout),
             binding: None,
+            cis_raw: StereoCisRawDiagnostics::default(),
             latency_profile,
             publication,
         })
@@ -716,6 +788,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cis_raw,
             self.publication.as_ref(),
             DriveTarget::StreamReadyUnbound,
         )?;
@@ -747,6 +820,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cis_raw,
             self.publication.as_ref(),
             DriveTarget::StreamBound,
         )?;
@@ -785,6 +859,12 @@ impl CurrentPathControlDriver {
         self.condition.snapshot()
     }
 
+    pub(crate) fn cis_raw_diagnostics(
+        &self,
+    ) -> StereoCisRawDiagnostics {
+        self.cis_raw
+    }
+
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
         self.condition.control_status()
     }
@@ -800,6 +880,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cis_raw,
             self.publication.as_ref(),
         )
     }
@@ -817,6 +898,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cis_raw,
             self.publication.as_ref(),
             before,
             frames,
@@ -871,6 +953,7 @@ impl CurrentPathControlDriver {
             self.scope,
             &mut self.timers,
             &mut self.binding,
+            &mut self.cis_raw,
             self.publication.as_ref(),
             DriveTarget::Idle,
         )
