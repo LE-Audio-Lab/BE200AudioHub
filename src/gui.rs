@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use eframe::egui;
@@ -199,7 +199,6 @@ struct RelayGuiApp {
     volume_percent: f32,
     session: Option<SessionWorker>,
     last_condition_sample: Option<LiveRelayConditionSample>,
-    last_condition_sample_seen_at: Option<Instant>,
     last_error: Option<String>,
 }
 
@@ -210,7 +209,6 @@ impl RelayGuiApp {
             volume_percent: DEFAULT_VOLUME_PERCENT,
             session: None,
             last_condition_sample: None,
-            last_condition_sample_seen_at: None,
             last_error: None,
         }
     }
@@ -227,7 +225,6 @@ impl RelayGuiApp {
                 .unwrap_or(true);
             if is_new {
                 self.last_condition_sample = Some(sample);
-                self.last_condition_sample_seen_at = Some(Instant::now());
             }
         }
 
@@ -257,7 +254,6 @@ impl RelayGuiApp {
         if self.session.is_none() {
             self.last_error = None;
             self.last_condition_sample = None;
-            self.last_condition_sample_seen_at = None;
             self.session = Some(SessionWorker::start(
                 self.config.clone(),
                 self.volume_percent,
@@ -300,12 +296,8 @@ fn dashboard_card(
 fn render_condition_dashboard(
     ui: &mut egui::Ui,
     sample: LiveRelayConditionSample,
-    seen_at: Option<Instant>,
 ) {
     let snapshot = sample.snapshot;
-    let sample_age_ms = seen_at
-        .map(|seen| seen.elapsed().as_millis())
-        .unwrap_or(0);
 
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::same(10))
@@ -324,7 +316,6 @@ fn render_condition_dashboard(
                     "session={:?}",
                     snapshot.lifecycle.session
                 ));
-                ui.label(format!("age={} ms", sample_age_ms));
             });
         });
 
@@ -634,11 +625,7 @@ impl eframe::App for RelayGuiApp {
 
             ui.add_space(10.0);
             match self.last_condition_sample {
-                Some(sample) => render_condition_dashboard(
-                    ui,
-                    sample,
-                    self.last_condition_sample_seen_at,
-                ),
+                Some(sample) => render_condition_dashboard(ui, sample),
                 None => {
                     egui::Frame::group(ui.style())
                         .inner_margin(egui::Margin::same(12))
