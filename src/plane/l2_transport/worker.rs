@@ -197,6 +197,29 @@ where
                 &mut last_telemetry_publish,
             );
 
+            match exit {
+                TransportWorkerExit::Faulted(fault) => {
+                    eprintln!("[transport][worker] faulted: {fault:?}");
+                }
+                TransportWorkerExit::Detached => {
+                    eprintln!("[transport][worker] detached");
+                }
+                TransportWorkerExit::BackendOpenFailed(error) => {
+                    eprintln!(
+                        "[transport][worker] backend open failed: {error:?}"
+                    );
+                }
+                TransportWorkerExit::TxDisconnected => {
+                    eprintln!("[transport][worker] tx lane disconnected");
+                }
+                TransportWorkerExit::ConditionPublication(error) => {
+                    eprintln!(
+                        "[transport][worker] Condition publication fault: {error:?}"
+                    );
+                }
+                TransportWorkerExit::Cancelled => {}
+            }
+
             let final_update = match exit {
                 TransportWorkerExit::Cancelled => {
                     reactor.stop();

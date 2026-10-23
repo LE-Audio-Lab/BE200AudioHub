@@ -589,7 +589,7 @@ fn tx_sync_report_result(
     }
 }
 
-fn read_stereo_iso_tx_sync(
+fn read_one_iso_tx_sync(
     stack: &HciStack,
     control: &mut ControlPlane,
     condition: &mut Condition,
@@ -598,39 +598,26 @@ fn read_stereo_iso_tx_sync(
     binding: &mut Option<StreamBinding>,
     cis_raw: &mut StereoCisRawDiagnostics,
     publication: Option<&ConditionPublicationInbox>,
-) -> Result<StereoIsoTxSyncDiagnostics, String> {
-    let left_handle = cis_raw
-        .left
-        .ok_or_else(|| "left CIS handle unavailable".to_string())?
-        .cis_handle;
-    let right_handle = cis_raw
-        .right
-        .ok_or_else(|| "right CIS handle unavailable".to_string())?
-        .cis_handle;
-
+    connection_handle: u16,
+) -> Result<IsoTxSyncSnapshot, String> {
     stack
         .control()
-        .try_read_iso_tx_sync(left_handle)
+        .try_read_iso_tx_sync(connection_handle)
         .map_err(|error| {
-            format!("left ISO TX sync query rejected: {error:?}")
-        })?;
-    stack
-        .control()
-        .try_read_iso_tx_sync(right_handle)
-        .map_err(|error| {
-            format!("right ISO TX sync query rejected: {error:?}")
+            format!(
+                "ISO TX sync query rejected for CIS 0x{connection_handle:04X}: {error:?}"
+            )
         })?;
 
     let deadline = Instant::now() + ISO_TX_SYNC_TIMEOUT;
-    let mut left = None;
-    let mut right = None;
-
-    while left.is_none() || right.is_none() {
+    loop {
         if let Some(publication) = publication {
             publication.reconcile(condition);
         }
         if Instant::now() >= deadline {
-            break;
+            return Err(format!(
+                "timeout waiting for CIS 0x{connection_handle:04X}"
+            ));
         }
 
         let mut progressed = false;
@@ -646,13 +633,12 @@ fn read_stereo_iso_tx_sync(
                             ..
                         } => connection_handle,
                     };
-                    let result = tx_sync_report_result(report);
-                    if handle == left_handle {
-                        left = Some(result);
-                    } else if handle == right_handle {
-                        right = Some(result);
+                    if handle != connection_handle {
+                        return Err(format!(
+                            "unexpected ISO TX sync report for CIS 0x{handle:04X} while waiting for 0x{connection_handle:04X}"
+                        ));
                     }
-                    progressed = true;
+                    return tx_sync_report_result(report);
                 }
                 Ok(report) => {
                     process_report(
@@ -669,7 +655,10 @@ fn read_stereo_iso_tx_sync(
                 }
                 Err(RecvError::Empty) => break,
                 Err(RecvError::Disconnected) => {
-                    return Err("HCI report lane disconnected during ISO TX sync probe".into());
+                    return Err(
+                        "HCI report lane disconnected during ISO TX sync probe"
+                            .into(),
+                    );
                 }
             }
         }
@@ -691,19 +680,54 @@ fn read_stereo_iso_tx_sync(
             thread::sleep(Duration::from_millis(1));
         }
     }
+}
 
-    Ok(StereoIsoTxSyncDiagnostics {
-        left: left.unwrap_or_else(|| {
-            Err(format!(
-                "timeout waiting for CIS 0x{left_handle:04X}"
-            ))
-        }),
-        right: right.unwrap_or_else(|| {
-            Err(format!(
-                "timeout waiting for CIS 0x{right_handle:04X}"
-            ))
-        }),
-    })
+fn read_stereo_iso_tx_sync(
+    stack: &HciStack,
+    control: &mut ControlPlane,
+    condition: &mut Condition,
+    scope: ConditionScope,
+    timers: &mut TimerBook,
+    binding: &mut Option<StreamBinding>,
+    cis_raw: &mut StereoCisRawDiagnostics,
+    publication: Option<&ConditionPublicationInbox>,
+) -> Result<StereoIsoTxSyncDiagnostics, String> {
+    let left_handle = cis_raw
+        .left
+        .ok_or_else(|| "left CIS handle unavailable".to_string())?
+        .cis_handle;
+    let right_handle = cis_raw
+        .right
+        .ok_or_else(|| "right CIS handle unavailable".to_string())?
+        .cis_handle;
+
+    // HCI command flow control is intentionally preserved here: issue the
+    // second controller command only after the first Command Complete has
+    // returned through the typed report lane.
+    let left = read_one_iso_tx_sync(
+        stack,
+        control,
+        condition,
+        scope,
+        timers,
+        binding,
+        cis_raw,
+        publication,
+        left_handle,
+    );
+    let right = read_one_iso_tx_sync(
+        stack,
+        control,
+        condition,
+        scope,
+        timers,
+        binding,
+        cis_raw,
+        publication,
+        right_handle,
+    );
+
+    Ok(StereoIsoTxSyncDiagnostics { left, right })
 }
 
 fn read_iso_audit(
