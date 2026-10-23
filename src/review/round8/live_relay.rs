@@ -7,8 +7,8 @@
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -75,6 +75,7 @@ const DEFAULT_LONGEVITY_SECONDS: u64 = 300;
 const MAX_LONGEVITY_SECONDS: u64 = 86_400;
 const LONGEVITY_HEARTBEAT_STEPS: u64 = 10;
 const ISO_DRAIN_TIMEOUT: Duration = Duration::from_secs(6);
+const GUI_CONDITION_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveRelayConfig {
@@ -100,10 +101,18 @@ pub struct LiveRelaySessionConfig {
     pub latency_profile: StreamLatencyProfile,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveRelayConditionSample {
+    pub sequence: u64,
+    pub snapshot: ConditionSnapshot,
+}
+
 #[derive(Clone)]
 pub struct LiveRelayRuntimeControl {
     stop: Arc<AtomicBool>,
     gain: LiveGain,
+    condition_sample_sequence: Arc<AtomicU64>,
+    latest_condition_sample: Arc<Mutex<Option<LiveRelayConditionSample>>>,
 }
 
 impl LiveRelayRuntimeControl {
@@ -111,6 +120,8 @@ impl LiveRelayRuntimeControl {
         Self {
             stop: Arc::new(AtomicBool::new(false)),
             gain: LiveGain::new(initial_gain),
+            condition_sample_sequence: Arc::new(AtomicU64::new(0)),
+            latest_condition_sample: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -124,6 +135,28 @@ impl LiveRelayRuntimeControl {
 
     pub fn gain(&self) -> LiveGain {
         self.gain.clone()
+    }
+
+    pub fn latest_condition_sample(
+        &self,
+    ) -> Option<LiveRelayConditionSample> {
+        self.latest_condition_sample
+            .lock()
+            .ok()
+            .and_then(|sample| *sample)
+    }
+
+    fn publish_condition_snapshot(&self, snapshot: ConditionSnapshot) {
+        let sequence = self
+            .condition_sample_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if let Ok(mut slot) = self.latest_condition_sample.lock() {
+            *slot = Some(LiveRelayConditionSample {
+                sequence,
+                snapshot,
+            });
+        }
     }
 }
 
@@ -827,11 +860,28 @@ fn wait_until_stop(
     control: &LiveRelayRuntimeControl,
     driver: &mut CurrentPathControlDriver,
 ) {
+    driver.reconcile_condition_publications();
+    control.publish_condition_snapshot(driver.condition_snapshot());
+
+    let mut next_snapshot_at =
+        Instant::now() + GUI_CONDITION_SNAPSHOT_INTERVAL;
     while !control.stop_requested() {
         driver.reconcile_condition_publications();
+
+        let now = Instant::now();
+        if now >= next_snapshot_at {
+            control.publish_condition_snapshot(
+                driver.condition_snapshot(),
+            );
+            next_snapshot_at =
+                now + GUI_CONDITION_SNAPSHOT_INTERVAL;
+        }
+
         thread::sleep(Duration::from_millis(10));
     }
+
     driver.reconcile_condition_publications();
+    control.publish_condition_snapshot(driver.condition_snapshot());
 }
 
 fn validate_final_condition(
@@ -955,7 +1005,9 @@ pub fn execute_live_relay_until_stop(
         mut driver,
     } = run?;
     driver.reconcile_condition_publications();
-    validate_final_condition(&driver.condition_snapshot(), exit)?;
+    let final_condition = driver.condition_snapshot();
+    control.publish_condition_snapshot(final_condition);
+    validate_final_condition(&final_condition, exit)?;
 
     if !bond_unchanged {
         return Err("bond store fingerprint changed".into());
