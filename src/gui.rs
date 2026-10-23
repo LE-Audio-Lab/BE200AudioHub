@@ -640,14 +640,6 @@ fn right_flight_delta(right: usize, left: usize) -> i128 {
     right as i128 - left as i128
 }
 
-fn signed_delta_u64(right: u64, left: u64) -> i128 {
-    right as i128 - left as i128
-}
-
-fn right_flight_delta(right: usize, left: usize) -> i128 {
-    right as i128 - left as i128
-}
-
 fn signed_sequence_delta(right: u16, left: u16) -> i32 {
     i32::from(right.wrapping_sub(left) as i16)
 }
