@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -15,13 +15,14 @@ use crate::{
         planning::iso::StreamLatencyProfile,
     },
     review::round8::live_relay::{
-        execute_live_relay_until_stop, LiveRelayRuntimeControl,
-        LiveRelaySessionConfig,
+        execute_live_relay_until_stop, LiveRelayConditionSample,
+        LiveRelayRuntimeControl, LiveRelaySessionConfig,
     },
 };
 
 const DEFAULT_CONNECT_SECONDS: u64 = 12;
 const DEFAULT_VOLUME_PERCENT: f32 = 100.0;
+const GUI_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug)]
 pub struct GuiConfig {
@@ -170,6 +171,12 @@ impl SessionWorker {
         self.control.stop_requested()
     }
 
+    fn latest_condition_sample(
+        &self,
+    ) -> Option<LiveRelayConditionSample> {
+        self.control.latest_condition_sample()
+    }
+
     fn try_result(&self) -> Option<Result<(), String>> {
         match self.result_rx.try_recv() {
             Ok(result) => Some(result),
@@ -191,6 +198,9 @@ struct RelayGuiApp {
     config: LiveRelaySessionConfig,
     volume_percent: f32,
     session: Option<SessionWorker>,
+    last_condition_sample: Option<LiveRelayConditionSample>,
+    last_condition_sample_seen_at: Option<Instant>,
+    last_error: Option<String>,
 }
 
 impl RelayGuiApp {
@@ -199,10 +209,28 @@ impl RelayGuiApp {
             config,
             volume_percent: DEFAULT_VOLUME_PERCENT,
             session: None,
+            last_condition_sample: None,
+            last_condition_sample_seen_at: None,
+            last_error: None,
         }
     }
 
     fn poll_session(&mut self) {
+        if let Some(sample) = self
+            .session
+            .as_ref()
+            .and_then(SessionWorker::latest_condition_sample)
+        {
+            let is_new = self
+                .last_condition_sample
+                .map(|previous| previous.sequence != sample.sequence)
+                .unwrap_or(true);
+            if is_new {
+                self.last_condition_sample = Some(sample);
+                self.last_condition_sample_seen_at = Some(Instant::now());
+            }
+        }
+
         let Some(result) = self
             .session
             .as_ref()
@@ -219,11 +247,17 @@ impl RelayGuiApp {
 
         if let Err(error) = result {
             eprintln!("BE200AudioHub GUI session failed: {error}");
+            self.last_error = Some(error);
+        } else {
+            self.last_error = None;
         }
     }
 
     fn start_session(&mut self) {
         if self.session.is_none() {
+            self.last_error = None;
+            self.last_condition_sample = None;
+            self.last_condition_sample_seen_at = None;
             self.session = Some(SessionWorker::start(
                 self.config.clone(),
                 self.volume_percent,
@@ -236,6 +270,299 @@ impl RelayGuiApp {
             session.request_stop();
         }
     }
+}
+
+
+fn metric_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: impl Into<String>,
+) {
+    ui.label(label);
+    ui.monospace(value.into());
+    ui.end_row();
+}
+
+fn dashboard_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.strong(title);
+            ui.add_space(6.0);
+            add_contents(ui);
+        });
+}
+
+fn render_condition_dashboard(
+    ui: &mut egui::Ui,
+    sample: LiveRelayConditionSample,
+    seen_at: Option<Instant>,
+) {
+    let snapshot = sample.snapshot;
+    let sample_age_ms = seen_at
+        .map(|seen| seen.elapsed().as_millis())
+        .unwrap_or(0);
+
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong("Condition · 1 Hz snapshot");
+                ui.separator();
+                ui.monospace(format!("#{}", sample.sequence));
+                ui.label(format!("epoch {}", snapshot.epoch));
+                ui.label(format!("gen {}", snapshot.generation.0));
+                ui.label(format!(
+                    "lifecycle={:?}",
+                    snapshot.lifecycle.lifecycle
+                ));
+                ui.label(format!(
+                    "session={:?}",
+                    snapshot.lifecycle.session
+                ));
+                ui.label(format!("age={} ms", sample_age_ms));
+            });
+        });
+
+    ui.add_space(8.0);
+    ui.columns(2, |columns| {
+        dashboard_card(&mut columns[0], "Control", |ui| {
+            egui::Grid::new("dashboard_control")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    metric_row(
+                        ui,
+                        "State",
+                        format!("{:?}", snapshot.control.state),
+                    );
+                    metric_row(
+                        ui,
+                        "Stream",
+                        snapshot.control.stream_id
+                            .map(|id| id.0.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    );
+                    if let Some(format) = snapshot.control.format {
+                        metric_row(
+                            ui,
+                            "Format",
+                            format!(
+                                "{} Hz / {} us / {} B",
+                                format.sample_rate_hz,
+                                format.frame_duration_us,
+                                format.octets_per_sdu,
+                            ),
+                        );
+                    } else {
+                        metric_row(ui, "Format", "-");
+                    }
+                });
+        });
+
+        dashboard_card(&mut columns[1], "HCI", |ui| {
+            egui::Grid::new("dashboard_hci")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    metric_row(
+                        ui,
+                        "State",
+                        format!("{:?}", snapshot.hci.state.state),
+                    );
+                    metric_row(
+                        ui,
+                        "Stream",
+                        snapshot.hci.state.stream_id
+                            .map(|id| id.0.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    );
+
+                    if let Some(t) = snapshot.hci.iso_telemetry {
+                        metric_row(
+                            ui,
+                            "ISO window",
+                            t.controller_limit
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        metric_row(
+                            ui,
+                            "In flight",
+                            format!(
+                                "{} / peak {}",
+                                t.in_flight_packets,
+                                t.peak_in_flight_packets
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Packets",
+                            format!(
+                                "tx {}  done {}  retired {}",
+                                t.submitted_packets,
+                                t.completed_packets,
+                                t.retired_packets,
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Trace",
+                            format!(
+                                "{}/{}",
+                                t.trace.len, t.trace.capacity
+                            ),
+                        );
+                    } else {
+                        metric_row(ui, "Telemetry", "waiting");
+                    }
+                });
+        });
+    });
+
+    ui.add_space(8.0);
+    ui.columns(2, |columns| {
+        dashboard_card(&mut columns[0], "Media", |ui| {
+            egui::Grid::new("dashboard_media")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    metric_row(
+                        ui,
+                        "State",
+                        format!("{:?}", snapshot.media.state.state),
+                    );
+                    metric_row(
+                        ui,
+                        "Clock",
+                        format!("{:?}", snapshot.media.state.clock_lock),
+                    );
+
+                    if let Some(t) = snapshot.media.telemetry {
+                        metric_row(
+                            ui,
+                            "Frame",
+                            t.timing.produced_frame
+                                .map(|frame| frame.0.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                        );
+                        metric_row(
+                            ui,
+                            "PCM fill",
+                            format!("{} f", t.timing.pcm_fill_frames),
+                        );
+                        metric_row(
+                            ui,
+                            "Intervals",
+                            t.timing.intervals_consumed.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "Underflow",
+                            t.timing.pcm_underflow_frames.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "Source skip",
+                            t.timing.source_intervals_skipped.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "Trim",
+                            format!(
+                                "startup {}  gradual {}  emergency {}",
+                                t.timing.startup_trim_frames,
+                                t.timing.gradual_drift_trim_frames,
+                                t.timing.emergency_drift_trim_frames,
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Timing trace",
+                            format!(
+                                "{}/{}",
+                                t.timing.trace.len,
+                                t.timing.trace.capacity,
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Bridge",
+                            format!(
+                                "tx {}  drop {}  fallback {}",
+                                t.bridge.submitted_intervals,
+                                t.bridge.dropped_backpressure_intervals,
+                                t.bridge.fallback_intervals,
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Bridge miss",
+                            format!(
+                                "skip {}  stale {}",
+                                t.bridge.skipped_intervals,
+                                t.bridge.stale_frames_dropped,
+                            ),
+                        );
+                        metric_row(
+                            ui,
+                            "Bridge trace",
+                            format!(
+                                "{}/{}",
+                                t.bridge.trace.len,
+                                t.bridge.trace.capacity,
+                            ),
+                        );
+                    } else {
+                        metric_row(ui, "Telemetry", "waiting");
+                    }
+                });
+        });
+
+        dashboard_card(&mut columns[1], "Transport", |ui| {
+            egui::Grid::new("dashboard_transport")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    metric_row(
+                        ui,
+                        "State",
+                        format!("{:?}", snapshot.transport.state.state),
+                    );
+                    if let Some(t) = snapshot.transport.telemetry {
+                        metric_row(
+                            ui,
+                            "RX packets",
+                            t.rx_packets.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "TX packets",
+                            t.tx_packets.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "Faults",
+                            t.faults.to_string(),
+                        );
+                        metric_row(
+                            ui,
+                            "Trace",
+                            format!(
+                                "{}/{}",
+                                t.trace.len, t.trace.capacity
+                            ),
+                        );
+                    } else {
+                        metric_row(ui, "Telemetry", "waiting");
+                    }
+                });
+        });
+    });
 }
 
 impl Drop for RelayGuiApp {
@@ -255,25 +582,24 @@ impl eframe::App for RelayGuiApp {
     ) {
         self.poll_session();
 
-        ui.add_space(18.0);
-        ui.vertical_centered(|ui| {
-            let slider = ui.add(
-                egui::Slider::new(
-                    &mut self.volume_percent,
-                    0.0..=100.0,
-                )
-                .text("Volume")
-                .suffix("%"),
-            );
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                let slider = ui.add(
+                    egui::Slider::new(
+                        &mut self.volume_percent,
+                        0.0..=100.0,
+                    )
+                    .text("Volume")
+                    .suffix("%"),
+                );
 
-            if slider.changed() {
-                if let Some(session) = &self.session {
-                    session.set_volume_percent(self.volume_percent);
+                if slider.changed() {
+                    if let Some(session) = &self.session {
+                        session.set_volume_percent(self.volume_percent);
+                    }
                 }
-            }
 
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
                 let running = self.session.is_some();
                 if ui
                     .add_enabled(!running, egui::Button::new("Start"))
@@ -293,20 +619,55 @@ impl eframe::App for RelayGuiApp {
                 {
                     self.stop_session();
                 }
+
+                ui.separator();
+                ui.label(if running { "Session running" } else { "Session idle" });
             });
+
+            if let Some(error) = &self.last_error {
+                ui.add_space(8.0);
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Session error: {error}"),
+                );
+            }
+
+            ui.add_space(10.0);
+            match self.last_condition_sample {
+                Some(sample) => render_condition_dashboard(
+                    ui,
+                    sample,
+                    self.last_condition_sample_seen_at,
+                ),
+                None => {
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(12))
+                        .show(ui, |ui| {
+                            ui.strong("Condition · 1 Hz snapshot");
+                            ui.label(
+                                if running {
+                                    "Waiting for the first runtime snapshot…"
+                                } else {
+                                    "Start a session to populate the dashboard."
+                                },
+                            );
+                        });
+                }
+            }
+
+            ui.add_space(10.0);
         });
 
-        ui.ctx()
-            .request_repaint_after(Duration::from_millis(50));
+        ui.ctx().request_repaint_after(GUI_REPAINT_INTERVAL);
     }
 }
 
 pub fn run_gui(config: GuiConfig) -> Result<(), String> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([360.0, 150.0])
-            .with_min_inner_size([320.0, 140.0])
-            .with_resizable(false),
+            .with_inner_size([820.0, 620.0])
+            .with_min_inner_size([640.0, 480.0])
+            .with_resizable(true),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
