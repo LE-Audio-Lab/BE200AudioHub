@@ -53,7 +53,6 @@ use crate::{
         l1_hci::{
             acl::security::StoredLeKeyMaterial,
             host::{
-                engine::{IsoTxSyncReport, IsoTxSyncSnapshot},
                 stack::{
                     spawn_be200_hci_stack_with_condition, HciStack,
                     HciStackConditionPublishers, HciStackConfig, HciStackExit,
@@ -91,7 +90,6 @@ const PRODUCT_SESSION_ID: SessionId = SessionId(7);
 const PRODUCT_STREAM_ID: StreamId = StreamId(11);
 const CONTROL_DRIVE_DEADLINE: Duration = Duration::from_secs(90);
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(2);
-const ISO_TX_SYNC_TIMEOUT: Duration = Duration::from_secs(1);
 const MEDIA_COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub(crate) fn current_path_condition_runtime(
@@ -119,12 +117,6 @@ pub(crate) struct CisRawDiagnostics {
 pub(crate) struct StereoCisRawDiagnostics {
     pub left: Option<CisRawDiagnostics>,
     pub right: Option<CisRawDiagnostics>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StereoIsoTxSyncDiagnostics {
-    pub left: Result<IsoTxSyncSnapshot, String>,
-    pub right: Result<IsoTxSyncSnapshot, String>,
 }
 
 impl StereoCisRawDiagnostics {
@@ -581,161 +573,6 @@ fn drive_until(
     }
 }
 
-fn tx_sync_report_result(
-    report: IsoTxSyncReport,
-) -> Result<IsoTxSyncSnapshot, String> {
-    match report {
-        IsoTxSyncReport::Complete(snapshot) => Ok(snapshot),
-        IsoTxSyncReport::Failed {
-            connection_handle,
-            status,
-        } => Err(format!(
-            "controller status 0x{status:02X} for CIS 0x{connection_handle:04X}"
-        )),
-    }
-}
-
-fn read_one_iso_tx_sync(
-    stack: &HciStack,
-    control: &mut ControlPlane,
-    condition: &mut Condition,
-    scope: ConditionScope,
-    timers: &mut TimerBook,
-    binding: &mut Option<StreamBinding>,
-    cis_raw: &mut StereoCisRawDiagnostics,
-    publication: Option<&ConditionPublicationInbox>,
-    connection_handle: u16,
-) -> Result<IsoTxSyncSnapshot, String> {
-    stack
-        .control()
-        .try_read_iso_tx_sync(connection_handle)
-        .map_err(|error| {
-            format!(
-                "ISO TX sync query rejected for CIS 0x{connection_handle:04X}: {error:?}"
-            )
-        })?;
-
-    let deadline = Instant::now() + ISO_TX_SYNC_TIMEOUT;
-    loop {
-        if let Some(publication) = publication {
-            publication.reconcile(condition);
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timeout waiting for CIS 0x{connection_handle:04X}"
-            ));
-        }
-
-        let mut progressed = false;
-        loop {
-            match stack.reports().try_recv() {
-                Ok(HciReport::IsoTxSync(report)) => {
-                    let handle = match report {
-                        IsoTxSyncReport::Complete(snapshot) => {
-                            snapshot.connection_handle
-                        }
-                        IsoTxSyncReport::Failed {
-                            connection_handle,
-                            ..
-                        } => connection_handle,
-                    };
-                    if handle != connection_handle {
-                        return Err(format!(
-                            "unexpected ISO TX sync report for CIS 0x{handle:04X} while waiting for 0x{connection_handle:04X}"
-                        ));
-                    }
-                    return tx_sync_report_result(report);
-                }
-                Ok(report) => {
-                    process_report(
-                        stack,
-                        control,
-                        condition,
-                        scope,
-                        timers,
-                        binding,
-                        cis_raw,
-                        report,
-                    )?;
-                    progressed = true;
-                }
-                Err(RecvError::Empty) => break,
-                Err(RecvError::Disconnected) => {
-                    return Err(
-                        "HCI report lane disconnected during ISO TX sync probe"
-                            .into(),
-                    );
-                }
-            }
-        }
-
-        while let Some(timer) = timers.pop_expired() {
-            process_timer(
-                stack,
-                control,
-                condition,
-                scope,
-                timers,
-                binding,
-                timer,
-            )?;
-            progressed = true;
-        }
-
-        if !progressed {
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-}
-
-fn read_stereo_iso_tx_sync(
-    stack: &HciStack,
-    control: &mut ControlPlane,
-    condition: &mut Condition,
-    scope: ConditionScope,
-    timers: &mut TimerBook,
-    binding: &mut Option<StreamBinding>,
-    cis_raw: &mut StereoCisRawDiagnostics,
-    publication: Option<&ConditionPublicationInbox>,
-) -> Result<StereoIsoTxSyncDiagnostics, String> {
-    let left_handle = cis_raw
-        .left
-        .ok_or_else(|| "left CIS handle unavailable".to_string())?
-        .cis_handle;
-    let right_handle = cis_raw
-        .right
-        .ok_or_else(|| "right CIS handle unavailable".to_string())?
-        .cis_handle;
-
-    // HCI command flow control is intentionally preserved here: issue the
-    // second controller command only after the first Command Complete has
-    // returned through the typed report lane.
-    let left = read_one_iso_tx_sync(
-        stack,
-        control,
-        condition,
-        scope,
-        timers,
-        binding,
-        cis_raw,
-        publication,
-        left_handle,
-    );
-    let right = read_one_iso_tx_sync(
-        stack,
-        control,
-        condition,
-        scope,
-        timers,
-        binding,
-        cis_raw,
-        publication,
-        right_handle,
-    );
-
-    Ok(StereoIsoTxSyncDiagnostics { left, right })
-}
-
 fn read_iso_audit(
     stack: &HciStack,
     control: &mut ControlPlane,
@@ -1015,22 +852,6 @@ impl CurrentPathControlDriver {
 
     pub(crate) fn control_status(&self) -> ControlConditionUpdate {
         self.condition.control_status()
-    }
-
-    pub(crate) fn stereo_iso_tx_sync(
-        &mut self,
-        stack: &HciStack,
-    ) -> Result<StereoIsoTxSyncDiagnostics, String> {
-        read_stereo_iso_tx_sync(
-            stack,
-            &mut self.control,
-            &mut self.condition,
-            self.scope,
-            &mut self.timers,
-            &mut self.binding,
-            &mut self.cis_raw,
-            self.publication.as_ref(),
-        )
     }
 
     pub(crate) fn iso_audit(
