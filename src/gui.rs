@@ -581,6 +581,7 @@ impl eframe::App for RelayGuiApp {
         _frame: &mut eframe::Frame,
     ) {
         self.poll_session();
+        let running = self.session.is_some();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(10.0);
@@ -600,7 +601,6 @@ impl eframe::App for RelayGuiApp {
                     }
                 }
 
-                let running = self.session.is_some();
                 if ui
                     .add_enabled(!running, egui::Button::new("Start"))
                     .clicked()
